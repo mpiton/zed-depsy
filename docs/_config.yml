@@ -1,11 +1,11 @@
-title: Dependi
+title: Depsy
 description: >-
   Language Server Protocol for dependency management and vulnerability scanning
   in Zed Editor. Supports 8 ecosystems with real-time version checking,
   security scanning, and code actions.
 
 url: "https://mpiton.github.io"
-baseurl: "/zed-dependi"
+baseurl: "/zed-depsy"
 
 theme: just-the-docs
 
@@ -29,21 +29,21 @@ mermaid:
 heading_anchors: true
 
 aux_links:
-  GitHub: https://github.com/mpiton/zed-dependi
+  GitHub: https://github.com/mpiton/zed-depsy
   Zed Extensions: https://zed.dev/extensions
 
 aux_links_new_tab: true
 
 footer_content: >-
-  Dependi for Zed is open source under the
-  <a href="https://github.com/mpiton/zed-dependi/blob/main/LICENSE">MIT License</a>.
+  Depsy for Zed is open source under the
+  <a href="https://github.com/mpiton/zed-depsy/blob/main/LICENSE">MIT License</a>.
 
 last_edit_timestamp: true
 last_edit_time_format: "%b %e %Y at %I:%M %p"
 
 gh_edit_link: true
 gh_edit_link_text: "Edit this page on GitHub"
-gh_edit_repository: "https://github.com/mpiton/zed-dependi"
+gh_edit_repository: "https://github.com/mpiton/zed-depsy"
 gh_edit_branch: "main"
 gh_edit_source: docs
 gh_edit_view_mode: "edit"

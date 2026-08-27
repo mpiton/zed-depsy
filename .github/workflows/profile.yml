@@ -66,7 +66,7 @@ jobs:
 
       - name: Build release binary
         run: |
-          cd dependi-lsp
+          cd depsy-lsp
           cargo build --release
 
       - name: Profile parse operations
@@ -74,10 +74,10 @@ jobs:
         run: |
           echo "Profiling parse operations..."
           # Run without flamegraph in CI (perf may not work in containers)
-          ./dependi-lsp/target/release/dependi-lsp profile-parse \
+          ./depsy-lsp/target/release/depsy-lsp profile-parse \
             --file tests/fixtures/cargo_50_deps.toml \
             --iterations ${{ inputs.iterations_parse }}
-          ./dependi-lsp/target/release/dependi-lsp profile-parse \
+          ./depsy-lsp/target/release/depsy-lsp profile-parse \
             --file tests/fixtures/package_100_deps.json \
             --iterations ${{ inputs.iterations_parse }}
 
@@ -85,7 +85,7 @@ jobs:
         if: ${{ inputs.profile_type == 'all' || inputs.profile_type == 'registry' }}
         run: |
           echo "Profiling registry requests..."
-          ./dependi-lsp/target/release/dependi-lsp profile-registry \
+          ./depsy-lsp/target/release/depsy-lsp profile-registry \
             --registry npm \
             --packages "lodash,express,react" \
             --iterations ${{ inputs.iterations_registry }}
@@ -94,7 +94,7 @@ jobs:
         if: ${{ inputs.profile_type == 'all' || inputs.profile_type == 'full' }}
         run: |
           echo "Profiling full workflow..."
-          ./dependi-lsp/target/release/dependi-lsp profile-full \
+          ./depsy-lsp/target/release/depsy-lsp profile-full \
             --file tests/fixtures/package_100_deps.json \
             --iterations ${{ inputs.iterations_full }}
 

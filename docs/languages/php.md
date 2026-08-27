@@ -28,7 +28,7 @@ Support for PHP projects using composer.json.
 
 ### Lockfile Resolution
 
-Dependi reads `composer.lock` to show resolved versions and eliminate false-positive "update available" warnings.
+Depsy reads `composer.lock` to show resolved versions and eliminate false-positive "update available" warnings.
 
 ## Registry
 
@@ -161,7 +161,7 @@ PHP vulnerabilities are sourced from:
 
 ## Tooling Integration
 
-After updating `composer.json` with Dependi:
+After updating `composer.json` with Depsy:
 
 ```bash
 # Update lockfile and install
@@ -194,7 +194,7 @@ If no updates are shown but versions exist:
 For private Packagist/Satis repositories:
 1. Configure repository in `composer.json`
 2. Set up authentication in `auth.json`
-3. Note: Dependi currently uses Packagist only
+3. Note: Depsy currently uses Packagist only
 
 ### Abandoned Package Warning
 

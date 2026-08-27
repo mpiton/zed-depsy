@@ -31,7 +31,7 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            dependi-lsp/target
+            depsy-lsp/target
           key: ${{ runner.os }}-cargo-coverage-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-coverage-
@@ -41,7 +41,7 @@ jobs:
         run: cargo install cargo-tarpaulin
 
       - name: Run tests with coverage
-        working-directory: dependi-lsp
+        working-directory: depsy-lsp
         run: |
           cargo tarpaulin \
             --out Xml \
@@ -57,7 +57,7 @@ jobs:
           retention-days: 30
 
       - name: Check coverage threshold
-        working-directory: dependi-lsp
+        working-directory: depsy-lsp
         run: |
           cargo tarpaulin --out Json --output-dir ../coverage --timeout 300 --skip-clean
           COVERAGE=$(cat ../coverage/tarpaulin-report.json | python3 -c "import sys, json; print(json.load(sys.stdin).get('coverage', 0))")

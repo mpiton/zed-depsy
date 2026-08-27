@@ -2,7 +2,7 @@
 # Generate test coverage report with cargo-tarpaulin
 set -e
 
-cd "$(dirname "$0")/../dependi-lsp"
+cd "$(dirname "$0")/../depsy-lsp"
 
 echo "Running test coverage analysis..."
 

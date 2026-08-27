@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking:** the extension is renamed from Dependi to Depsy at the request
+  of the Dependi (dependi.io) maintainers
+  ([#377](https://github.com/mpiton/zed-dependi/issues/377)). The Zed extension
+  id is now `depsy`, the language server binary is `depsy-lsp`, the settings
+  key is `lsp.depsy`, and the cache lives in `~/.cache/depsy`. Existing users
+  must install `depsy` and uninstall `dependi`. `lsp.dependi.initialization_options`
+  is still read as a fallback so existing configuration keeps working.
+
 ## [1.10.0] - 2026-07-11
 
 ### Added

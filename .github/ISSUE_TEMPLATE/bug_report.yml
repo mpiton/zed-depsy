@@ -10,7 +10,7 @@ body:
   - type: input
     id: version
     attributes:
-      label: Dependi Version
+      label: Depsy Version
       description: Check in Zed's extensions panel
       placeholder: "e.g., 1.1.0"
     validations:

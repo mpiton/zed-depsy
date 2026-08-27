@@ -1,21 +1,21 @@
-# Dependi for Zed
+# Depsy for Zed
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Documentation](https://img.shields.io/badge/docs-latest-blue.svg)](https://mpiton.github.io/zed-dependi/)
-[![GitHub CI](https://github.com/mpiton/zed-dependi/actions/workflows/ci.yml/badge.svg)](https://github.com/mpiton/zed-dependi/actions/workflows/ci.yml)
-[![CodSpeed](https://img.shields.io/endpoint?url=https://codspeed.io/badge.json)](https://codspeed.io/mpiton/zed-dependi?utm_source=badge)
-[![GitHub release](https://img.shields.io/github/v/release/mpiton/zed-dependi)](https://github.com/mpiton/zed-dependi/releases)
-[![Issues](https://img.shields.io/github/issues-raw/mpiton/zed-dependi)](https://github.com/mpiton/zed-dependi/issues)
-[![Pull Requests](https://img.shields.io/github/issues-pr-raw/mpiton/zed-dependi)](https://github.com/mpiton/zed-dependi/pulls)
+[![Documentation](https://img.shields.io/badge/docs-latest-blue.svg)](https://mpiton.github.io/zed-depsy/)
+[![GitHub CI](https://github.com/mpiton/zed-depsy/actions/workflows/ci.yml/badge.svg)](https://github.com/mpiton/zed-depsy/actions/workflows/ci.yml)
+[![CodSpeed](https://img.shields.io/endpoint?url=https://codspeed.io/badge.json)](https://codspeed.io/mpiton/zed-depsy?utm_source=badge)
+[![GitHub release](https://img.shields.io/github/v/release/mpiton/zed-depsy)](https://github.com/mpiton/zed-depsy/releases)
+[![Issues](https://img.shields.io/github/issues-raw/mpiton/zed-depsy)](https://github.com/mpiton/zed-depsy/issues)
+[![Pull Requests](https://img.shields.io/github/issues-pr-raw/mpiton/zed-depsy)](https://github.com/mpiton/zed-depsy/pulls)
 [![Contributor Covenant](https://img.shields.io/badge/Contributor%20Covenant-2.1-4baaaa.svg)](CODE_OF_CONDUCT.md)
 
 Dependency management extension for the [Zed](https://zed.dev) editor.
 
-**Version:** 1.10.0
+**Version:** 2.0.0
 
 ![Demo](docs/demo.gif)
 
-📚 **Documentation**: [Full documentation available here](https://mpiton.github.io/zed-dependi/)
+📚 **Documentation**: [Full documentation available here](https://mpiton.github.io/zed-depsy/)
 
 ## Features
 
@@ -64,7 +64,7 @@ Dependency management extension for the [Zed](https://zed.dev) editor.
 1. Open Zed editor
 2. Press `Cmd+Shift+P` (Mac) or `Ctrl+Shift+P` (Linux/Windows)
 3. Type "extensions" and select `zed: extensions`
-4. Search for "Dependi"
+4. Search for "Depsy"
 5. Click Install
 
 The extension will automatically download and install the language server.
@@ -76,21 +76,21 @@ The extension will automatically download and install the language server.
 
 ```bash
 # Build the LSP
-cd dependi-lsp
+cd depsy-lsp
 cargo build --release
 
 # Build the extension
-cd ../dependi-zed
+cd ../depsy-zed
 cargo build --release --target wasm32-wasip1
 ```
 
-3. In Zed, run `zed: install dev extension` and select the `dependi-zed` directory
+3. In Zed, run `zed: install dev extension` and select the `depsy-zed` directory
 
 ## Project Structure
 
 ```
-zed-dependi/
-├── dependi-lsp/           # Language Server (Rust binary)
+zed-depsy/
+├── depsy-lsp/           # Language Server (Rust binary)
 │   ├── src/
 │   │   ├── main.rs        # Entry point
 │   │   ├── lib.rs         # Library exports
@@ -148,7 +148,7 @@ zed-dependi/
 │   │   │   └── sqlite.rs  # SQLite persistent cache
 │   │   └── vulnerabilities/ # Security scanning via OSV
 │   └── tests/             # Integration tests
-├── dependi-zed/           # Zed Extension (WASM)
+├── depsy-zed/           # Zed Extension (WASM)
 │   ├── extension.toml
 │   └── src/lib.rs
 └── .github/workflows/     # CI/CD
@@ -167,14 +167,14 @@ zed-dependi/
 
 ```bash
 # Build LSP (release)
-cd dependi-lsp
+cd depsy-lsp
 cargo build --release
 
 # Run tests
 cargo test
 
 # Build extension
-cd ../dependi-zed
+cd ../depsy-zed
 cargo build --release --target wasm32-wasip1
 ```
 
@@ -182,7 +182,7 @@ cargo build --release --target wasm32-wasip1
 
 ```bash
 # Run all tests
-cd dependi-lsp
+cd depsy-lsp
 cargo test
 
 # Run specific test modules
@@ -197,7 +197,7 @@ cargo test providers
 
 ```bash
 # Run LSP with debug logs
-cd dependi-lsp
+cd depsy-lsp
 RUST_LOG=debug cargo run
 
 # View Zed logs
@@ -206,12 +206,12 @@ zed --foreground
 
 ## Configuration
 
-Configure Dependi in your Zed `settings.json`:
+Configure Depsy in your Zed `settings.json`:
 
 ```json
 {
   "lsp": {
-    "dependi": {
+    "depsy": {
       "initialization_options": {
         "inlay_hints": {
           "enabled": true,
@@ -254,7 +254,7 @@ Configure Dependi in your Zed `settings.json`:
 
 ### Private Registries
 
-Dependi supports custom registries for enterprise environments.
+Depsy supports custom registries for enterprise environments.
 
 #### Cargo Alternative Registries
 
@@ -263,7 +263,7 @@ Query private Cargo registries (Kellnr, Cloudsmith, Artifactory, etc.) alongside
 ```json
 {
   "lsp": {
-    "dependi": {
+    "depsy": {
       "initialization_options": {
         "registries": {
           "cargo": {
@@ -304,7 +304,7 @@ Configure scoped registries to use private npm packages alongside public ones:
 ```json
 {
   "lsp": {
-    "dependi": {
+    "depsy": {
       "initialization_options": {
         "registries": {
           "npm": {
@@ -335,12 +335,12 @@ For detailed configuration including supported registry types, authentication se
 
 ## CI/CD Integration
 
-The dependi-lsp provides a standalone CLI scan command for integrating vulnerability scanning into your CI/CD pipelines.
+The depsy-lsp provides a standalone CLI scan command for integrating vulnerability scanning into your CI/CD pipelines.
 
 ### CLI Scan Command
 
 ```bash
-dependi-lsp scan --file <path> [options]
+depsy-lsp scan --file <path> [options]
 ```
 
 #### Options
@@ -382,7 +382,7 @@ dependi-lsp scan --file <path> [options]
 #### Summary Output (default)
 
 ```bash
-dependi-lsp scan --file Cargo.toml
+depsy-lsp scan --file Cargo.toml
 ```
 
 ```
@@ -401,7 +401,7 @@ Vulnerability Scan Results for Cargo.toml
 #### JSON Output
 
 ```bash
-dependi-lsp scan --file Cargo.toml --output json
+depsy-lsp scan --file Cargo.toml --output json
 ```
 
 ```json
@@ -430,7 +430,7 @@ dependi-lsp scan --file Cargo.toml --output json
 #### Markdown Output
 
 ```bash
-dependi-lsp scan --file Cargo.toml --output markdown
+depsy-lsp scan --file Cargo.toml --output markdown
 ```
 
 Generates a formatted report with severity table and detailed vulnerability listings.
@@ -459,16 +459,16 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install dependi-lsp
-        run: cargo install --git https://github.com/mpiton/zed-dependi --bin dependi-lsp
+      - name: Install depsy-lsp
+        run: cargo install --git https://github.com/mpiton/zed-depsy --bin depsy-lsp
 
       - name: Scan dependencies
-        run: dependi-lsp scan --file Cargo.toml --min-severity high
+        run: depsy-lsp scan --file Cargo.toml --min-severity high
 
       - name: Generate report
         if: always()
         run: |
-          dependi-lsp scan --file Cargo.toml --output markdown > security-report.md
+          depsy-lsp scan --file Cargo.toml --output markdown > security-report.md
 
       - name: Upload report
         if: always()
@@ -487,8 +487,8 @@ security-scan:
   stage: test
   image: rust:latest
   script:
-    - cargo install --git https://github.com/mpiton/zed-dependi --bin dependi-lsp
-    - dependi-lsp scan --file Cargo.toml --min-severity high
+    - cargo install --git https://github.com/mpiton/zed-depsy --bin depsy-lsp
+    - depsy-lsp scan --file Cargo.toml --min-severity high
   artifacts:
     when: always
     paths:
@@ -521,13 +521,13 @@ security-scan:
 ┌─────────────────────────────────────────────────────────────┐
 │                         Zed Editor                          │
 ├─────────────────────────────────────────────────────────────┤
-│                    dependi-zed (WASM)                       │
+│                    depsy-zed (WASM)                       │
 │  - Downloads and launches the LSP binary                    │
 └─────────────────────────────────────────────────────────────┘
                               │ stdio (JSON-RPC)
                               ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                   dependi-lsp (Binary)                      │
+│                   depsy-lsp (Binary)                      │
 ├─────────────────────────────────────────────────────────────┤
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐      │
 │  │   Parsers    │  │  Providers   │  │  Registries  │      │
@@ -549,7 +549,7 @@ security-scan:
 │  ┌──────────────────────────────────────────────────────┐  │
 │  │                    Cache Layer                        │  │
 │  │  • Memory cache (fast access)                        │  │
-│  │  • SQLite cache (persistent, ~/.cache/dependi/)      │  │
+│  │  • SQLite cache (persistent, ~/.cache/depsy/)      │  │
 │  └──────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -564,7 +564,7 @@ security-scan:
 - Extension seems inactive
 
 **Solutions:**
-1. Check Zed's extension panel to verify Dependi is installed and enabled
+1. Check Zed's extension panel to verify Depsy is installed and enabled
 2. View Zed logs for errors: run `zed --foreground` from terminal
 3. Reinstall the extension from Zed Extensions marketplace
 4. Check if firewall/proxy is blocking network requests to package registries
@@ -580,15 +580,15 @@ security-scan:
 1. Clear the cache directory and restart Zed:
    ```bash
    # Linux
-   rm -rf ~/.cache/dependi/
+   rm -rf ~/.cache/depsy/
 
    # macOS
-   rm -rf ~/Library/Caches/dependi/
+   rm -rf ~/Library/Caches/depsy/
 
    # Windows
-   rmdir /s %LOCALAPPDATA%\dependi
+   rmdir /s %LOCALAPPDATA%\depsy
    ```
-2. Update to the latest Dependi version
+2. Update to the latest Depsy version
 3. Check if the issue occurs with a specific dependency file
 4. File a bug report with reproduction steps
 
@@ -603,7 +603,7 @@ security-scan:
 1. Cache automatically refreshes after 1 hour (default TTL)
 2. Clear cache manually to force refresh:
    ```bash
-   rm -rf ~/.cache/dependi/
+   rm -rf ~/.cache/depsy/
    ```
 3. Restart Zed after clearing cache
 4. Verify the registry is accessible (try visiting crates.io, npmjs.com, etc.)
@@ -629,7 +629,7 @@ security-scan:
 - Works on some networks but not others
 
 **Solutions:**
-1. Configure system proxy settings (Dependi uses system proxy)
+1. Configure system proxy settings (Depsy uses system proxy)
 2. Ensure registry URLs are allowed through corporate firewall:
    - `https://crates.io`
    - `https://registry.npmjs.org`
@@ -655,7 +655,7 @@ security-scan:
    ```json
    {
      "lsp": {
-       "dependi": {
+       "depsy": {
          "initialization_options": {
            // your settings here
          }
@@ -670,12 +670,12 @@ security-scan:
 
 ### How does the cache work?
 
-Dependi uses a hybrid caching system:
+Depsy uses a hybrid caching system:
 - **Memory cache**: Fast access during the current session
 - **SQLite cache**: Persistent storage in the system cache directory:
-  - Linux: `~/.cache/dependi/cache.db`
-  - macOS: `~/Library/Caches/dependi/cache.db`
-  - Windows: `%LOCALAPPDATA%\dependi\cache.db`
+  - Linux: `~/.cache/depsy/cache.db`
+  - macOS: `~/Library/Caches/depsy/cache.db`
+  - Windows: `%LOCALAPPDATA%\depsy\cache.db`
 
 Cache entries expire after 1 hour by default (configurable via `cache.ttl_secs`). Vulnerability data is cached for 6 hours. When you open a dependency file, cached data is used immediately while fresh data is fetched in the background.
 
@@ -684,13 +684,13 @@ Cache entries expire after 1 hour by default (configurable via `cache.ttl_secs`)
 Delete the cache directory:
 ```bash
 # Linux
-rm -rf ~/.cache/dependi/
+rm -rf ~/.cache/depsy/
 
 # macOS
-rm -rf ~/Library/Caches/dependi/
+rm -rf ~/Library/Caches/depsy/
 
 # Windows
-rmdir /s %LOCALAPPDATA%\dependi
+rmdir /s %LOCALAPPDATA%\depsy
 ```
 Then restart Zed. The cache will rebuild as you open dependency files.
 
@@ -700,7 +700,7 @@ Yes, with limitations. If packages were previously cached, their information rem
 ```json
 {
   "lsp": {
-    "dependi": {
+    "depsy": {
       "initialization_options": {
         "cache": {
           "ttl_secs": 86400
@@ -727,7 +727,7 @@ Yes, with limitations. If packages were previously cached, their information rem
 
 ### What data does the extension collect?
 
-Dependi:
+Depsy:
 - Fetches package metadata from public registries
 - Queries OSV.dev API for vulnerability information
 - Caches all data locally on your machine
@@ -736,7 +736,7 @@ Dependi:
 
 ### How does vulnerability scanning work?
 
-Dependi queries the [OSV.dev](https://osv.dev) API (Google's Open Source Vulnerability database) for each of your dependencies. The results show:
+Depsy queries the [OSV.dev](https://osv.dev) API (Google's Open Source Vulnerability database) for each of your dependencies. The results show:
 - **Severity levels**: Critical, High, Medium, Low
 - **CVE/Advisory IDs** in hover tooltips
 - **Diagnostic markers** in the editor
@@ -745,7 +745,7 @@ Configure minimum severity level with `security.min_severity`:
 ```json
 {
   "lsp": {
-    "dependi": {
+    "depsy": {
       "initialization_options": {
         "security": {
           "min_severity": "high"
@@ -762,7 +762,7 @@ Use `initialization_options` in your Zed settings:
 ```json
 {
   "lsp": {
-    "dependi": {
+    "depsy": {
       "initialization_options": {
         "inlay_hints": { "enabled": false },
         "diagnostics": { "enabled": false },
@@ -779,7 +779,7 @@ Use the `ignore` setting with glob patterns:
 ```json
 {
   "lsp": {
-    "dependi": {
+    "depsy": {
       "initialization_options": {
         "ignore": ["internal-*", "my-private-pkg", "@company/*"]
       }
@@ -804,7 +804,7 @@ Yes! Even with inlay hints disabled, diagnostics will highlight outdated depende
 ```json
 {
   "lsp": {
-    "dependi": {
+    "depsy": {
       "initialization_options": {
         "diagnostics": { "enabled": true }
       }
@@ -815,9 +815,9 @@ Yes! Even with inlay hints disabled, diagnostics will highlight outdated depende
 
 ### How do I report a bug or request a feature?
 
-1. Check [existing issues](https://github.com/mpiton/zed-dependi/issues) first
+1. Check [existing issues](https://github.com/mpiton/zed-depsy/issues) first
 2. Open a new issue with:
-   - Dependi version
+   - Depsy version
    - Zed version
    - Operating system
    - Steps to reproduce

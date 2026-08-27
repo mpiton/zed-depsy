@@ -1,6 +1,6 @@
-# Contributing to Dependi for Zed
+# Contributing to Depsy for Zed
 
-Thank you for your interest in contributing to Dependi! This extension helps developers manage dependencies directly in the Zed editor, and we welcome contributions from the community.
+Thank you for your interest in contributing to Depsy! This extension helps developers manage dependencies directly in the Zed editor, and we welcome contributions from the community.
 
 ## Types of Contributions
 
@@ -23,32 +23,32 @@ We welcome:
 
 1. **Fork and clone the repository**
    ```bash
-   git clone https://github.com/YOUR_USERNAME/zed-dependi.git
-   cd zed-dependi
+   git clone https://github.com/YOUR_USERNAME/zed-depsy.git
+   cd zed-depsy
    ```
 
 2. **Build the LSP**
    ```bash
-   cd dependi-lsp
+   cd depsy-lsp
    cargo build --release
    ```
 
 3. **Build the extension**
    ```bash
-   cd ../dependi-zed
+   cd ../depsy-zed
    cargo build --release --target wasm32-wasip1
    ```
 
 4. **Install as dev extension in Zed**
    - Open Zed
    - Run command: `zed: install dev extension`
-   - Select the `dependi-zed` directory
+   - Select the `depsy-zed` directory
 
 ### Project Structure
 
 ```text
-zed-dependi/
-├── dependi-lsp/           # Language Server (Rust binary)
+zed-depsy/
+├── depsy-lsp/           # Language Server (Rust binary)
 │   ├── src/
 │   │   ├── main.rs        # Entry point
 │   │   ├── lib.rs         # Library exports
@@ -65,7 +65,7 @@ zed-dependi/
 │   │   ├── cache/         # Caching layer (memory + SQLite)
 │   │   └── vulnerabilities/ # Security scanning via OSV
 │   └── tests/             # Integration tests
-├── dependi-zed/           # Zed Extension (WASM)
+├── depsy-zed/           # Zed Extension (WASM)
 │   ├── extension.toml     # Extension metadata
 │   └── src/lib.rs         # Download + launch LSP
 └── .github/workflows/     # CI/CD
@@ -84,7 +84,7 @@ zed-dependi/
 
 4. **Run tests**
    ```bash
-   cd dependi-lsp
+   cd depsy-lsp
    cargo test
    ```
 
@@ -138,7 +138,7 @@ To add support for a new package manager/language:
 
 ### 1. Create a Parser
 
-Create a new file in `dependi-lsp/src/parsers/`:
+Create a new file in `depsy-lsp/src/parsers/`:
 
 ```rust
 // parsers/mylang.rs
@@ -152,7 +152,7 @@ pub fn parse(content: &str) -> Vec<Dependency> {
 
 ### 2. Create a Registry Client
 
-Create a new file in `dependi-lsp/src/registries/`:
+Create a new file in `depsy-lsp/src/registries/`:
 
 ```rust
 // registries/myregistry.rs
@@ -174,7 +174,7 @@ impl Registry for MyRegistry {
 
 ### 3. Register the Language
 
-Update `dependi-lsp/src/lib.rs` and `backend.rs` to:
+Update `depsy-lsp/src/lib.rs` and `backend.rs` to:
 - Add the new parser to the file type detection
 - Register the registry client
 - Map the ecosystem for vulnerability scanning
@@ -194,7 +194,7 @@ Update `dependi-lsp/src/lib.rs` and `backend.rs` to:
 ### Running Tests
 
 ```bash
-cd dependi-lsp
+cd depsy-lsp
 
 # Run all tests
 cargo test
@@ -243,7 +243,7 @@ cargo install cargo-fuzz
 Or manually with cargo-fuzz:
 
 ```bash
-cd dependi-lsp/fuzz
+cd depsy-lsp/fuzz
 
 # Build all fuzz targets
 cargo +nightly fuzz build
@@ -269,7 +269,7 @@ cargo +nightly fuzz run fuzz_cargo -- -max_total_time=60
 
 If fuzzing finds a crash, the input is saved to `fuzz/artifacts/`.
 
-From the `dependi-lsp/fuzz` directory:
+From the `depsy-lsp/fuzz` directory:
 
 ```bash
 # View crash inputs
@@ -353,10 +353,10 @@ When preparing a release, move items from `[Unreleased]` to the new version sect
 
 1. **Update version numbers**
    ```bash
-   # Update dependi-lsp/Cargo.toml
+   # Update depsy-lsp/Cargo.toml
    version = "X.Y.Z"
 
-   # Update dependi-zed/extension.toml
+   # Update depsy-zed/extension.toml
    version = "X.Y.Z"
    ```
 
@@ -379,7 +379,7 @@ When preparing a release, move items from `[Unreleased]` to the new version sect
    - Uploads platform-specific archives
 
 5. **Verify the release**
-   - Check [GitHub Releases](https://github.com/mpiton/zed-dependi/releases)
+   - Check [GitHub Releases](https://github.com/mpiton/zed-depsy/releases)
    - Verify all platform binaries are attached
    - Test installation from release
 
@@ -387,11 +387,11 @@ When preparing a release, move items from `[Unreleased]` to the new version sect
 
 ```bash
 # Build LSP (release)
-cd dependi-lsp
+cd depsy-lsp
 cargo build --release
 
 # Build extension (WASM)
-cd dependi-zed
+cd depsy-zed
 cargo build --release --target wasm32-wasip1
 
 # Run full CI checks locally
@@ -419,7 +419,7 @@ the repository root.
 
 When reporting bugs, please include:
 
-1. **Dependi version** (check Zed extensions panel)
+1. **Depsy version** (check Zed extensions panel)
 2. **Zed version**
 3. **Operating system** and version
 4. **Steps to reproduce**
@@ -461,7 +461,7 @@ Include:
 
 ## License
 
-By contributing to Dependi, you agree that your contributions will be licensed under the MIT License.
+By contributing to Depsy, you agree that your contributions will be licensed under the MIT License.
 
 ## Questions?
 
@@ -469,4 +469,4 @@ By contributing to Dependi, you agree that your contributions will be licensed u
 - Check existing issues first
 - Be specific and provide context
 
-Thank you for contributing to Dependi!
+Thank you for contributing to Depsy!

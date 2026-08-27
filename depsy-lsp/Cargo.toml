@@ -1,0 +1,66 @@
+[package]
+name = "depsy-lsp"
+version = "2.0.0"
+edition = "2024"
+rust-version = "1.94"
+license = "MIT"
+description = "Language server for dependency management in Zed"
+authors = ["Mathieu"]
+
+[lib]
+name = "depsy_lsp"
+path = "src/lib.rs"
+
+[[bin]]
+name = "depsy-lsp"
+path = "src/main.rs"
+
+[dependencies]
+tower-lsp = "0.20"
+tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros", "io-util", "io-std", "fs", "sync", "time"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+reqwest = { version = "0.13.4", features = ["json", "rustls"], default-features = false }
+dashmap = "6.2.1"
+toml = "1.0.7"
+semver = "1.0.27"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+anyhow = "1.0.103"
+rusqlite = { version = "0.40", features = ["bundled"] }
+r2d2 = "0.8"
+dirs = "6"
+chrono = { version = "0.4.45", features = ["serde"] }
+clap = { version = "4.5.60", features = ["derive"] }
+futures = "0.3.32"
+taplo = "0.14"
+hashbrown = { version = "0.17.1", features = ["serde"] }
+quick-xml = "0.41.0"
+url = "2.5"
+async-trait = "0.1"
+json-spanned-value = "0.2.2"
+
+[dev-dependencies]
+serial_test = "3"
+wiremock = "0.6"
+tempfile = "3"
+criterion = { version = "4.6.0", package = "codspeed-criterion-compat", features = ["html_reports"] }
+tokio = { version = "1.52.3", features = ["net"] }
+
+[[bench]]
+name = "benchmarks"
+harness = false
+
+[lints.clippy]
+uninlined_format_args = "warn"
+unnecessary_debug_formatting = "warn"
+disallowed_types = "warn"
+disallowed_methods = "warn"
+
+[lints.rustdoc]
+broken_intra_doc_links = "deny"
+private_intra_doc_links = "warn"
+invalid_codeblock_attributes = "deny"
+invalid_html_tags = "deny"
+invalid_rust_codeblocks = "deny"
+bare_urls = "deny"

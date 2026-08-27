@@ -8,7 +8,7 @@ description: "Common issues and solutions"
 # Troubleshooting
 {: .no_toc }
 
-Solutions for common issues with Dependi.
+Solutions for common issues with Depsy.
 {: .fs-6 .fw-300 }
 
 ## Table of contents
@@ -28,7 +28,7 @@ Solutions for common issues with Dependi.
 
 **Solutions:**
 
-1. Check Zed's extension panel to verify Dependi is installed and enabled
+1. Check Zed's extension panel to verify Depsy is installed and enabled
 2. View Zed logs for errors:
    ```bash
    zed --foreground
@@ -48,15 +48,15 @@ Solutions for common issues with Dependi.
 1. Clear the cache directory and restart Zed:
    ```bash
    # Linux
-   rm -rf ~/.cache/dependi/
+   rm -rf ~/.cache/depsy/
 
    # macOS
-   rm -rf ~/Library/Caches/dependi/
+   rm -rf ~/Library/Caches/depsy/
 
    # Windows
-   rmdir /s %LOCALAPPDATA%\dependi
+   rmdir /s %LOCALAPPDATA%\depsy
    ```
-2. Update to the latest Dependi version
+2. Update to the latest Depsy version
 3. Check if the issue occurs with a specific dependency file
 4. File a bug report with reproduction steps
 
@@ -72,7 +72,7 @@ Solutions for common issues with Dependi.
 1. Cache automatically refreshes after 1 hour (default TTL)
 2. Clear cache manually to force refresh:
    ```bash
-   rm -rf ~/.cache/dependi/
+   rm -rf ~/.cache/depsy/
    ```
 3. Restart Zed after clearing cache
 4. Verify the registry is accessible (try visiting crates.io, npmjs.com, etc.)
@@ -100,7 +100,7 @@ Solutions for common issues with Dependi.
 
 **Solutions:**
 
-1. Configure system proxy settings (Dependi uses system proxy)
+1. Configure system proxy settings (Depsy uses system proxy)
 2. Ensure registry URLs are allowed through corporate firewall:
    - `https://crates.io`
    - `https://registry.npmjs.org`
@@ -127,7 +127,7 @@ Solutions for common issues with Dependi.
    ```json
    {
      "lsp": {
-       "dependi": {
+       "depsy": {
          "initialization_options": {
            // your settings here
          }
@@ -199,9 +199,9 @@ This shows:
 
 If you can't resolve an issue:
 
-1. Check [existing issues](https://github.com/mpiton/zed-dependi/issues)
+1. Check [existing issues](https://github.com/mpiton/zed-depsy/issues)
 2. Open a new issue with:
-   - Dependi version
+   - Depsy version
    - Zed version
    - Operating system
    - Steps to reproduce

@@ -10,7 +10,7 @@
 set -e
 
 SCRIPT_DIR="$(dirname "$0")"
-cd "$SCRIPT_DIR/dependi-lsp"
+cd "$SCRIPT_DIR/depsy-lsp"
 
 BASELINE_FLAG=""
 FILTER=""

@@ -46,7 +46,7 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            dependi-lsp/fuzz/target
+            depsy-lsp/fuzz/target
           key: ${{ runner.os }}-fuzz-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-fuzz-
@@ -55,12 +55,12 @@ jobs:
         run: cargo install cargo-fuzz
 
       - name: Build fuzz targets
-        working-directory: dependi-lsp/fuzz
+        working-directory: depsy-lsp/fuzz
         run: cargo +nightly fuzz build
 
       - name: Run fuzz target
         if: ${{ github.event.inputs.target == '' || github.event.inputs.target == null || github.event.inputs.target == matrix.target }}
-        working-directory: dependi-lsp/fuzz
+        working-directory: depsy-lsp/fuzz
         run: |
           DURATION="${{ github.event.inputs.duration || '300' }}"
           echo "Fuzzing fuzz_${{ matrix.target }} for ${DURATION}s..."
@@ -71,7 +71,7 @@ jobs:
             || true
 
       - name: Check for crashes
-        working-directory: dependi-lsp/fuzz
+        working-directory: depsy-lsp/fuzz
         run: |
           # Check for actual crash files (not just directory existence)
           if ls artifacts/fuzz_${{ matrix.target }}/crash-* 1>/dev/null 2>&1; then
@@ -87,12 +87,12 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: fuzz-crashes-${{ matrix.target }}
-          path: dependi-lsp/fuzz/artifacts/
+          path: depsy-lsp/fuzz/artifacts/
           retention-days: 30
 
       - name: Upload corpus
         uses: actions/upload-artifact@v7
         with:
           name: fuzz-corpus-${{ matrix.target }}
-          path: dependi-lsp/fuzz/corpus/fuzz_${{ matrix.target }}/
+          path: depsy-lsp/fuzz/corpus/fuzz_${{ matrix.target }}/
           retention-days: 7

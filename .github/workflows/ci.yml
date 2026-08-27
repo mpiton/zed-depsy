@@ -26,22 +26,22 @@ jobs:
 
       - name: Check formatting
         run: |
-          cd dependi-lsp
+          cd depsy-lsp
           cargo fmt --check
 
       - name: Clippy
         run: |
-          cd dependi-lsp
+          cd depsy-lsp
           cargo clippy -- -D warnings
 
       - name: Run tests
         run: |
-          cd dependi-lsp
+          cd depsy-lsp
           cargo test
 
       - name: Check rustdoc
         run: |
-          cd dependi-lsp
+          cd depsy-lsp
           cargo doc --no-deps
 
   security-audit:
@@ -59,7 +59,7 @@ jobs:
         uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          working-directory: dependi-lsp
+          working-directory: depsy-lsp
 
   build-extension:
     runs-on: ubuntu-latest
@@ -76,7 +76,7 @@ jobs:
 
       - name: Build extension
         run: |
-          cd dependi-zed
+          cd depsy-zed
           cargo build --release --target wasm32-wasip1
 
   docs-validation:
@@ -102,7 +102,7 @@ jobs:
       - name: Build documentation
         run: |
           cd docs
-          bundle exec jekyll build --baseurl "/zed-dependi"
+          bundle exec jekyll build --baseurl "/zed-depsy"
         env:
           JEKYLL_ENV: production
 

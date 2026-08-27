@@ -104,7 +104,7 @@ Bulk updates apply all changes at once. Review the changes carefully, especially
 
 ## Smart Defaults
 
-Dependi prioritizes updates intelligently:
+Depsy prioritizes updates intelligently:
 
 1. **Patch updates** are shown first (safest)
 2. **Minor updates** are offered next
@@ -128,7 +128,7 @@ The same safety rules apply to individual and bulk updates:
 | `"[1.0]"` | Update to 2.0 | `"[2.0]"` |
 
 Operators, spacing, exact-version wrappers, and range-shaping precision are
-retained when Dependi can prove that replacing the single version anchor is
+retained when Depsy can prove that replacing the single version anchor is
 safe. Go module updates preserve exactly one existing `v` prefix. Unprefixed,
 multiply-prefixed, or otherwise unsupported prefix shapes receive no automatic
 update.
@@ -136,7 +136,7 @@ update.
 Compound ranges and indirect versions do not receive automatic update actions.
 This includes multiple bounds, unions, wildcards, strict or exclusion
 constraints, aliases, workspace protocols, pnpm catalogs, Maven properties,
-URLs, and other unknown forms. Dependi omits the update instead of replacing
+URLs, and other unknown forms. Depsy omits the update instead of replacing
 the declaration with a bare version; other actions such as **Ignore package**
 remain available.
 
@@ -191,6 +191,6 @@ pip install -r requirements.txt
 
 ### Wrong Version Suggested
 
-1. Clear cache: `rm -rf ~/.cache/dependi/`
+1. Clear cache: `rm -rf ~/.cache/depsy/`
 2. Restart Zed
 3. Check if registry has newer version

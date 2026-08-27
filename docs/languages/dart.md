@@ -28,7 +28,7 @@ Support for Dart and Flutter projects using pubspec.yaml.
 
 ### Lockfile Resolution
 
-Dependi reads `pubspec.lock` to show resolved versions and eliminate false-positive "update available" warnings.
+Depsy reads `pubspec.lock` to show resolved versions and eliminate false-positive "update available" warnings.
 
 ## Registry
 
@@ -176,7 +176,7 @@ dev_dependencies:
 
 ## Tooling Integration
 
-After updating `pubspec.yaml` with Dependi:
+After updating `pubspec.yaml` with Depsy:
 
 ```bash
 # Dart

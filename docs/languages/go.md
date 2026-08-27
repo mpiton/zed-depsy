@@ -28,7 +28,7 @@ Support for Go projects using go.mod.
 
 ### Lockfile Resolution
 
-Dependi reads `go.sum` to show resolved versions and eliminate false-positive "update available" warnings.
+Depsy reads `go.sum` to show resolved versions and eliminate false-positive "update available" warnings.
 
 ## Registry
 
@@ -94,7 +94,7 @@ require (
 
 Go module paths use special encoding:
 - Uppercase letters are escaped: `Azure` → `!azure`
-- Dependi handles this automatically
+- Depsy handles this automatically
 
 ### Pseudo-versions
 
@@ -155,7 +155,7 @@ require (
 
 ## Tooling Integration
 
-After updating `go.mod` with Dependi:
+After updating `go.mod` with Depsy:
 
 ```bash
 # Update go.sum

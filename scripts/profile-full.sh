@@ -35,12 +35,12 @@ fi
 
 # Build release binary first
 echo "Building release binary..."
-cargo build --release --package dependi-lsp
+cargo build --release --package depsy-lsp
 
 # Generate flame graph
 echo "Generating flame graph..."
 flamegraph -o flamegraph-full.svg -- \
-    ./target/release/dependi-lsp profile-full \
+    ./target/release/depsy-lsp profile-full \
     --file "$FILE" \
     --iterations "$ITERATIONS"
 

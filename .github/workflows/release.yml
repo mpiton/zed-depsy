@@ -18,24 +18,24 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            artifact_name: dependi-lsp
-            asset_name: dependi-lsp-x86_64-unknown-linux-gnu
+            artifact_name: depsy-lsp
+            asset_name: depsy-lsp-x86_64-unknown-linux-gnu
           - os: macos-latest
             target: x86_64-apple-darwin
-            artifact_name: dependi-lsp
-            asset_name: dependi-lsp-x86_64-apple-darwin
+            artifact_name: depsy-lsp
+            asset_name: depsy-lsp-x86_64-apple-darwin
           - os: macos-latest
             target: aarch64-apple-darwin
-            artifact_name: dependi-lsp
-            asset_name: dependi-lsp-aarch64-apple-darwin
+            artifact_name: depsy-lsp
+            asset_name: depsy-lsp-aarch64-apple-darwin
           - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
-            artifact_name: dependi-lsp
-            asset_name: dependi-lsp-aarch64-unknown-linux-gnu
+            artifact_name: depsy-lsp
+            asset_name: depsy-lsp-aarch64-unknown-linux-gnu
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            artifact_name: dependi-lsp.exe
-            asset_name: dependi-lsp-x86_64-pc-windows-msvc
+            artifact_name: depsy-lsp.exe
+            asset_name: depsy-lsp-x86_64-pc-windows-msvc
 
     runs-on: ${{ matrix.os }}
 
@@ -60,19 +60,19 @@ jobs:
       - name: Build (Linux - GLIBC 2.17)
         if: contains(matrix.target, 'linux')
         run: |
-          cd dependi-lsp
+          cd depsy-lsp
           cargo zigbuild --release --target ${{ matrix.target }}.2.17
 
       - name: Build (macOS / Windows)
         if: ${{ !contains(matrix.target, 'linux') }}
         run: |
-          cd dependi-lsp
+          cd depsy-lsp
           cargo build --release --target ${{ matrix.target }}
 
       - name: Verify GLIBC compatibility
         if: contains(matrix.target, 'linux')
         run: |
-          binary="dependi-lsp/target/${{ matrix.target }}/release/dependi-lsp"
+          binary="depsy-lsp/target/${{ matrix.target }}/release/depsy-lsp"
           max_glibc=$(readelf -V "$binary" 2>/dev/null | grep -oP 'GLIBC_\K[0-9.]+' | sort -V | tail -1)
           if [ -z "$max_glibc" ]; then
             echo "::error::Could not determine GLIBC requirement from binary (no GLIBC_ symbols found)"
@@ -88,7 +88,7 @@ jobs:
       - name: Package (Unix)
         if: matrix.os != 'windows-latest'
         run: |
-          cd dependi-lsp/target/${{ matrix.target }}/release
+          cd depsy-lsp/target/${{ matrix.target }}/release
           sha256sum ${{ matrix.artifact_name }} > ${{ matrix.asset_name }}.binary.sha256
           tar -czvf ${{ matrix.asset_name }}.tar.gz ${{ matrix.artifact_name }}
           mv ${{ matrix.asset_name }}.tar.gz ../../../../
@@ -97,7 +97,7 @@ jobs:
       - name: Package (Windows)
         if: matrix.os == 'windows-latest'
         run: |
-          cd dependi-lsp/target/${{ matrix.target }}/release
+          cd depsy-lsp/target/${{ matrix.target }}/release
           sha256sum ${{ matrix.artifact_name }} > ${{ matrix.asset_name }}.binary.sha256
           7z a ${{ matrix.asset_name }}.zip ${{ matrix.artifact_name }}
           mv ${{ matrix.asset_name }}.zip ../../../../

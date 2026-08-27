@@ -8,7 +8,7 @@ description: "Command-line interface for CI/CD integration"
 # CLI Usage
 {: .no_toc }
 
-Use dependi-lsp in your CI/CD pipelines for automated vulnerability scanning.
+Use depsy-lsp in your CI/CD pipelines for automated vulnerability scanning.
 {: .fs-6 .fw-300 }
 
 ## Table of contents
@@ -21,12 +21,12 @@ Use dependi-lsp in your CI/CD pipelines for automated vulnerability scanning.
 
 ## Overview
 
-The `dependi-lsp` binary includes a standalone CLI scan command for integrating vulnerability scanning into your CI/CD pipelines.
+The `depsy-lsp` binary includes a standalone CLI scan command for integrating vulnerability scanning into your CI/CD pipelines.
 
 ## Scan Command
 
 ```bash
-dependi-lsp scan --file <path> [options]
+depsy-lsp scan --file <path> [options]
 ```
 
 ### Options
@@ -71,7 +71,7 @@ The CLI `scan` subcommand only routes the files listed above. Inside the LSP
 ### Summary (Default)
 
 ```bash
-dependi-lsp scan --file Cargo.toml
+depsy-lsp scan --file Cargo.toml
 ```
 
 ```text
@@ -90,7 +90,7 @@ Vulnerability Scan Results for Cargo.toml
 ### JSON Output
 
 ```bash
-dependi-lsp scan --file Cargo.toml --output json
+depsy-lsp scan --file Cargo.toml --output json
 ```
 
 ```json
@@ -119,7 +119,7 @@ dependi-lsp scan --file Cargo.toml --output json
 ### Markdown Output
 
 ```bash
-dependi-lsp scan --file Cargo.toml --output markdown
+depsy-lsp scan --file Cargo.toml --output markdown
 ```
 
 Generates a formatted report with severity tables and detailed vulnerability listings, suitable for PR comments or documentation.
@@ -148,16 +148,16 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install dependi-lsp
-        run: cargo install --git https://github.com/mpiton/zed-dependi --bin dependi-lsp
+      - name: Install depsy-lsp
+        run: cargo install --git https://github.com/mpiton/zed-depsy --bin depsy-lsp
 
       - name: Scan dependencies
-        run: dependi-lsp scan --file Cargo.toml --min-severity high
+        run: depsy-lsp scan --file Cargo.toml --min-severity high
 
       - name: Generate report
         if: always()
         run: |
-          dependi-lsp scan --file Cargo.toml --output markdown > security-report.md
+          depsy-lsp scan --file Cargo.toml --output markdown > security-report.md
 
       - name: Upload report
         if: always()
@@ -176,8 +176,8 @@ security-scan:
   stage: test
   image: rust:latest
   script:
-    - cargo install --git https://github.com/mpiton/zed-dependi --bin dependi-lsp
-    - dependi-lsp scan --file Cargo.toml --min-severity high
+    - cargo install --git https://github.com/mpiton/zed-depsy --bin depsy-lsp
+    - depsy-lsp scan --file Cargo.toml --min-severity high
   artifacts:
     when: always
     paths:
@@ -194,9 +194,9 @@ For monorepos with multiple dependency files:
 ```yaml
 - name: Scan all dependency files
   run: |
-    dependi-lsp scan --file Cargo.toml --min-severity high
-    dependi-lsp scan --file frontend/package.json --min-severity high
-    dependi-lsp scan --file backend/requirements.txt --min-severity high
+    depsy-lsp scan --file Cargo.toml --min-severity high
+    depsy-lsp scan --file frontend/package.json --min-severity high
+    depsy-lsp scan --file backend/requirements.txt --min-severity high
 ```
 
 ### PR Comment with Results
@@ -224,7 +224,7 @@ For monorepos with multiple dependency files:
 Use `--min-severity high` to fail builds only on serious vulnerabilities:
 
 ```bash
-dependi-lsp scan --file Cargo.toml --min-severity high
+depsy-lsp scan --file Cargo.toml --min-severity high
 ```
 
 ### Generate Reports for Audit
@@ -232,8 +232,8 @@ dependi-lsp scan --file Cargo.toml --min-severity high
 Always generate reports for audit trails:
 
 ```bash
-dependi-lsp scan --file Cargo.toml --output json > scan-results.json
-dependi-lsp scan --file Cargo.toml --output markdown > scan-report.md
+depsy-lsp scan --file Cargo.toml --output json > scan-results.json
+depsy-lsp scan --file Cargo.toml --output markdown > scan-report.md
 ```
 
 ### Scheduled Scans
@@ -251,7 +251,7 @@ on:
 For informational low-severity issues:
 
 ```bash
-dependi-lsp scan --file Cargo.toml --fail-on-vulns=false
+depsy-lsp scan --file Cargo.toml --fail-on-vulns=false
 ```
 
 ### Scan Lock Files When Available
@@ -261,21 +261,21 @@ For more accurate results, scan after installing dependencies:
 ```bash
 # npm
 npm ci
-dependi-lsp scan --file package.json
+depsy-lsp scan --file package.json
 
 # Cargo
 cargo fetch
-dependi-lsp scan --file Cargo.toml
+depsy-lsp scan --file Cargo.toml
 ```
 
 ## Troubleshooting
 
 ### Command Not Found
 
-Ensure dependi-lsp is in your PATH:
+Ensure depsy-lsp is in your PATH:
 
 ```bash
-cargo install --git https://github.com/mpiton/zed-dependi --bin dependi-lsp
+cargo install --git https://github.com/mpiton/zed-depsy --bin depsy-lsp
 ```
 
 ### Network Errors

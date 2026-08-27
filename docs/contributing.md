@@ -2,20 +2,20 @@
 title: Contributing
 layout: default
 nav_order: 9
-description: "How to contribute to Dependi"
+description: "How to contribute to Depsy"
 ---
 
 # Contributing
 {: .no_toc }
 
-Guidelines for contributing to Dependi.
+Guidelines for contributing to Depsy.
 {: .fs-6 .fw-300 }
 
 ---
 
 ## Get Involved
 
-We welcome contributions! See the full [Contributing Guide](https://github.com/mpiton/zed-dependi/blob/main/CONTRIBUTING.md) for detailed information on:
+We welcome contributions! See the full [Contributing Guide](https://github.com/mpiton/zed-depsy/blob/main/CONTRIBUTING.md) for detailed information on:
 
 - Setting up your development environment
 - Code style and standards
@@ -24,10 +24,10 @@ We welcome contributions! See the full [Contributing Guide](https://github.com/m
 
 ## Quick Links
 
-- [GitHub Repository](https://github.com/mpiton/zed-dependi)
-- [Issue Tracker](https://github.com/mpiton/zed-dependi/issues)
-- [Pull Requests](https://github.com/mpiton/zed-dependi/pulls)
-- [Changelog](https://github.com/mpiton/zed-dependi/blob/main/CHANGELOG.md)
+- [GitHub Repository](https://github.com/mpiton/zed-depsy)
+- [Issue Tracker](https://github.com/mpiton/zed-depsy/issues)
+- [Pull Requests](https://github.com/mpiton/zed-depsy/pulls)
+- [Changelog](https://github.com/mpiton/zed-depsy/blob/main/CHANGELOG.md)
 
 ## Types of Contributions
 
@@ -50,26 +50,26 @@ We welcome:
 
 ```bash
 # Clone
-git clone https://github.com/YOUR_USERNAME/zed-dependi.git
-cd zed-dependi
+git clone https://github.com/YOUR_USERNAME/zed-depsy.git
+cd zed-depsy
 
 # Build LSP
-cd dependi-lsp
+cd depsy-lsp
 cargo build --release
 
 # Build extension
-cd ../dependi-zed
+cd ../depsy-zed
 cargo build --release --target wasm32-wasip1
 
 # Install as dev extension in Zed
 # Run: zed: install dev extension
-# Select: dependi-zed directory
+# Select: depsy-zed directory
 ```
 
 ### Running Tests
 
 ```bash
-cd dependi-lsp
+cd depsy-lsp
 
 # All tests
 cargo test

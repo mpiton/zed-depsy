@@ -28,7 +28,7 @@ Support for Node.js projects using package.json.
 
 ### Lockfile Resolution
 
-Dependi reads lockfiles to show resolved versions and eliminate false-positive "update available" warnings:
+Depsy reads lockfiles to show resolved versions and eliminate false-positive "update available" warnings:
 
 | Lockfile | Tool |
 |----------|------|
@@ -51,7 +51,7 @@ npm supports custom registries. See [Private Registries]({% link registries/priv
 
 ## Dependency Formats
 
-Dependi parses all npm dependency sections:
+Depsy parses all npm dependency sections:
 
 ### Dependencies
 
@@ -171,7 +171,7 @@ npm packages can have distribution tags:
 - `next` - Pre-release version
 - `beta`, `alpha` - Testing versions
 
-Dependi checks against `latest` by default.
+Depsy checks against `latest` by default.
 
 ## Vulnerability Database
 
@@ -210,8 +210,8 @@ For private scoped packages:
 
 npm has heavy CDN caching. If a just-published version isn't showing:
 1. Wait a few minutes for CDN propagation
-2. Clear Dependi cache and restart Zed
+2. Clear Depsy cache and restart Zed
 
 ### Rate Limiting
 
-npm may block aggressive requests. Dependi's caching minimizes API calls, but large monorepos may experience slower initial loads.
+npm may block aggressive requests. Depsy's caching minimizes API calls, but large monorepos may experience slower initial loads.

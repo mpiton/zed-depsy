@@ -9,7 +9,7 @@ description: "Configure private package registries for enterprise environments"
 # Private Registries
 {: .no_toc }
 
-Configure Dependi to work with private package registries for enterprise environments.
+Configure Depsy to work with private package registries for enterprise environments.
 {: .fs-6 .fw-300 }
 
 ## Table of contents
@@ -22,7 +22,7 @@ Configure Dependi to work with private package registries for enterprise environ
 
 ## Overview
 
-Dependi supports custom registry configuration for organizations that need to:
+Depsy supports custom registry configuration for organizations that need to:
 - Host internal packages privately
 - Use self-hosted registry solutions (Verdaccio, Artifactory, etc.)
 - Comply with security requirements by proxying public registries
@@ -39,7 +39,7 @@ Dependi supports custom registry configuration for organizations that need to:
 
 ## Cargo Configuration
 
-Dependi supports alternative Cargo registries using the sparse index protocol. This works with self-hosted registries like Kellnr, Cloudsmith, Artifactory, and others.
+Depsy supports alternative Cargo registries using the sparse index protocol. This works with self-hosted registries like Kellnr, Cloudsmith, Artifactory, and others.
 
 ### Configuring Registries
 
@@ -48,7 +48,7 @@ Add your alternative registries in Zed `settings.json`:
 ```json
 {
   "lsp": {
-    "dependi": {
+    "depsy": {
       "initialization_options": {
         "registries": {
           "cargo": {
@@ -104,7 +104,7 @@ Cargo registry authentication supports two methods (in order of priority):
 
 2. **Cargo credentials file** (fallback):
 
-Dependi reads tokens from `~/.cargo/credentials.toml` automatically:
+Depsy reads tokens from `~/.cargo/credentials.toml` automatically:
 
 ```toml
 [registries.my-registry]
@@ -134,7 +134,7 @@ Route all npm packages through a private registry:
 ```json
 {
   "lsp": {
-    "dependi": {
+    "depsy": {
       "initialization_options": {
         "registries": {
           "npm": {
@@ -156,7 +156,7 @@ Use different registries for different package scopes:
 ```json
 {
   "lsp": {
-    "dependi": {
+    "depsy": {
       "initialization_options": {
         "registries": {
           "npm": {
@@ -198,7 +198,7 @@ Scope names in configuration should **not** include the `@` prefix. Use `"compan
 
 ## Authentication
 
-Dependi reads authentication tokens from **environment variables only**. Tokens are never stored in configuration files.
+Depsy reads authentication tokens from **environment variables only**. Tokens are never stored in configuration files.
 
 ### Setting Up Authentication
 
@@ -217,7 +217,7 @@ export GITHUB_TOKEN="ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 ```json
 {
   "lsp": {
-    "dependi": {
+    "depsy": {
       "initialization_options": {
         "registries": {
           "npm": {
@@ -296,7 +296,7 @@ Full configuration for an organization using multiple registries:
 ```json
 {
   "lsp": {
-    "dependi": {
+    "depsy": {
       "initialization_options": {
         "registries": {
           "npm": {
@@ -383,7 +383,7 @@ export GITHUB_TOKEN="ghp_xxxxxxxxxxxxx"
 
 **Solutions**:
 1. Verify JSON syntax is valid
-2. Check settings path: `lsp.dependi.initialization_options.registries`
+2. Check settings path: `lsp.depsy.initialization_options.registries`
 3. Restart Zed after configuration changes
 4. Check for typos in scope names
 

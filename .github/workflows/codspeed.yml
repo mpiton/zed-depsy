@@ -34,11 +34,11 @@ jobs:
 
       - name: Build the benchmark target(s)
         run: |
-          cd dependi-lsp
+          cd depsy-lsp
           cargo codspeed build --bench benchmarks
 
       - name: Run the benchmarks
         uses: CodSpeedHQ/action@v4
         with:
           mode: simulation
-          run: cd dependi-lsp && cargo codspeed run
+          run: cd depsy-lsp && cargo codspeed run

@@ -7,30 +7,30 @@ This project uses [Criterion](https://github.com/bheisler/criterion.rs) for benc
 ### All Benchmarks
 
 ```bash
-cargo bench --package dependi-lsp --bench benchmarks
+cargo bench --package depsy-lsp --bench benchmarks
 ```
 
 ### Specific Benchmark Group
 
 ```bash
 # Parser benchmarks only
-cargo bench --package dependi-lsp --bench benchmarks -- parsers
+cargo bench --package depsy-lsp --bench benchmarks -- parsers
 
 # Cache benchmarks only
-cargo bench --package dependi-lsp --bench benchmarks -- cache
+cargo bench --package depsy-lsp --bench benchmarks -- cache
 
 # Version utils benchmarks only
-cargo bench --package dependi-lsp --bench benchmarks -- version
+cargo bench --package depsy-lsp --bench benchmarks -- version
 ```
 
 ### Save Baseline for Comparison
 
 ```bash
 # Save current results as baseline
-cargo bench --package dependi-lsp --bench benchmarks -- --save-baseline main
+cargo bench --package depsy-lsp --bench benchmarks -- --save-baseline main
 
 # Compare against saved baseline
-cargo bench --package dependi-lsp --bench benchmarks -- --baseline main
+cargo bench --package depsy-lsp --bench benchmarks -- --baseline main
 ```
 
 ### Using the Helper Script

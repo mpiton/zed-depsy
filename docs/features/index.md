@@ -3,13 +3,13 @@ title: Features
 layout: default
 nav_order: 4
 has_children: true
-description: "Overview of Dependi features"
+description: "Overview of Depsy features"
 ---
 
 # Features
 {: .no_toc }
 
-Dependi provides a comprehensive set of features for managing dependencies in Zed Editor.
+Depsy provides a comprehensive set of features for managing dependencies in Zed Editor.
 {: .fs-6 .fw-300 }
 
 ---
@@ -30,7 +30,7 @@ Dependi provides a comprehensive set of features for managing dependencies in Ze
 
 ### Real-time Version Information
 
-When you open a dependency file, Dependi immediately fetches version information from the appropriate registry and displays it inline:
+When you open a dependency file, Depsy immediately fetches version information from the appropriate registry and displays it inline:
 
 ```
 serde = "1.0.152"     ✓
@@ -68,7 +68,7 @@ All features can be enabled/disabled individually. See [Configuration]({% link c
 ```json
 {
   "lsp": {
-    "dependi": {
+    "depsy": {
       "initialization_options": {
         "inlay_hints": { "enabled": true },
         "diagnostics": { "enabled": true },

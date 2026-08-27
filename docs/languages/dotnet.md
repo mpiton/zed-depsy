@@ -30,7 +30,7 @@ Support for concrete NuGet declarations in .NET/MSBuild manifests.
 
 ### Lockfile Resolution
 
-For `*.csproj` documents, Dependi reads `packages.lock.json` to show resolved versions and eliminate false-positive "update available" warnings. Directory props files are analyzed directly and are never associated with a project lockfile.
+For `*.csproj` documents, Depsy reads `packages.lock.json` to show resolved versions and eliminate false-positive "update available" warnings. Directory props files are analyzed directly and are never associated with a project lockfile.
 
 ## Registry
 
@@ -89,7 +89,7 @@ For `*.csproj` documents, Dependi reads `packages.lock.json` to show resolved ve
 
 ### Static Analysis Boundary
 
-Dependi analyzes concrete declarations in the open document. It does not evaluate MSBuild imports, properties such as `$(PackageVersion)`, conditions, target frameworks, or import order. Conditional concrete declarations are each analyzed in source order.
+Depsy analyzes concrete declarations in the open document. It does not evaluate MSBuild imports, properties such as `$(PackageVersion)`, conditions, target frameworks, or import order. Conditional concrete declarations are each analyzed in source order.
 
 The extension does not resolve a versionless `PackageReference` in a `.csproj` from `Directory.Packages.props`, and it does not determine whether a central entry is consumed by a project. Central declarations still receive the existing NuGet version, security, link, hover, diagnostic, hint, and update features.
 
@@ -135,7 +135,7 @@ Deprecated packages show `⚠ Deprecated` with the deprecation reason on hover.
 
 ### Package IDs
 
-NuGet package IDs are case-insensitive but URLs use lowercase. Dependi handles this automatically.
+NuGet package IDs are case-insensitive but URLs use lowercase. Depsy handles this automatically.
 
 ## Vulnerability Database
 
@@ -171,7 +171,7 @@ NuGet package IDs are case-insensitive but URLs use lowercase. Dependi handles t
 
 ## Tooling Integration
 
-After updating a .NET manifest with Dependi:
+After updating a .NET manifest with Depsy:
 
 ```bash
 # Restore packages
@@ -208,11 +208,11 @@ For multi-targeting projects:
 <TargetFrameworks>net6.0;net7.0;net8.0</TargetFrameworks>
 ```
 
-Dependi reports the latest registry version without evaluating target-framework compatibility. Run `dotnet restore` or build the project to verify compatibility after an update.
+Depsy reports the latest registry version without evaluating target-framework compatibility. Run `dotnet restore` or build the project to verify compatibility after an update.
 
 ### Private NuGet Feeds
 
 For private feeds:
 1. Configure in `NuGet.config`
 2. Set up authentication
-3. Note: Dependi currently uses nuget.org only
+3. Note: Depsy currently uses nuget.org only

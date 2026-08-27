@@ -1,0 +1,31 @@
+id = "depsy"
+name = "Depsy"
+description = "Dependency management for Zed - version hints, updates, and vulnerability detection"
+version = "2.0.0"
+schema_version = 1
+authors = ["Mathieu Piton"]
+repository = "https://github.com/mpiton/zed-depsy"
+
+[language_servers.depsy]
+name = "Depsy LSP"
+# Supported file types:
+# - TOML: Cargo.toml, pyproject.toml
+# - JSON: package.json, composer.json
+# - Go: go.mod
+# - Plain Text: requirements.txt (Python)
+# - Python constraints: constraints.txt (Python with zed-python-requirements extension)
+# - Python requirements: requirements.txt (Python with zed-python-requirements extension)
+# - YAML: pubspec.yaml (Dart/Flutter)
+# - XML: *.csproj, Directory.Build.props, Directory.Packages.props (C#/.NET)
+# - Ruby: Gemfile
+languages = [
+  "TOML",
+  "JSON",
+  "Go Mod",
+  "Plain Text",
+  "Python constraints",
+  "Python requirements",
+  "YAML",
+  "XML",
+  "Ruby"
+]

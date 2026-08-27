@@ -2,18 +2,18 @@
 title: Home
 layout: home
 nav_order: 1
-description: "Dependi is a dependency management extension for Zed Editor with real-time version checking, vulnerability scanning, and code actions."
+description: "Depsy is a dependency management extension for Zed Editor with real-time version checking, vulnerability scanning, and code actions."
 permalink: /
 ---
 
-# Dependi for Zed
+# Depsy for Zed
 {: .fs-9 }
 
 Dependency management extension for the [Zed](https://zed.dev) editor with real-time version checking, vulnerability scanning, and intelligent code actions.
 {: .fs-6 .fw-300 }
 
 [Get Started]({% link installation.md %}){: .btn .btn-primary .fs-5 .mb-4 .mb-md-0 .mr-2 }
-[View on GitHub](https://github.com/mpiton/zed-dependi){: .btn .fs-5 .mb-4 .mb-md-0 }
+[View on GitHub](https://github.com/mpiton/zed-depsy){: .btn .fs-5 .mb-4 .mb-md-0 }
 
 ---
 
@@ -21,7 +21,7 @@ Dependency management extension for the [Zed](https://zed.dev) editor with real-
 
 ## Features
 
-Dependi provides comprehensive dependency management directly in your editor:
+Depsy provides comprehensive dependency management directly in your editor:
 
 - **Inlay Hints** - See latest versions inline next to your dependencies
   - `✓` Version is up to date
@@ -68,14 +68,14 @@ Dependi provides comprehensive dependency management directly in your editor:
 In Zed Editor:
 1. Press `Cmd+Shift+P` (Mac) or `Ctrl+Shift+P` (Linux/Windows)
 2. Type "extensions" and select `zed: extensions`
-3. Search for "Dependi"
+3. Search for "Depsy"
 4. Click Install
 
 The extension automatically downloads and installs the language server.
 
 ### 2. Open a Dependency File
 
-Open any supported dependency file (`Cargo.toml`, `package.json`, etc.) and Dependi will automatically activate.
+Open any supported dependency file (`Cargo.toml`, `package.json`, etc.) and Depsy will automatically activate.
 
 ### 3. See Version Hints
 

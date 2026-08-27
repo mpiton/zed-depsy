@@ -1,5 +1,5 @@
 #!/bin/bash
-# Fuzz testing script for dependi-lsp parsers
+# Fuzz testing script for depsy-lsp parsers
 #
 # Usage:
 #   ./scripts/fuzz.sh              # Run all fuzz targets (30 seconds each)
@@ -11,7 +11,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
-FUZZ_DIR="$PROJECT_ROOT/dependi-lsp/fuzz"
+FUZZ_DIR="$PROJECT_ROOT/depsy-lsp/fuzz"
 
 # Available fuzz targets
 TARGETS=("cargo" "npm" "python" "go" "ruby" "php" "dart" "csharp")
@@ -20,7 +20,7 @@ TARGETS=("cargo" "npm" "python" "go" "ruby" "php" "dart" "csharp")
 DEFAULT_TIMEOUT=30
 
 show_help() {
-    echo "Fuzz testing for dependi-lsp parsers"
+    echo "Fuzz testing for depsy-lsp parsers"
     echo ""
     echo "Usage:"
     echo "  $0                    Run all targets (${DEFAULT_TIMEOUT}s each)"

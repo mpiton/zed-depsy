@@ -68,7 +68,7 @@ VersionInfo {
 - Name normalization: `foo-bar` = `foo_bar`
 - `yanked` field for withdrawn versions
 - [Documentation](https://crates.io/data-access)
-- **Alternative registries**: Dependi also supports querying alternative Cargo registries (Kellnr, Cloudsmith, etc.) via the sparse index protocol. See [Private Registries]({% link registries/private.md %}) for configuration.
+- **Alternative registries**: Depsy also supports querying alternative Cargo registries (Kellnr, Cloudsmith, etc.) via the sparse index protocol. See [Private Registries]({% link registries/private.md %}) for configuration.
 
 ### npm
 
@@ -140,7 +140,7 @@ VersionInfo {
 
 ## Vulnerability Detection
 
-Vulnerabilities are **not** from package registries. Dependi uses [OSV.dev](https://osv.dev) (Google's Open-Source Vulnerabilities database) for all ecosystems.
+Vulnerabilities are **not** from package registries. Depsy uses [OSV.dev](https://osv.dev) (Google's Open-Source Vulnerabilities database) for all ecosystems.
 
 OSV aggregates from:
 - GitHub Security Advisories

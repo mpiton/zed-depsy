@@ -22,7 +22,7 @@ Editor diagnostics highlight issues with your dependencies.
 
 ## Overview
 
-Dependi integrates with Zed's diagnostic system to show warnings and hints directly in the editor. This helps you identify outdated or vulnerable dependencies without needing to manually check each one.
+Depsy integrates with Zed's diagnostic system to show warnings and hints directly in the editor. This helps you identify outdated or vulnerable dependencies without needing to manually check each one.
 
 ## Diagnostic Types
 
@@ -61,7 +61,7 @@ ring = "0.16.20"
 ```json
 {
   "lsp": {
-    "dependi": {
+    "depsy": {
       "initialization_options": {
         "diagnostics": {
           "enabled": true
@@ -79,7 +79,7 @@ Control vulnerability diagnostics separately:
 ```json
 {
   "lsp": {
-    "dependi": {
+    "depsy": {
       "initialization_options": {
         "security": {
           "enabled": true,
@@ -141,7 +141,7 @@ Skip diagnostics for packages you want to manage manually:
 ```json
 {
   "lsp": {
-    "dependi": {
+    "depsy": {
       "initialization_options": {
         "ignore": ["internal-*", "@company/*"]
       }
@@ -157,7 +157,7 @@ Only show vulnerabilities above a certain severity:
 ```json
 {
   "lsp": {
-    "dependi": {
+    "depsy": {
       "initialization_options": {
         "security": {
           "min_severity": "high"

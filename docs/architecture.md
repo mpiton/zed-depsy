@@ -4,7 +4,7 @@ layout: default
 nav_order: 11
 ---
 
-# Dependi LSP Architecture
+# Depsy LSP Architecture
 
 > Audience: contributors. Read the [Architecture section in README.md](../README.md#architecture) and [Configuration]({% link configuration.md %}) first for user-facing context — this guide expands README's high-level diagram into the full layered model.
 
@@ -25,7 +25,7 @@ nav_order: 11
 
 ## 1. Introduction
 
-This document describes the internal architecture of the **Dependi LSP server** (`dependi-lsp/`) — the Rust binary that implements the Language Server Protocol providing dependency hints, vulnerability scanning, code actions and completions for the [Zed editor](https://zed.dev).
+This document describes the internal architecture of the **Depsy LSP server** (`depsy-lsp/`) — the Rust binary that implements the Language Server Protocol providing dependency hints, vulnerability scanning, code actions and completions for the [Zed editor](https://zed.dev).
 
 ### Audience
 
@@ -49,7 +49,7 @@ Contributors who want to add an ecosystem, fix a bug, optimise a hot path, or si
 ```mermaid
 flowchart LR
     Editor["Zed editor"]
-    LSP["dependi-lsp<br/>(Rust binary)"]
+    LSP["depsy-lsp<br/>(Rust binary)"]
     Reg["Package registries<br/>(crates.io, npm, PyPI, …)"]
     OSV["OSV.dev<br/>(vulnerability database)"]
     Cache[("Hybrid cache<br/>memory + SQLite")]
@@ -60,39 +60,39 @@ flowchart LR
     LSP <--> Cache
 ```
 
-The LSP communicates with Zed over stdio JSON-RPC (initiated by [`dependi-zed/`](../dependi-zed/) — a thin WASM extension). It fans out to package registries (per ecosystem) and to OSV.dev for vulnerability data. All network responses are cached in a two-tier hybrid store.
+The LSP communicates with Zed over stdio JSON-RPC (initiated by [`depsy-zed/`](../depsy-zed/) — a thin WASM extension). It fans out to package registries (per ecosystem) and to OSV.dev for vulnerability data. All network responses are cached in a two-tier hybrid store.
 
 ## 2. Top-Level Architecture
 
-The LSP is organised as five layers, each occupying a single subdirectory of `dependi-lsp/src/`:
+The LSP is organised as five layers, each occupying a single subdirectory of `depsy-lsp/src/`:
 
 | Layer | Modules | Responsibility |
 |---|---|---|
 | **Transport** | `main.rs`, `lib.rs` | Bootstrap, CLI parsing (`clap`), tokio runtime, JSON-RPC stdio loop via `tower-lsp`. |
-| **Handlers** | `backend.rs` | Implements `tower_lsp::LanguageServer`; owns shared state (`DependiBackend`); routes LSP requests to providers. |
-| **Providers** | `dependi-lsp/src/providers/` | Five plain functions producing LSP responses: inlay hints, diagnostics, code actions, completions, document links. |
-| **Domain** | `dependi-lsp/src/parsers/`, `dependi-lsp/src/registries/`, `dependi-lsp/src/auth/`, `dependi-lsp/src/vulnerabilities/` | Manifest parsing, registry HTTP clients, credential resolution, OSV vulnerability queries. |
-| **Cache** | `dependi-lsp/src/cache/` | Two-tier hybrid cache (memory + SQLite) for version info; separate caches for vulnerability seen-set and OSV advisories. |
+| **Handlers** | `backend.rs` | Implements `tower_lsp::LanguageServer`; owns shared state (`DepsyBackend`); routes LSP requests to providers. |
+| **Providers** | `depsy-lsp/src/providers/` | Five plain functions producing LSP responses: inlay hints, diagnostics, code actions, completions, document links. |
+| **Domain** | `depsy-lsp/src/parsers/`, `depsy-lsp/src/registries/`, `depsy-lsp/src/auth/`, `depsy-lsp/src/vulnerabilities/` | Manifest parsing, registry HTTP clients, credential resolution, OSV vulnerability queries. |
+| **Cache** | `depsy-lsp/src/cache/` | Two-tier hybrid cache (memory + SQLite) for version info; separate caches for vulnerability seen-set and OSV advisories. |
 
 ### Module map
 
 | Path | Role |
 |---|---|
-| `dependi-lsp/src/main.rs` | Entry: tokio runtime, CLI subcommands, stdio LSP loop. |
-| `dependi-lsp/src/backend.rs` | `DependiBackend` — central handler struct; debounce + dispatch. |
-| `dependi-lsp/src/config.rs` | Workspace config (registries, auth, cache TTL, debounce ms). |
-| `dependi-lsp/src/document.rs` | Text/document utilities. |
-| `dependi-lsp/src/file_types.rs` | `FileType` enum + path-pattern → ecosystem detection. |
-| `dependi-lsp/src/document.rs` | `DocumentState` per-open-document snapshot. |
-| `dependi-lsp/src/reports.rs` | JSON / Markdown vulnerability report generation. |
-| `dependi-lsp/src/settings_edit.rs` | Programmatic edits to user settings (used by code actions). |
-| `dependi-lsp/src/utils.rs` | Shared utilities. |
-| `dependi-lsp/src/auth/` | Token providers, cargo credentials, npmrc parsing. |
-| `dependi-lsp/src/parsers/` | Per-ecosystem parsers (cargo, npm, python, go, php, dart, csharp, ruby, maven) + lockfile resolvers (`lockfile_resolver.rs`, `lockfile_graph.rs`). |
-| `dependi-lsp/src/providers/` | Five LSP feature implementations. |
-| `dependi-lsp/src/registries/` | Registry HTTP clients (incl. `maven_central.rs`) + shared `reqwest::Client`. |
-| `dependi-lsp/src/vulnerabilities/` | OSV client + vulnerability seen-set cache. |
-| `dependi-lsp/src/cache/` | Hybrid cache, advisory cache. |
+| `depsy-lsp/src/main.rs` | Entry: tokio runtime, CLI subcommands, stdio LSP loop. |
+| `depsy-lsp/src/backend.rs` | `DepsyBackend` — central handler struct; debounce + dispatch. |
+| `depsy-lsp/src/config.rs` | Workspace config (registries, auth, cache TTL, debounce ms). |
+| `depsy-lsp/src/document.rs` | Text/document utilities. |
+| `depsy-lsp/src/file_types.rs` | `FileType` enum + path-pattern → ecosystem detection. |
+| `depsy-lsp/src/document.rs` | `DocumentState` per-open-document snapshot. |
+| `depsy-lsp/src/reports.rs` | JSON / Markdown vulnerability report generation. |
+| `depsy-lsp/src/settings_edit.rs` | Programmatic edits to user settings (used by code actions). |
+| `depsy-lsp/src/utils.rs` | Shared utilities. |
+| `depsy-lsp/src/auth/` | Token providers, cargo credentials, npmrc parsing. |
+| `depsy-lsp/src/parsers/` | Per-ecosystem parsers (cargo, npm, python, go, php, dart, csharp, ruby, maven) + lockfile resolvers (`lockfile_resolver.rs`, `lockfile_graph.rs`). |
+| `depsy-lsp/src/providers/` | Five LSP feature implementations. |
+| `depsy-lsp/src/registries/` | Registry HTTP clients (incl. `maven_central.rs`) + shared `reqwest::Client`. |
+| `depsy-lsp/src/vulnerabilities/` | OSV client + vulnerability seen-set cache. |
+| `depsy-lsp/src/cache/` | Hybrid cache, advisory cache. |
 
 The strict directional rule: **handlers call providers, providers call domain modules, domain modules read/write the cache.** Providers do not call each other; domain modules do not call handlers.
 
@@ -105,7 +105,7 @@ A typical edit-to-hint cycle illustrates how the layers interact. Below is the p
 ```mermaid
 sequenceDiagram
     participant Z as Zed editor
-    participant B as DependiBackend<br/>(backend.rs)
+    participant B as DepsyBackend<br/>(backend.rs)
     participant D as Debounce task<br/>(tokio::spawn)
     participant P as process_document
     participant Pa as NpmParser
@@ -154,7 +154,7 @@ The `did_open`, `did_save` and `did_close` paths share the same skeleton minus t
 
 Six types form the spine of the system.
 
-### `DependiBackend` (`dependi-lsp/src/backend.rs`)
+### `DepsyBackend` (`depsy-lsp/src/backend.rs`)
 
 The central handler struct that implements `tower_lsp::LanguageServer`. All shared state hangs off here as `Arc<…>` pointers so each LSP handler can hold a cheap clone:
 
@@ -173,7 +173,7 @@ The central handler struct that implements `tower_lsp::LanguageServer`. All shar
 | `debounce_tasks: Arc<DashMap<Url, (u64, JoinHandle<()>)>>`, `debounce_generation: Arc<AtomicU64>`, `pending_changes: Arc<DashMap<Url, String>>` | Debounce coordination. |
 | `version_cache: Arc<HybridCache>` | Two-tier version-info cache. |
 
-### `Dependency` (`dependi-lsp/src/parsers/mod.rs`)
+### `Dependency` (`depsy-lsp/src/parsers/mod.rs`)
 
 The output of every parser:
 
@@ -186,7 +186,7 @@ The output of every parser:
 | `registry` | `Option<String>` | Alternative registry name (cargo-only at present). |
 | `resolved_version` | `Option<String>` | Concrete version from a lockfile, populated post-parse. |
 
-### `Span` (`dependi-lsp/src/parsers/mod.rs`)
+### `Span` (`depsy-lsp/src/parsers/mod.rs`)
 
 ```rust
 pub struct Span {
@@ -198,15 +198,15 @@ pub struct Span {
 
 Note the offsets are **line-relative byte offsets**, not file-relative. This makes conversion to LSP positions trivial: line is direct, character is computed by counting UTF-16 code units in `line[line_start..line_end]`.
 
-### `VersionInfo` (`dependi-lsp/src/registries/mod.rs`)
+### `VersionInfo` (`depsy-lsp/src/registries/mod.rs`)
 
 Returned by every registry client. Contains `latest`, `latest_prerelease`, `versions: Vec<String>`, `description`, `homepage`, `repository`, `license`, `vulnerabilities`, `deprecated`, `yanked_versions`, `release_dates: HashMap<String, DateTime<Utc>>`, `transitive_vulnerabilities`. Vulnerability fields are populated separately (after the OSV pass) — registry clients themselves never query OSV.
 
-### `DocumentState` (`dependi-lsp/src/document.rs`)
+### `DocumentState` (`depsy-lsp/src/document.rs`)
 
 Per-open-document snapshot held in `documents: DashMap<Url, DocumentState>` on the backend. Stores parsed dependencies, file type, content, last-publish timestamps. Read once into a local then `Ref` dropped — never held across `await`.
 
-### `FileType` (`dependi-lsp/src/file_types.rs`)
+### `FileType` (`depsy-lsp/src/file_types.rs`)
 
 A `Copy`-able enum tagging the ecosystem of an open file: `Cargo`, `Npm`, `Python` (covers `requirements.txt`, `constraints.txt`, `pyproject.toml`, `hatch.toml`), `Go`, `Php`, `Dart`, `Csharp`, `Ruby`, `Maven`. Single source of truth used by handlers, parsers and providers when picking ecosystem-specific behaviour. Lockfiles do *not* get their own variants — the ecosystem variant identifies both manifest and lockfile, and `lockfile_resolver.rs` handles per-ecosystem dispatch.
 
@@ -214,7 +214,7 @@ A `Copy`-able enum tagging the ecosystem of an open file: `Cargo`, `Npm`, `Pytho
 
 ### The `Parser` trait
 
-Every manifest parser implements a deliberately tiny trait (`dependi-lsp/src/parsers/mod.rs`):
+Every manifest parser implements a deliberately tiny trait (`depsy-lsp/src/parsers/mod.rs`):
 
 ```rust
 pub trait Parser: Send + Sync {
@@ -230,7 +230,7 @@ Each `Dependency` carries `name_span` and `version_span` of type `Span`. Spans u
 
 ### File type routing
 
-Routing is performed by `FileType::detect` in `dependi-lsp/src/file_types.rs` — pure path matching, no trait dispatch:
+Routing is performed by `FileType::detect` in `depsy-lsp/src/file_types.rs` — pure path matching, no trait dispatch:
 
 ```rust
 pub fn detect(uri: &Url) -> Option<Self> {
@@ -242,14 +242,14 @@ pub fn detect(uri: &Url) -> Option<Self> {
 }
 ```
 
-The downstream `process_document` switches on the resulting `FileType` to pick the right `Arc<XxxParser>` from `DependiBackend`. Static dispatch, zero virtual calls.
+The downstream `process_document` switches on the resulting `FileType` to pick the right `Arc<XxxParser>` from `DepsyBackend`. Static dispatch, zero virtual calls.
 
 ### Lockfile resolution
 
 Two cooperating modules turn `Cargo.lock` / `package-lock.json` / `composer.lock` / `pubspec.lock` / `go.sum` / `Gemfile.lock` / etc. into structured graphs:
 
-- **`LockfileResolver` trait** (`dependi-lsp/src/parsers/lockfile_resolver.rs`) — async trait with `find_lockfile`, `parse_graph`, `normalize_name`, `resolve_version`. `select_resolver(file_type)` returns the per-ecosystem implementation as `Box<dyn LockfileResolver>`. The free function `resolve_versions_from_lockfile(deps: &mut [Dependency], resolver: Box<dyn LockfileResolver>, manifest_path: &Path) -> Option<Arc<LockfileGraph>>` then locates the lockfile, parses the graph, and back-fills each `dep.resolved_version` in place; the returned graph feeds the vulnerability pass.
-- **`LockfileGraph`** (`dependi-lsp/src/parsers/lockfile_graph.rs`) — DFS algorithms over `Vec<LockfilePackage>`:
+- **`LockfileResolver` trait** (`depsy-lsp/src/parsers/lockfile_resolver.rs`) — async trait with `find_lockfile`, `parse_graph`, `normalize_name`, `resolve_version`. `select_resolver(file_type)` returns the per-ecosystem implementation as `Box<dyn LockfileResolver>`. The free function `resolve_versions_from_lockfile(deps: &mut [Dependency], resolver: Box<dyn LockfileResolver>, manifest_path: &Path) -> Option<Arc<LockfileGraph>>` then locates the lockfile, parses the graph, and back-fills each `dep.resolved_version` in place; the returned graph feeds the vulnerability pass.
+- **`LockfileGraph`** (`depsy-lsp/src/parsers/lockfile_graph.rs`) — DFS algorithms over `Vec<LockfilePackage>`:
   - `transitive_deps_of(name)` — cycle-safe DFS, multi-version aware.
   - `transitives_only(direct)` — reachability filter for "what is brought in by this top-level dep".
   - `reverse_index()` — transitive → direct attribution map (used to point a vulnerability in `lodash` back to the user's `gulp` declaration).
@@ -260,7 +260,7 @@ The graph is consumed downstream for vulnerability attribution — version selec
 
 ### The `Registry` trait
 
-Every registry client implements a small async trait (`dependi-lsp/src/registries/mod.rs`):
+Every registry client implements a small async trait (`depsy-lsp/src/registries/mod.rs`):
 
 ```rust
 #[allow(async_fn_in_trait)]
@@ -274,7 +274,7 @@ Each implementation owns its registry-specific URL templates, response parsing a
 
 ### Shared `reqwest::Client`
 
-A single `Arc<reqwest::Client>` is created once at startup by `create_shared_client` in `dependi-lsp/src/registries/http_client.rs` and threaded into every registry via `with_client(Arc<Client>)`. Important properties:
+A single `Arc<reqwest::Client>` is created once at startup by `create_shared_client` in `depsy-lsp/src/registries/http_client.rs` and threaded into every registry via `with_client(Arc<Client>)`. Important properties:
 
 - `pool_max_idle_per_host = 10`
 - `tcp_keepalive = 60s`
@@ -308,13 +308,13 @@ Two tiny utility modules sit alongside: `version_utils.rs` (semver helpers share
 
 ## 7. Cache Strategy
 
-Three independent caches each live in `dependi-lsp/src/cache/`. They serve different access patterns and have different TTLs.
+Three independent caches each live in `depsy-lsp/src/cache/`. They serve different access patterns and have different TTLs.
 
 ```mermaid
 flowchart TB
     subgraph hybrid["HybridCache (version info)"]
         L1[("Memory L1<br/>DashMap<String, CacheEntry><br/>TTL 1h, lazy expiry")]
-        L2[("SQLite L2<br/>r2d2 pool, WAL<br/>~/.cache/dependi/cache.db")]
+        L2[("SQLite L2<br/>r2d2 pool, WAL<br/>~/.cache/depsy/cache.db")]
         L1 -->|miss → read-through| L2
         L2 -->|backfill| L1
     end
@@ -337,20 +337,20 @@ flowchart TB
 
 ### `HybridCache` — version info
 
-Two-tier read-through, write-through cache (`dependi-lsp/src/cache/mod.rs`):
+Two-tier read-through, write-through cache (`depsy-lsp/src/cache/mod.rs`):
 
 - **L1 = `MemoryCache`** — `DashMap<String, CacheEntry>`. Key like `"crates.io:serde"`. Value = `VersionInfo` + `(inserted_at, ttl)`. Default TTL 1 hour. Lazy expiry on `get`; bulk sweep every 30 min by a background tokio task.
-- **L2 = `SqliteCache`** — `r2d2::Pool<SqliteConnectionManager>` over `~/.cache/dependi/cache.db`. Schema: `packages(key TEXT PRIMARY KEY, data TEXT, inserted_at INTEGER, ttl_secs INTEGER)`. WAL journal. Index on `(inserted_at, ttl_secs)` for bulk expiry deletes. All DB calls offloaded to `tokio::task::spawn_blocking` — never block the runtime.
+- **L2 = `SqliteCache`** — `r2d2::Pool<SqliteConnectionManager>` over `~/.cache/depsy/cache.db`. Schema: `packages(key TEXT PRIMARY KEY, data TEXT, inserted_at INTEGER, ttl_secs INTEGER)`. WAL journal. Index on `(inserted_at, ttl_secs)` for bulk expiry deletes. All DB calls offloaded to `tokio::task::spawn_blocking` — never block the runtime.
 
 Read path: check L1 → on miss, read L2 → on hit, write back to L1. Write path: write to both layers simultaneously.
 
 ### `VulnerabilityCache` — seen-set
 
-A side-cache (`dependi-lsp/src/vulnerabilities/cache.rs`) that does **not** store any payload. Key = `VulnCacheKey { ecosystem, package_name, version }`. Value = `(inserted_at,)` only. TTL 6 hours. Purpose: prevent redundant OSV API calls for packages already queried. The actual vulnerability data lives in `VersionInfo` inside the main `HybridCache`.
+A side-cache (`depsy-lsp/src/vulnerabilities/cache.rs`) that does **not** store any payload. Key = `VulnCacheKey { ecosystem, package_name, version }`. Value = `(inserted_at,)` only. TTL 6 hours. Purpose: prevent redundant OSV API calls for packages already queried. The actual vulnerability data lives in `VersionInfo` inside the main `HybridCache`.
 
 ### `HybridAdvisoryCache` — RUSTSEC advisories
 
-Two-tier cache (`dependi-lsp/src/cache/advisory/`) for individual OSV advisories looked up by ID. Key = advisory ID string. Value = `CachedAdvisory { id, kind: AdvisoryKind::Found { summary, unmaintained } | NotFound, fetched_at }`.
+Two-tier cache (`depsy-lsp/src/cache/advisory/`) for individual OSV advisories looked up by ID. Key = advisory ID string. Value = `CachedAdvisory { id, kind: AdvisoryKind::Found { summary, unmaintained } | NotFound, fetched_at }`.
 
 The cache is **split into positive and negative variants** for one reason: 404s should expire faster than 200 OKs (a not-yet-published advisory may appear within hours; a published advisory is immutable for days). Default policy: negative TTL ≪ positive TTL.
 
@@ -397,7 +397,7 @@ sequenceDiagram
 
 ### Severity model
 
-OSV returns CVSS scores. We map them to four severities (`dependi-lsp/src/vulnerabilities/osv.rs`):
+OSV returns CVSS scores. We map them to four severities (`depsy-lsp/src/vulnerabilities/osv.rs`):
 
 | CVSS score | Severity | LSP diagnostic level |
 |---|---|---|
@@ -414,11 +414,11 @@ Non-numeric CVSS strings default to `Medium` (defensive — do not silently swal
 
 ### Transitive vulnerability attribution
 
-When a transitive dependency is vulnerable, we point the diagnostic at the *direct* dependency that pulled it in. The `LockfileGraph::reverse_index` from §5 produces this attribution. Resulting payloads land in `transitive_vuln_data: Arc<DashMap<VulnCacheKey, Vec<Vulnerability>>>` on `DependiBackend`, and the diagnostic provider consults this map alongside the per-package vulnerabilities in `VersionInfo`.
+When a transitive dependency is vulnerable, we point the diagnostic at the *direct* dependency that pulled it in. The `LockfileGraph::reverse_index` from §5 produces this attribution. Resulting payloads land in `transitive_vuln_data: Arc<DashMap<VulnCacheKey, Vec<Vulnerability>>>` on `DepsyBackend`, and the diagnostic provider consults this map alongside the per-package vulnerabilities in `VersionInfo`.
 
 ## 9. Providers
 
-The five LSP feature providers are **plain functions** living in `dependi-lsp/src/providers/`. Each takes the inputs it needs and returns a fully-formed LSP response. There is no provider trait — see [§11 Key Design Decisions](#11-key-design-decisions) for the rationale.
+The five LSP feature providers are **plain functions** living in `depsy-lsp/src/providers/`. Each takes the inputs it needs and returns a fully-formed LSP response. There is no provider trait — see [§11 Key Design Decisions](#11-key-design-decisions) for the rationale.
 
 | Provider | Module | Signature (abridged) | When invoked |
 |---|---|---|---|
@@ -446,7 +446,7 @@ The labels rendered next to versions are produced exclusively by `create_inlay_h
 
 ## 10. Authentication & Private Registries
 
-> **Status — two parallel paths.** Production auth flows through **direct config injection** today: tokens from LSP config and `~/.cargo/credentials.toml` (parsed by `cargo_credentials::parse_credentials_content`, a plain `pub fn`) are fed into `CargoSparseRegistry::with_client_and_config`, and npm registry config tokens are fed into `NpmRegistry::with_client_and_config` — both build `Authorization: Bearer …` headers at construction time. The **`TokenProviderManager` dynamic-dispatch path** (the `TokenProvider` trait + longest-prefix lookup described below) is structurally complete and instantiated in `DependiBackend`, but `TokenProviderManager::get_auth_headers` and the `.npmrc` parsers (`parse_token_from_content`, `parse_registry_from_content`, `extract_auth_token`, `resolve_env_var`) are still `#[cfg(test)]`-gated — they are the planned mechanism for runtime-resolved per-request auth (e.g. matching a request URL against many registered scopes), which lands in a follow-up. See [Private Registries]({% link registries/private.md %}) for user-facing setup.
+> **Status — two parallel paths.** Production auth flows through **direct config injection** today: tokens from LSP config and `~/.cargo/credentials.toml` (parsed by `cargo_credentials::parse_credentials_content`, a plain `pub fn`) are fed into `CargoSparseRegistry::with_client_and_config`, and npm registry config tokens are fed into `NpmRegistry::with_client_and_config` — both build `Authorization: Bearer …` headers at construction time. The **`TokenProviderManager` dynamic-dispatch path** (the `TokenProvider` trait + longest-prefix lookup described below) is structurally complete and instantiated in `DepsyBackend`, but `TokenProviderManager::get_auth_headers` and the `.npmrc` parsers (`parse_token_from_content`, `parse_registry_from_content`, `extract_auth_token`, `resolve_env_var`) are still `#[cfg(test)]`-gated — they are the planned mechanism for runtime-resolved per-request auth (e.g. matching a request URL against many registered scopes), which lands in a follow-up. See [Private Registries]({% link registries/private.md %}) for user-facing setup.
 
 ### `TokenProvider` trait
 
@@ -460,7 +460,7 @@ Implementations decide if a request URL falls within their scope and, if so, ret
 
 ### `TokenProviderManager`
 
-Stores `tokio::sync::RwLock<hashbrown::HashMap<String, Arc<dyn TokenProvider>>>` keyed by URL prefix (`dependi-lsp/src/auth/mod.rs`). Resolution walks the keys and picks the **longest matching prefix** so a more specific scope (e.g. `https://internal.npm.example.com/scoped/`) wins over a general one (`https://internal.npm.example.com/`).
+Stores `tokio::sync::RwLock<hashbrown::HashMap<String, Arc<dyn TokenProvider>>>` keyed by URL prefix (`depsy-lsp/src/auth/mod.rs`). Resolution walks the keys and picks the **longest matching prefix** so a more specific scope (e.g. `https://internal.npm.example.com/scoped/`) wins over a general one (`https://internal.npm.example.com/`).
 
 Two safety properties enforced at registration:
 
@@ -474,7 +474,7 @@ Two safety properties enforced at registration:
 | `parse_credentials_content` | `~/.cargo/credentials.toml` (`[registries.<name>].token`) | Plain `pub fn`, ready to use; production file I/O integration pending. |
 | `parse_token_from_content`, `parse_registry_from_content`, `extract_auth_token`, `resolve_env_var` | `.npmrc` (env-var expansion supported) | All `#[cfg(test)]`-gated; not yet wired. |
 
-Both modules live under `dependi-lsp/src/auth/`. They are deliberately small and side-effect-free so they can be exercised by unit tests without touching the filesystem.
+Both modules live under `depsy-lsp/src/auth/`. They are deliberately small and side-effect-free so they can be exercised by unit tests without touching the filesystem.
 
 ## 11. Key Design Decisions
 

@@ -2,13 +2,13 @@
 title: Adding a New Language
 layout: default
 nav_order: 10
-description: "Step-by-step guide for adding support for a new package manager / ecosystem to Dependi"
+description: "Step-by-step guide for adding support for a new package manager / ecosystem to Depsy"
 ---
 
 # Adding a New Language
 {: .no_toc }
 
-Step-by-step guide to adding a new language/ecosystem to Dependi. Worked example: Swift Package Manager.
+Step-by-step guide to adding a new language/ecosystem to Depsy. Worked example: Swift Package Manager.
 {: .fs-6 .fw-300 }
 
 <details open markdown="block">
@@ -20,7 +20,7 @@ Step-by-step guide to adding a new language/ecosystem to Dependi. Worked example
 
 ## 1. Introduction
 
-This guide walks you through adding support for a new language or package manager to Dependi. By the end, your fork will detect the manifest file, parse its dependencies, fetch versions from the upstream registry, surface vulnerabilities via OSV.dev, and offer the same inlay hints, diagnostics, and code actions every other supported ecosystem gets.
+This guide walks you through adding support for a new language or package manager to Depsy. By the end, your fork will detect the manifest file, parse its dependencies, fetch versions from the upstream registry, surface vulnerabilities via OSV.dev, and offer the same inlay hints, diagnostics, and code actions every other supported ecosystem gets.
 
 The worked example throughout is **Swift Package Manager** (`Package.swift`). At the time of writing, SwiftPM is not yet supported, which makes it a good candidate: you can follow the tutorial end-to-end and ship a real PR. If you target a different ecosystem, use the example as a template — the wire-up steps are identical.
 
@@ -36,12 +36,12 @@ The worked example throughout is **Swift Package Manager** (`Package.swift`). At
 
 Five files (six if your ecosystem has lock files):
 
-1. `dependi-lsp/src/file_types.rs` — file detection, ecosystem mapping, cache key.
-2. `dependi-lsp/src/parsers/<your-lang>.rs` (new) plus `parsers/mod.rs` declaration.
-3. `dependi-lsp/src/registries/<your-lang>.rs` (new) plus `registries/mod.rs` declaration.
-4. `dependi-lsp/src/backend.rs` — `ProcessingContext` field, parser dispatch, registry dispatch.
-5. `dependi-lsp/src/vulnerabilities/mod.rs` — `Ecosystem` variant + OSV string.
-6. (Optional) `dependi-lsp/src/parsers/lockfile_resolver.rs` if your ecosystem has lock files.
+1. `depsy-lsp/src/file_types.rs` — file detection, ecosystem mapping, cache key.
+2. `depsy-lsp/src/parsers/<your-lang>.rs` (new) plus `parsers/mod.rs` declaration.
+3. `depsy-lsp/src/registries/<your-lang>.rs` (new) plus `registries/mod.rs` declaration.
+4. `depsy-lsp/src/backend.rs` — `ProcessingContext` field, parser dispatch, registry dispatch.
+5. `depsy-lsp/src/vulnerabilities/mod.rs` — `Ecosystem` variant + OSV string.
+6. (Optional) `depsy-lsp/src/parsers/lockfile_resolver.rs` if your ecosystem has lock files.
 
 The "Reference checklist" at the bottom of this page enumerates every individual edit so you can use it as a final review before opening your PR.
 
@@ -67,12 +67,12 @@ To plug a new ecosystem in, you teach each stage of that pipeline what to do wit
 The two trait surfaces a contributor implements are:
 
 ```rust,ignore
-// In dependi-lsp/src/parsers/mod.rs
+// In depsy-lsp/src/parsers/mod.rs
 pub trait Parser: Send + Sync {
     fn parse(&self, content: &str) -> Vec<Dependency>;
 }
 
-// In dependi-lsp/src/registries/mod.rs
+// In depsy-lsp/src/registries/mod.rs
 #[allow(async_fn_in_trait)]
 pub trait Registry: Send + Sync {
     async fn get_version_info(&self, package_name: &str)
@@ -81,14 +81,14 @@ pub trait Registry: Send + Sync {
 }
 ```
 
-[`Parser`]: https://docs.rs/dependi-lsp/latest/dependi_lsp/parsers/trait.Parser.html
-[`Registry`]: https://docs.rs/dependi-lsp/latest/dependi_lsp/registries/trait.Registry.html
+[`Parser`]: https://docs.rs/depsy-lsp/latest/depsy_lsp/parsers/trait.Parser.html
+[`Registry`]: https://docs.rs/depsy-lsp/latest/depsy_lsp/registries/trait.Registry.html
 
 [`Parser`] is synchronous. [`Registry`] is asynchronous and Send + Sync (so it can be wrapped in `Arc` and shared across the request pool). The trait uses native `async fn` rather than the `async-trait` crate; the `#[allow(async_fn_in_trait)]` attribute is needed because the trait is internal and the `Send + Sync` bound is already declared on the trait itself.
 
 ## 3. Step 1 — Define the file type
 
-Open `dependi-lsp/src/file_types.rs`. You will make six edits.
+Open `depsy-lsp/src/file_types.rs`. You will make six edits.
 
 ### 3.1 Add the enum variant
 
@@ -149,7 +149,7 @@ impl FileType {
 }
 ```
 
-You'll need to add `SwiftPM` to the `Ecosystem` enum in `dependi-lsp/src/vulnerabilities/mod.rs` — Step 4 covers that edit.
+You'll need to add `SwiftPM` to the `Ecosystem` enum in `depsy-lsp/src/vulnerabilities/mod.rs` — Step 4 covers that edit.
 
 ### 3.4 Add the registry URL formatter, registry name, and cache key
 
@@ -203,7 +203,7 @@ fn detects_package_swift() {
 Run it:
 
 ```bash
-cd dependi-lsp
+cd depsy-lsp
 cargo test file_types::tests::detects_package_swift
 ```
 
@@ -211,7 +211,7 @@ Expected: `1 passed`. If the test does not yet pass, your variant or match arm i
 
 ## 4. Step 2 — Write the parser
 
-Create `dependi-lsp/src/parsers/swift.rs` and declare it in `parsers/mod.rs` with `pub mod swift;`.
+Create `depsy-lsp/src/parsers/swift.rs` and declare it in `parsers/mod.rs` with `pub mod swift;`.
 
 ### 4.1 Span semantics — read this first
 
@@ -230,7 +230,7 @@ If you accidentally include the surrounding quotes, LSP quick-fix code actions w
 
 ### 4.2 Test first (TDD)
 
-Add the failing test before any implementation. In `dependi-lsp/src/parsers/swift.rs`:
+Add the failing test before any implementation. In `depsy-lsp/src/parsers/swift.rs`:
 
 ```rust,ignore
 #[cfg(test)]
@@ -275,7 +275,7 @@ let package = Package(
 Run it — it should fail to compile (`SwiftParser` doesn't exist):
 
 ```bash
-cd dependi-lsp
+cd depsy-lsp
 cargo test parsers::swift
 ```
 
@@ -354,7 +354,7 @@ impl Parser for SwiftParser {
 ### 4.4 Run the tests
 
 ```bash
-cd dependi-lsp
+cd depsy-lsp
 cargo test parsers::swift
 ```
 
@@ -368,11 +368,11 @@ Some ecosystems use full programming languages as manifests (Swift DSL, Gradle K
 - `.package(name: "X", url: "Y", ...)` with the `name:` argument.
 - Dependencies inside `#if swift(>=5.5)` conditional blocks.
 
-For those cases, study the existing `dependi-lsp/src/parsers/maven.rs` (which uses `quick-xml`) or `dependi-lsp/src/parsers/python.rs` (which uses `taplo`) for richer parsing patterns. Adding a real Swift tokenizer is out of scope for the v1 tutorial.
+For those cases, study the existing `depsy-lsp/src/parsers/maven.rs` (which uses `quick-xml`) or `depsy-lsp/src/parsers/python.rs` (which uses `taplo`) for richer parsing patterns. Adding a real Swift tokenizer is out of scope for the v1 tutorial.
 
 ## 5. Step 3 — Write the registry client
 
-Create `dependi-lsp/src/registries/swift_package_index.rs` and declare it in `registries/mod.rs` with `pub mod swift_package_index;`.
+Create `depsy-lsp/src/registries/swift_package_index.rs` and declare it in `registries/mod.rs` with `pub mod swift_package_index;`.
 
 ### 5.1 Construct from the shared HTTP client
 
@@ -499,7 +499,7 @@ mod tests {
 Run it:
 
 ```bash
-cd dependi-lsp
+cd depsy-lsp
 cargo test registries::swift_package_index
 ```
 
@@ -507,11 +507,11 @@ Expected: `1 passed`.
 
 ### 5.4 Pay attention to rate limits
 
-Most registries publish a fair-use limit. Swift Package Index's API is CDN-cached and has no documented hard limit, so no client-side throttling is needed. If your target registry is strict (crates.io, for example, enforces 1 request/second), adopt the pattern in `dependi-lsp/src/registries/crates_io.rs` (look for the `RateLimiter` struct) — never burst-fire a registry.
+Most registries publish a fair-use limit. Swift Package Index's API is CDN-cached and has no documented hard limit, so no client-side throttling is needed. If your target registry is strict (crates.io, for example, enforces 1 request/second), adopt the pattern in `depsy-lsp/src/registries/crates_io.rs` (look for the `RateLimiter` struct) — never burst-fire a registry.
 
 ## 6. Step 4 — Wire into the backend
 
-Open `dependi-lsp/src/backend.rs`. The wiring is mechanical but easy to forget partial steps. Each sub-step ends with a `cargo check` to confirm the next step is set up correctly.
+Open `depsy-lsp/src/backend.rs`. The wiring is mechanical but easy to forget partial steps. Each sub-step ends with a `cargo check` to confirm the next step is set up correctly.
 
 ### 6.1 Import
 
@@ -523,12 +523,12 @@ use crate::registries::swift_package_index::SwiftPackageIndexRegistry;
 ```
 
 ```bash
-cd dependi-lsp
+cd depsy-lsp
 cargo check
 ```
 Expected: a warning about unused imports (you'll fix it in 6.2). No errors.
 
-### 6.2 Add fields to `DependiBackend` and `ProcessingContext`
+### 6.2 Add fields to `DepsyBackend` and `ProcessingContext`
 
 `ProcessingContext` is a private struct with bare (module-visible) fields. Add the two new ones at the bottom of the field list, matching the existing style:
 
@@ -540,13 +540,13 @@ struct ProcessingContext {
 }
 ```
 
-The `DependiBackend` struct (also in `backend.rs`) holds the same `Arc<...>` parser/registry fields. Add identically named fields there too — `ProcessingContext` is a per-request snapshot of `DependiBackend`'s state.
+The `DepsyBackend` struct (also in `backend.rs`) holds the same `Arc<...>` parser/registry fields. Add identically named fields there too — `ProcessingContext` is a per-request snapshot of `DepsyBackend`'s state.
 
 ### 6.3 Initialize them in `with_http_client` and `create_processing_context`
 
-`ProcessingContext` is **not** built in `DependiBackend::new` — it is assembled in the private `async fn create_processing_context(&self) -> ProcessingContext` (around `backend.rs:737`) by `Arc::clone`-ing each of `DependiBackend`'s parser/registry fields. Two edits:
+`ProcessingContext` is **not** built in `DepsyBackend::new` — it is assembled in the private `async fn create_processing_context(&self) -> ProcessingContext` (around `backend.rs:737`) by `Arc::clone`-ing each of `DepsyBackend`'s parser/registry fields. Two edits:
 
-1. In `DependiBackend::with_http_client` (the constructor that accepts a custom HTTP client), initialize the new fields:
+1. In `DepsyBackend::with_http_client` (the constructor that accepts a custom HTTP client), initialize the new fields:
 
    ```rust,ignore
    swift_parser: Arc::new(SwiftParser::new()),
@@ -563,7 +563,7 @@ The `DependiBackend` struct (also in `backend.rs`) holds the same `Arc<...>` par
    ```
 
 ```bash
-cd dependi-lsp
+cd depsy-lsp
 cargo check
 ```
 Expected: zero errors.
@@ -599,7 +599,7 @@ Both arms reference the captured `Arc`, never `self`, because the closure runs a
 
 ### 6.6 Add the `Ecosystem` variant
 
-In `dependi-lsp/src/vulnerabilities/mod.rs`:
+In `depsy-lsp/src/vulnerabilities/mod.rs`:
 
 ```rust,ignore
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -622,7 +622,7 @@ impl Ecosystem {
 ### 6.7 Verify the whole pipeline compiles
 
 ```bash
-cd dependi-lsp
+cd depsy-lsp
 cargo check
 cargo test
 ```
@@ -631,7 +631,7 @@ Expected: zero errors. Test count increases by 3 (the two parser tests and the o
 
 ## 7. Step 5 — (Optional) Lockfile resolver
 
-If your ecosystem has a lockfile (`Package.resolved` for SwiftPM, `pnpm-lock.yaml` for pnpm, etc.), Dependi can pin diagnostics to the lock-resolved version instead of the manifest range. Skip this section for the SwiftPM v1 walkthrough — it's a good follow-up issue.
+If your ecosystem has a lockfile (`Package.resolved` for SwiftPM, `pnpm-lock.yaml` for pnpm, etc.), Depsy can pin diagnostics to the lock-resolved version instead of the manifest range. Skip this section for the SwiftPM v1 walkthrough — it's a good follow-up issue.
 
 ### 7.1 Implement the trait
 
@@ -639,7 +639,7 @@ If your ecosystem has a lockfile (`Package.resolved` for SwiftPM, `pnpm-lock.yam
 
 The trait already provides defaults for `normalize_name` (identity) and `resolve_version` (lookup with both sides normalized). Override `normalize_name` if your ecosystem's package names are case- or separator-insensitive (Python PEP 503, NuGet, Composer, RubyGems do this); leave the default `resolve_version` alone unless you need genuinely custom matching.
 
-In a new `dependi-lsp/src/parsers/swift_resolved.rs`:
+In a new `depsy-lsp/src/parsers/swift_resolved.rs`:
 
 ```rust,ignore
 use std::path::{Path, PathBuf};
@@ -664,7 +664,7 @@ impl LockfileResolver for SwiftLockfileResolver {
 
     fn parse_graph(&self, lock_content: &str) -> LockfileGraph {
         // Parse Package.resolved (JSON v2 format) and return a graph.
-        // See dependi-lsp/src/parsers/cargo_lock.rs for a complete example.
+        // See depsy-lsp/src/parsers/cargo_lock.rs for a complete example.
         let _ = lock_content;
         LockfileGraph::default()
     }
@@ -682,7 +682,7 @@ impl LockfileResolver for SwiftLockfileResolver {
 
 ### 7.2 Register the resolver
 
-In `dependi-lsp/src/parsers/lockfile_resolver.rs`, extend `select_resolver` (it is an exhaustive `async fn` taking the manifest path and content alongside the file type):
+In `depsy-lsp/src/parsers/lockfile_resolver.rs`, extend `select_resolver` (it is an exhaustive `async fn` taking the manifest path and content alongside the file type):
 
 ```rust,ignore
 pub async fn select_resolver(
@@ -713,7 +713,7 @@ The match must remain exhaustive (no `_ =>` arm); add explicit `None` for any fu
 ### 7.3 Verify
 
 ```bash
-cd dependi-lsp
+cd depsy-lsp
 cargo test parsers::swift_resolved
 ```
 
@@ -743,7 +743,7 @@ Open `CHANGELOG.md` at the project root. Under `## [Unreleased]` → `### Added`
   - Parse direct dependencies declared via `.package(url:..., from/exact:...)`.
   - Fetch versions from Swift Package Index API.
   - Vulnerability scanning via OSV.dev (`SwiftURL` ecosystem).
-  ([#XXX](https://github.com/mpiton/zed-dependi/issues/XXX))
+  ([#XXX](https://github.com/mpiton/zed-depsy/issues/XXX))
 ```
 
 Replace `XXX` with the issue number you're closing. Follow the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format already used by neighbours in the file.
@@ -754,7 +754,7 @@ Before opening a PR, every check below must pass locally. CI runs the same set o
 
 ```bash
 # 1. Formatting (no diff allowed)
-cd dependi-lsp
+cd depsy-lsp
 cargo fmt --all -- --check
 
 # 2. Lints (warnings are errors)
@@ -769,7 +769,7 @@ cargo doc --no-deps
 cd ..
 
 # 5. Extension still builds for WASM
-cd dependi-zed
+cd depsy-zed
 cargo build --release --target wasm32-wasip1
 cd ..
 ```
@@ -780,7 +780,7 @@ If you'd like to manually confirm the new ecosystem in Zed:
 ./build-and-deploy.sh
 ```
 
-Then in Zed: **Extensions → Install Dev Extension → select `dependi-zed`**, open a `Package.swift` from any open-source Swift project, and verify inlay hints appear next to each `.package(url:...)` declaration.
+Then in Zed: **Extensions → Install Dev Extension → select `depsy-zed`**, open a `Package.swift` from any open-source Swift project, and verify inlay hints appear next to each `.package(url:...)` declaration.
 
 ## 10. Reference checklist
 
@@ -788,7 +788,7 @@ Use this list as a final review before opening your PR. Every item must be done 
 
 ### Code
 
-- [ ] `dependi-lsp/src/file_types.rs`
+- [ ] `depsy-lsp/src/file_types.rs`
   - [ ] Added `FileType::<YourLang>` variant.
   - [ ] Added arm in `detect()`.
   - [ ] Added arm in `to_ecosystem()`.
@@ -796,30 +796,30 @@ Use this list as a final review before opening your PR. Every item must be done 
   - [ ] Added arm in `fmt_cache_key()`.
   - [ ] Added arm in `fmt_registry_package_url()`.
   - [ ] Added unit test in `#[cfg(test)] mod tests` covering the new file pattern.
-- [ ] `dependi-lsp/src/parsers/<your_lang>.rs`
+- [ ] `depsy-lsp/src/parsers/<your_lang>.rs`
   - [ ] New file containing struct + `impl Parser`.
   - [ ] `pub mod <your_lang>;` declaration in `parsers/mod.rs`.
   - [ ] Inline `#[cfg(test)] mod tests` with at least one realistic manifest fixture.
-- [ ] `dependi-lsp/src/registries/<your_lang>.rs`
+- [ ] `depsy-lsp/src/registries/<your_lang>.rs`
   - [ ] New file containing struct + `impl Registry`.
   - [ ] `pub mod <your_lang>;` declaration in `registries/mod.rs`.
   - [ ] `wiremock` test stubbing the upstream API.
-- [ ] `dependi-lsp/src/backend.rs`
+- [ ] `depsy-lsp/src/backend.rs`
   - [ ] Imports for the new parser and registry types.
   - [ ] `Arc<>` fields on `ProcessingContext`.
-  - [ ] Initialization in `DependiBackend::new` / `with_http_client`.
+  - [ ] Initialization in `DepsyBackend::new` / `with_http_client`.
   - [ ] Match arm in `parse_document`.
   - [ ] Match arm in the registry-fetch loop.
-- [ ] `dependi-lsp/src/vulnerabilities/mod.rs`
+- [ ] `depsy-lsp/src/vulnerabilities/mod.rs`
   - [ ] Added `Ecosystem::<YourEcosystem>` variant.
   - [ ] Added arm in `as_osv_str()` returning the OSV ecosystem string.
-- [ ] (Optional) `dependi-lsp/src/parsers/<your_lang>_resolved.rs` plus dispatch in `lockfile_resolver::select_resolver`.
+- [ ] (Optional) `depsy-lsp/src/parsers/<your_lang>_resolved.rs` plus dispatch in `lockfile_resolver::select_resolver`.
 
 ### Tests
 
-- [ ] `cd dependi-lsp && cargo test` is green.
-- [ ] `cd dependi-lsp && cargo test --doc` is green.
-- [ ] `cd dependi-lsp && cargo doc --no-deps` is green.
+- [ ] `cd depsy-lsp && cargo test` is green.
+- [ ] `cd depsy-lsp && cargo test --doc` is green.
+- [ ] `cd depsy-lsp && cargo doc --no-deps` is green.
 
 ### Docs
 
@@ -842,7 +842,7 @@ A short tour of the mistakes most likely to bite a first-time contributor.
 
 ### 11.2 Spans are byte offsets, not characters
 
-LSP positions are UTF-16 character offsets. `Span` stores byte offsets within the line. ASCII manifests map 1:1, but non-ASCII content (e.g. a UTF-8 BOM, accented identifier names) does not. If your ecosystem allows non-ASCII names, you must transcode at the LSP boundary — see `dependi-lsp/src/providers/diagnostics.rs` for the pattern.
+LSP positions are UTF-16 character offsets. `Span` stores byte offsets within the line. ASCII manifests map 1:1, but non-ASCII content (e.g. a UTF-8 BOM, accented identifier names) does not. If your ecosystem allows non-ASCII names, you must transcode at the LSP boundary — see `depsy-lsp/src/providers/diagnostics.rs` for the pattern.
 
 ### 11.3 Blocking I/O inside async fns
 
@@ -867,4 +867,4 @@ Rust's exhaustive `match` is your friend. The `parse_document` switch in `backen
 
 ### 11.6 Rate-limiting your way to a ban
 
-Aggressive registry clients get IP-blocked. crates.io enforces 1 req/s strictly; npm tolerates ~1 req/s before blocking; PyPI is CDN-cached but still asks for politeness. If your registry has a documented limit, copy the `RateLimiter` pattern from `dependi-lsp/src/registries/crates_io.rs` rather than burst-firing requests in tests.
+Aggressive registry clients get IP-blocked. crates.io enforces 1 req/s strictly; npm tolerates ~1 req/s before blocking; PyPI is CDN-cached but still asks for politeness. If your registry has a documented limit, copy the `RateLimiter` pattern from `depsy-lsp/src/registries/crates_io.rs` rather than burst-firing requests in tests.

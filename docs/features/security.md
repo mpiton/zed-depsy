@@ -22,7 +22,7 @@ Real-time vulnerability detection powered by OSV.dev.
 
 ## Overview
 
-Dependi automatically scans your dependencies against the [OSV.dev](https://osv.dev) vulnerability database. This is Google's Open Source Vulnerability database, aggregating data from multiple sources including:
+Depsy automatically scans your dependencies against the [OSV.dev](https://osv.dev) vulnerability database. This is Google's Open Source Vulnerability database, aggregating data from multiple sources including:
 
 - GitHub Security Advisories
 - RustSec Advisory Database
@@ -32,7 +32,7 @@ Dependi automatically scans your dependencies against the [OSV.dev](https://osv.
 
 ## How It Works
 
-1. When you open a dependency file, Dependi parses all dependencies
+1. When you open a dependency file, Depsy parses all dependencies
 2. Each dependency is checked against OSV.dev for known vulnerabilities
 3. Results are displayed as inlay hints and diagnostics
 4. Vulnerability data is cached for 6 hours
@@ -82,7 +82,7 @@ Open the Problems panel to see all vulnerabilities:
 ```json
 {
   "lsp": {
-    "dependi": {
+    "depsy": {
       "initialization_options": {
         "security": {
           "enabled": true
@@ -100,7 +100,7 @@ Filter out low-severity vulnerabilities:
 ```json
 {
   "lsp": {
-    "dependi": {
+    "depsy": {
       "initialization_options": {
         "security": {
           "min_severity": "medium"
@@ -120,7 +120,7 @@ Control where vulnerabilities appear:
 ```json
 {
   "lsp": {
-    "dependi": {
+    "depsy": {
       "initialization_options": {
         "security": {
           "show_in_hints": true,
@@ -137,7 +137,7 @@ Control where vulnerabilities appear:
 For CI/CD integration, use the CLI scan command:
 
 ```bash
-dependi-lsp scan --file Cargo.toml --min-severity high
+depsy-lsp scan --file Cargo.toml --min-severity high
 ```
 
 See [CLI Usage]({% link cli.md %}) for detailed CI/CD integration.
@@ -182,7 +182,7 @@ To suppress specific packages:
 ```json
 {
   "lsp": {
-    "dependi": {
+    "depsy": {
       "initialization_options": {
         "ignore": ["package-with-false-positive"]
       }
@@ -229,7 +229,7 @@ Security scanning:
 Vulnerability cache has a 6-hour TTL. To force refresh:
 
 ```bash
-rm -rf ~/.cache/dependi/
+rm -rf ~/.cache/depsy/
 ```
 
 Then restart Zed.

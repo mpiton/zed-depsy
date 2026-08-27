@@ -89,7 +89,7 @@ The package couldn't be found on the registry. Check the package name for typos.
 ```json
 {
   "lsp": {
-    "dependi": {
+    "depsy": {
       "initialization_options": {
         "inlay_hints": {
           "enabled": true
@@ -107,7 +107,7 @@ To reduce visual noise, hide hints for packages that are already current:
 ```json
 {
   "lsp": {
-    "dependi": {
+    "depsy": {
       "initialization_options": {
         "inlay_hints": {
           "enabled": true,
@@ -152,7 +152,7 @@ Hovering over any dependency reveals detailed information:
 1. Wait for cache TTL to expire (default: 1 hour)
 2. Clear the cache manually:
    ```bash
-   rm -rf ~/.cache/dependi/
+   rm -rf ~/.cache/depsy/
    ```
 3. Restart Zed
 

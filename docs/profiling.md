@@ -1,6 +1,6 @@
 # Performance Profiling
 
-This document describes how to profile dependi-lsp using cargo-flamegraph to identify performance bottlenecks and validate optimizations.
+This document describes how to profile depsy-lsp using cargo-flamegraph to identify performance bottlenecks and validate optimizations.
 
 ## Installation
 
@@ -30,13 +30,13 @@ Profile the parsing of dependency files:
 
 ```bash
 # Direct execution (outputs timing info)
-./target/release/dependi-lsp profile-parse \
+./target/release/depsy-lsp profile-parse \
     --file tests/fixtures/cargo_50_deps.toml \
     --iterations 1000
 
 # With flamegraph
 flamegraph -o flamegraph-parse.svg -- \
-    ./target/release/dependi-lsp profile-parse \
+    ./target/release/depsy-lsp profile-parse \
     --file tests/fixtures/cargo_50_deps.toml \
     --iterations 1000
 ```
@@ -47,7 +47,7 @@ Profile fetching package info from registries:
 
 ```bash
 # Direct execution
-./target/release/dependi-lsp profile-registry \
+./target/release/depsy-lsp profile-registry \
     --registry npm \
     --packages "lodash,express,react,axios" \
     --iterations 5
@@ -60,7 +60,7 @@ Profile fetching package info from registries:
 Profile the complete document processing workflow (parse + registry + vulnerabilities):
 
 ```bash
-./target/release/dependi-lsp profile-full \
+./target/release/depsy-lsp profile-full \
     --file tests/fixtures/package_100_deps.json \
     --iterations 5
 ```
@@ -178,7 +178,7 @@ You may need to adjust perf permissions:
 sudo sysctl -w kernel.perf_event_paranoid=-1
 
 # Or run flamegraph with sudo
-sudo flamegraph -o output.svg -- ./target/release/dependi-lsp ...
+sudo flamegraph -o output.svg -- ./target/release/depsy-lsp ...
 ```
 
 ### Flame graph is mostly "unknown"
@@ -186,7 +186,7 @@ sudo flamegraph -o output.svg -- ./target/release/dependi-lsp ...
 Build with debug symbols:
 
 ```bash
-CARGO_PROFILE_RELEASE_DEBUG=true cargo build --release --package dependi-lsp
+CARGO_PROFILE_RELEASE_DEBUG=true cargo build --release --package depsy-lsp
 ```
 
 ## References

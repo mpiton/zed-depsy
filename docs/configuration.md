@@ -2,13 +2,13 @@
 title: Configuration
 layout: default
 nav_order: 3
-description: "Configure Dependi settings in Zed Editor"
+description: "Configure Depsy settings in Zed Editor"
 ---
 
 # Configuration
 {: .no_toc }
 
-Customize Dependi behavior through Zed settings.
+Customize Depsy behavior through Zed settings.
 {: .fs-6 .fw-300 }
 
 ## Table of contents
@@ -21,7 +21,7 @@ Customize Dependi behavior through Zed settings.
 
 ## Configuration Location
 
-Configure Dependi in your Zed `settings.json`:
+Configure Depsy in your Zed `settings.json`:
 
 - **User settings**: `~/.config/zed/settings.json` (Linux) or `~/Library/Application Support/Zed/settings.json` (macOS)
 - **Project settings**: `.zed/settings.json` in your project root
@@ -31,7 +31,7 @@ Configure Dependi in your Zed `settings.json`:
 ```json
 {
   "lsp": {
-    "dependi": {
+    "depsy": {
       "initialization_options": {
         "inlay_hints": {
           "enabled": true,
@@ -69,7 +69,7 @@ Configure Dependi in your Zed `settings.json`:
 ```json
 {
   "lsp": {
-    "dependi": {
+    "depsy": {
       "initialization_options": {
         "inlay_hints": {
           "enabled": true,
@@ -91,7 +91,7 @@ Configure Dependi in your Zed `settings.json`:
 ```json
 {
   "lsp": {
-    "dependi": {
+    "depsy": {
       "initialization_options": {
         "diagnostics": {
           "enabled": true
@@ -113,7 +113,7 @@ Configure Dependi in your Zed `settings.json`:
 ```json
 {
   "lsp": {
-    "dependi": {
+    "depsy": {
       "initialization_options": {
         "cache": {
           "ttl_secs": 7200
@@ -141,7 +141,7 @@ The cache is stored in your system's cache directory. Increasing TTL reduces net
 ```json
 {
   "lsp": {
-    "dependi": {
+    "depsy": {
       "initialization_options": {
         "security": {
           "enabled": true,
@@ -165,7 +165,7 @@ The cache is stored in your system's cache directory. Increasing TTL reduces net
 ```json
 {
   "lsp": {
-    "dependi": {
+    "depsy": {
       "initialization_options": {
         "ignore": [
           "internal-*",
@@ -196,7 +196,7 @@ Configure custom registries for private packages. See [Private Registries]({% li
 ```json
 {
   "lsp": {
-    "dependi": {
+    "depsy": {
       "initialization_options": {
         "registries": {
           "cargo": {
@@ -231,7 +231,7 @@ Dependencies using an alternative registry must specify it in `Cargo.toml`: `my-
 ```json
 {
   "lsp": {
-    "dependi": {
+    "depsy": {
       "initialization_options": {
         "registries": {
           "npm": {
@@ -258,13 +258,13 @@ Scope names should **not** include the `@` prefix. Use `"company"` not `"@compan
 
 ## Cache Locations
 
-Dependi stores cached data in your system's cache directory:
+Depsy stores cached data in your system's cache directory:
 
 | Platform | Location |
 |----------|----------|
-| Linux | `~/.cache/dependi/cache.db` |
-| macOS | `~/Library/Caches/dependi/cache.db` |
-| Windows | `%LOCALAPPDATA%\dependi\cache.db` |
+| Linux | `~/.cache/depsy/cache.db` |
+| macOS | `~/Library/Caches/depsy/cache.db` |
+| Windows | `%LOCALAPPDATA%\depsy\cache.db` |
 
 ### Clearing the Cache
 
@@ -272,13 +272,13 @@ To force refresh all package data:
 
 ```bash
 # Linux
-rm -rf ~/.cache/dependi/
+rm -rf ~/.cache/depsy/
 
 # macOS
-rm -rf ~/Library/Caches/dependi/
+rm -rf ~/Library/Caches/depsy/
 
 # Windows
-rmdir /s %LOCALAPPDATA%\dependi
+rmdir /s %LOCALAPPDATA%\depsy
 ```
 
 Then restart Zed. The cache will rebuild as you open dependency files.
@@ -292,7 +292,7 @@ For working offline, increase the cache TTL:
 ```json
 {
   "lsp": {
-    "dependi": {
+    "depsy": {
       "initialization_options": {
         "cache": {
           "ttl_secs": 86400
@@ -310,7 +310,7 @@ For projects with many internal packages, use ignore patterns:
 ```json
 {
   "lsp": {
-    "dependi": {
+    "depsy": {
       "initialization_options": {
         "ignore": ["@internal/*", "dev-*"]
       }
@@ -326,7 +326,7 @@ For strict security scanning:
 ```json
 {
   "lsp": {
-    "dependi": {
+    "depsy": {
       "initialization_options": {
         "security": {
           "enabled": true,
@@ -347,7 +347,7 @@ For a cleaner interface showing only updates:
 ```json
 {
   "lsp": {
-    "dependi": {
+    "depsy": {
       "initialization_options": {
         "inlay_hints": {
           "enabled": true,
@@ -368,7 +368,7 @@ For a cleaner interface showing only updates:
    ```json
    {
      "lsp": {
-       "dependi": {
+       "depsy": {
          "initialization_options": {
            // settings here
          }
@@ -394,8 +394,8 @@ any of them; they exist for advanced configuration and tests.
 
 | Variable | Used by | Description |
 |----------|---------|-------------|
-| `RUST_LOG` | `tracing-subscriber` | Log filter (e.g. `debug`, `dependi_lsp=trace`). |
-| `OSV_ENDPOINT` | `dependi-lsp scan` | Override the OSV.dev base URL for vulnerability queries. Honored only by the `scan` subcommand (see `dependi-lsp/src/main.rs::run_scan`); `profile-parse`, `profile-registry`, and `profile-full` construct `OsvClient::default()` directly and ignore this variable. Used by the integration test harness to point at a local mock server; can also be set to a private OSV-compatible mirror. |
+| `RUST_LOG` | `tracing-subscriber` | Log filter (e.g. `debug`, `depsy_lsp=trace`). |
+| `OSV_ENDPOINT` | `depsy-lsp scan` | Override the OSV.dev base URL for vulnerability queries. Honored only by the `scan` subcommand (see `depsy-lsp/src/main.rs::run_scan`); `profile-parse`, `profile-registry`, and `profile-full` construct `OsvClient::default()` directly and ignore this variable. Used by the integration test harness to point at a local mock server; can also be set to a private OSV-compatible mirror. |
 | `CARGO_HOME` | Cargo registry auth resolver | Standard Cargo variable. When set, the LSP reads `${CARGO_HOME}/credentials.toml` instead of `~/.cargo/credentials.toml` to discover alternative registry tokens. |
 | `<TOKEN_VAR>` (e.g. `GITHUB_TOKEN`, `COMPANY_NPM_TOKEN`) | `EnvTokenProvider` in `src/auth/mod.rs` | Read at LSP startup for every registry whose settings declare `"auth": { "type": "env", "variable": "<NAME>" }` (Cargo alternative registries and npm scoped registries — see the configuration examples above). The variable name is whatever the JSON references; there are no hardcoded names. Note: `.npmrc` `${VAR}` expansion is **not** currently wired into the runtime auth path (`src/auth/npmrc.rs` is test-only, gated on `#[cfg(test)]`) — tokens must come from LSP settings. |
 
@@ -403,5 +403,5 @@ any of them; they exist for advanced configuration and tests.
 
 ```bash
 OSV_ENDPOINT=http://127.0.0.1:8787 \
-    dependi-lsp scan --file Cargo.toml
+    depsy-lsp scan --file Cargo.toml
 ```

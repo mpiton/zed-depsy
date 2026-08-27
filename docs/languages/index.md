@@ -9,7 +9,7 @@ description: "Supported languages and ecosystems"
 # Supported Languages
 {: .no_toc }
 
-Dependi supports 8 programming languages and their package ecosystems.
+Depsy supports 8 programming languages and their package ecosystems.
 {: .fs-6 .fw-300 }
 
 ---
@@ -38,7 +38,7 @@ All languages support:
 
 ## File Detection
 
-Dependi automatically detects dependency files by name:
+Depsy automatically detects dependency files by name:
 
 ```
 Cargo.toml        → Rust
@@ -69,11 +69,11 @@ Each ecosystem has its own version specification format:
 | .NET | `1.0.0`, `[1.0,2.0)` | NuGet |
 | Ruby | `~> 1.0`, `>= 1.0, < 2.0` | Bundler |
 
-Dependi understands these formats and extracts the correct version for checking.
+Depsy understands these formats and extracts the correct version for checking.
 
 ## Adding Language Support
 
-Want to add support for a new language? See the [Contributing Guide](https://github.com/mpiton/zed-dependi/blob/main/CONTRIBUTING.md#adding-support-for-new-languages) for instructions on:
+Want to add support for a new language? See the [Contributing Guide](https://github.com/mpiton/zed-depsy/blob/main/CONTRIBUTING.md#adding-support-for-new-languages) for instructions on:
 
 1. Creating a parser
 2. Implementing a registry client

@@ -30,7 +30,7 @@ Support for Python projects using requirements.txt and pyproject.toml.
 
 ### Lockfile Resolution
 
-Dependi reads lockfiles to show resolved versions and eliminate false-positive "update available" warnings:
+Depsy reads lockfiles to show resolved versions and eliminate false-positive "update available" warnings:
 
 | Lockfile | Tool |
 |----------|------|
@@ -143,7 +143,7 @@ PyPI normalizes package names per PEP 503:
 - `Flask` = `flask`
 - `typing_extensions` = `typing-extensions`
 
-Dependi handles normalization automatically.
+Depsy handles normalization automatically.
 
 ### Pre-release Versions
 

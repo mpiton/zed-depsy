@@ -28,7 +28,7 @@ Support for Ruby projects using Gemfile.
 
 ### Lockfile Resolution
 
-Dependi reads `Gemfile.lock` to show resolved versions and eliminate false-positive "update available" warnings.
+Depsy reads `Gemfile.lock` to show resolved versions and eliminate false-positive "update available" warnings.
 
 ## Registry
 
@@ -130,7 +130,7 @@ source 'https://gems.company.com' do
 end
 ```
 
-Currently, Dependi queries rubygems.org only.
+Currently, Depsy queries rubygems.org only.
 
 ## Vulnerability Database
 
@@ -169,7 +169,7 @@ end
 
 ## Tooling Integration
 
-After updating `Gemfile` with Dependi:
+After updating `Gemfile` with Depsy:
 
 ```bash
 # Update lockfile
@@ -198,7 +198,7 @@ bundle audit
 
 ### Platform Gems
 
-Some gems have platform-specific versions (e.g., `-java`, `-x86_64-linux`). Dependi shows the Ruby platform version by default.
+Some gems have platform-specific versions (e.g., `-java`, `-x86_64-linux`). Depsy shows the Ruby platform version by default.
 
 ### Pessimistic Constraint Issues
 
@@ -211,7 +211,7 @@ The `~>` operator behavior depends on version specificity:
 For private gem servers:
 1. Configure source in Gemfile
 2. Set up authentication via bundler config
-3. Note: Dependi currently uses rubygems.org only
+3. Note: Depsy currently uses rubygems.org only
 
 ### Ruby Version Constraint
 

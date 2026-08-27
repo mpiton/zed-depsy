@@ -28,7 +28,7 @@ Support for Rust projects using Cargo.toml.
 
 ### Lockfile Resolution
 
-Dependi reads `Cargo.lock` to show resolved versions and eliminate false-positive "update available" warnings when using minimal version syntax (e.g., `serde = "1.0"`).
+Depsy reads `Cargo.lock` to show resolved versions and eliminate false-positive "update available" warnings when using minimal version syntax (e.g., `serde = "1.0"`).
 
 ## Registries
 
@@ -42,14 +42,14 @@ Dependi reads `Cargo.lock` to show resolved versions and eliminate false-positiv
 
 ### Alternative Registries
 
-Dependi supports querying alternative Cargo registries (Kellnr, Cloudsmith, Artifactory, etc.) for dependencies that specify a `registry` field in `Cargo.toml`.
+Depsy supports querying alternative Cargo registries (Kellnr, Cloudsmith, Artifactory, etc.) for dependencies that specify a `registry` field in `Cargo.toml`.
 
 Configure alternative registries in your Zed `settings.json`:
 
 ```json
 {
   "lsp": {
-    "dependi": {
+    "depsy": {
       "initialization_options": {
         "registries": {
           "cargo": {
@@ -76,7 +76,7 @@ Configure alternative registries in your Zed `settings.json`:
 
 ## Dependency Formats
 
-Dependi parses all standard Cargo dependency formats:
+Depsy parses all standard Cargo dependency formats:
 
 ### Simple Version
 
@@ -138,7 +138,7 @@ serde = "1.0"
 serde = { workspace = true }
 ```
 
-Dependi tracks workspace dependencies in the root `Cargo.toml`.
+Depsy tracks workspace dependencies in the root `Cargo.toml`.
 
 ### Path Dependencies
 
@@ -201,12 +201,12 @@ criterion = "0.5"                                    # ✓
 
 crates.io has strict rate limits (1 req/s). If you see intermittent failures:
 - Wait for the rate limiter to reset
-- Dependi automatically handles rate limiting with delays
+- Depsy automatically handles rate limiting with delays
 - Large `Cargo.toml` files may take longer on first load
 
 ### Name Normalization
 
-Crate names are normalized: `foo-bar` and `foo_bar` are equivalent. Dependi handles this automatically.
+Crate names are normalized: `foo-bar` and `foo_bar` are equivalent. Depsy handles this automatically.
 
 ### Workspace Resolution
 

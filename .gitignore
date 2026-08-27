@@ -39,14 +39,14 @@ test-files/
 /coverage/
 
 # Fuzz corpus (generated, large)
-dependi-lsp/fuzz/corpus/
+depsy-lsp/fuzz/corpus/
 
 # Local release builds
-dependi-lsp/release/
+depsy-lsp/release/
 
 # Local binary for development
-dependi-zed/dependi-lsp*
-dependi-zed/extension.wasm
+depsy-zed/depsy-lsp*
+depsy-zed/extension.wasm
 
 # Claude Code
 .claude/

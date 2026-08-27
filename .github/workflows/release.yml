@@ -55,7 +55,7 @@ jobs:
 
       - name: Install cargo-zigbuild
         if: contains(matrix.target, 'linux')
-        run: cargo install cargo-zigbuild@0.19.8 --locked
+        run: cargo install cargo-zigbuild@0.23.2 --locked
 
       - name: Build (Linux - GLIBC 2.17)
         if: contains(matrix.target, 'linux')

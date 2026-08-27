@@ -17,6 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   must install `depsy` and uninstall `dependi`. `lsp.dependi.initialization_options`
   is still read as a fallback so existing configuration keeps working.
 
+### Fixed
+
+- CI: aarch64 Linux release builds with Rust 1.98 (cargo-zigbuild 0.23.2, rust-cross/cargo-zigbuild#452).
+
 ## [1.10.0] - 2026-07-11
 
 ### Added

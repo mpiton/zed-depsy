@@ -82,7 +82,7 @@ dependencies = [
 
 [[package]]
 name = "dependi-zed"
-version = "1.10.0"
+version = "1.11.0"
 dependencies = [
  "sha2",
  "zed_extension_api",

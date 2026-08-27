@@ -7,6 +7,10 @@ use zed_extension_api::{
     http_client::{HttpMethod, HttpRequest, RedirectPolicy},
 };
 
+/// Final Dependi release, pinned so later Depsy releases (different asset
+/// names) cannot break installs that never migrated to the `depsy` extension.
+const SUNSET_TAG: &str = "v1.11.0";
+
 /// The Dependi extension state.
 struct DependiExtension {
     /// Cached path to the LSP binary to avoid repeated lookups.
@@ -127,21 +131,11 @@ impl DependiExtension {
             ),
         };
 
-        let release = zed::latest_github_release(
-            "mpiton/zed-dependi",
-            zed::GithubReleaseOptions {
-                require_assets: true,
-                pre_release: false,
-            },
-        )?;
+        let download_url = format!(
+            "https://github.com/mpiton/zed-dependi/releases/download/{SUNSET_TAG}/{asset_name}"
+        );
 
-        let asset = release
-            .assets
-            .iter()
-            .find(|asset| asset.name == asset_name)
-            .ok_or_else(|| format!("No asset found matching {asset_name}"))?;
-
-        let version_dir = format!("dependi-lsp-{}", release.version);
+        let version_dir = format!("dependi-lsp-{SUNSET_TAG}");
         let binary_path = format!("{version_dir}/{binary_name}");
 
         if !std::fs::metadata(&binary_path)
@@ -153,7 +147,7 @@ impl DependiExtension {
                 &zed::LanguageServerInstallationStatus::Downloading,
             );
 
-            zed::download_file(&asset.download_url, &version_dir, file_type)
+            zed::download_file(&download_url, &version_dir, file_type)
                 .map_err(|e| format!("Failed to download: {e}"))?;
 
             let checksum_name = asset_name
@@ -161,7 +155,7 @@ impl DependiExtension {
                 .or_else(|| asset_name.strip_suffix(".zip"))
                 .unwrap_or(&asset_name);
 
-            if let Some(expected_checksum) = fetch_checksum(&release.version, checksum_name)? {
+            if let Some(expected_checksum) = fetch_checksum(SUNSET_TAG, checksum_name)? {
                 verify_checksum(&binary_path, &expected_checksum)?;
             }
 

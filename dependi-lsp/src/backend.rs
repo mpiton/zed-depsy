@@ -1577,6 +1577,14 @@ impl LanguageServer for DependiBackend {
             .log_message(MessageType::INFO, "Dependi LSP initialized")
             .await;
 
+        self.client
+            .show_message(
+                MessageType::WARNING,
+                "Dependi for Zed has been renamed to Depsy. Install the 'depsy' extension and \
+                 uninstall 'dependi': this version receives no further updates.",
+            )
+            .await;
+
         // Verify all registries share the same HTTP client
         let base_client = self.crates_io.http_client();
         debug_assert!(Arc::ptr_eq(

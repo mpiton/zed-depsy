@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.11.0] - 2026-08-27
+
+### Changed
+
+- Final release under the Dependi name: the extension is renamed to Depsy at
+  the request of the Dependi (dependi.io) maintainers
+  ([#377](https://github.com/mpiton/zed-dependi/issues/377)). Install the
+  `depsy` extension and uninstall `dependi`. This version shows a warning at
+  startup, pins its language server download to the `v1.11.0` release assets,
+  and receives no further updates.
+
 ## [1.10.0] - 2026-07-11
 
 ### Added

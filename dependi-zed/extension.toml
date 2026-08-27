@@ -1,7 +1,7 @@
 id = "dependi"
 name = "Dependi"
-description = "Dependency management for Zed - version hints, updates, and vulnerability detection"
-version = "1.10.0"
+description = "Renamed to Depsy. Install the 'depsy' extension instead; this one receives no further updates."
+version = "1.11.0"
 schema_version = 1
 authors = ["Mathieu Piton"]
 repository = "https://github.com/mpiton/zed-dependi"

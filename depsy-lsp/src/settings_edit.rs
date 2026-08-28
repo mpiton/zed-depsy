@@ -108,6 +108,16 @@ fn build_replace_edit(
         .as_object_mut()
         .ok_or_else(|| anyhow::anyhow!("'lsp' must be an object"))?;
 
+    // Migrated users may still keep their ignore list under `lsp.dependi`. The extension
+    // feeds that as the base and Zed replaces (not concatenates) arrays when merging
+    // `lsp.depsy` over it, so the depsy list must carry those entries too.
+    let legacy_ignore: Vec<Value> = lsp_obj
+        .get("dependi")
+        .and_then(|v| v.pointer("/initialization_options/ignore"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+
     let depsy = lsp_obj.entry("depsy").or_insert_with(|| json!({}));
     let depsy_obj = depsy
         .as_object_mut()
@@ -124,6 +134,12 @@ fn build_replace_edit(
     let arr = ignore_array
         .as_array_mut()
         .ok_or_else(|| anyhow::anyhow!("'ignore' must be an array"))?;
+
+    for legacy in legacy_ignore {
+        if !arr.contains(&legacy) {
+            arr.push(legacy);
+        }
+    }
 
     let already_present = arr.iter().any(|v| v.as_str() == Some(package_name));
     if !already_present {
@@ -271,6 +287,39 @@ mod tests {
         };
         let count = te.new_text.matches("\"lodash\"").count();
         assert_eq!(count, 1, "package name should not be duplicated");
+    }
+
+    #[test]
+    fn test_build_edit_folds_legacy_dependi_ignore_list() {
+        let root = std::path::PathBuf::from("/tmp/ws");
+        let current = r#"{
+  "lsp": {
+    "dependi": {
+      "initialization_options": {
+        "ignore": ["react", "lodash"]
+      }
+    }
+  }
+}"#;
+        let edit = build_ignore_workspace_edit(&root, "lodash", Some(current)).unwrap();
+        let dc = edit.document_changes.as_ref().unwrap();
+        let DocumentChanges::Edits(edits) = dc else {
+            panic!("expected Edits variant on update");
+        };
+        let OneOf::Left(te) = &edits[0].edits[0] else {
+            panic!("expected TextEdit");
+        };
+        let written: Value = serde_json::from_str(&te.new_text).unwrap();
+        assert_eq!(
+            written.pointer("/lsp/depsy/initialization_options/ignore"),
+            Some(&json!(["react", "lodash"])),
+            "legacy dependi entries must be folded into the depsy list, without duplicates"
+        );
+        assert_eq!(
+            written.pointer("/lsp/dependi/initialization_options/ignore"),
+            Some(&json!(["react", "lodash"])),
+            "legacy dependi block must be left untouched"
+        );
     }
 
     #[test]

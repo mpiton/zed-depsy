@@ -242,7 +242,7 @@ serde = "1"
         .arg(tmp.path().join("Cargo.toml"))
         .output()
         .expect("run");
-    // Should not crash. Exit code may be 0 or 1 depsyng on how graceful the fallback is;
+    // Should not crash. Exit code may be 0 or 1 depending on how graceful the fallback is;
     // what we care about is not a panic.
     assert!(output.status.code().is_some(), "process exited abnormally");
 }

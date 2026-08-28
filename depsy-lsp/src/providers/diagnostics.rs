@@ -12,7 +12,7 @@
 //!
 //!   1. **Yanked version** — warning with a link to the registry page.
 //!   2. **Deprecated package** — warning with optional homepage / repository links.
-//!   3. **Vulnerability summary** — error/warning/hint depsyng on max severity.
+//!   3. **Vulnerability summary** — error/warning/hint depending on max severity.
 //!
 //! Helper function
 //! [`crate::providers::diagnostics::build_transitive_summary_message`] is

@@ -12,7 +12,7 @@ body:
     attributes:
       label: Depsy Version
       description: Check in Zed's extensions panel
-      placeholder: "e.g., 1.1.0"
+      placeholder: "e.g., 2.0.0"
     validations:
       required: true
 

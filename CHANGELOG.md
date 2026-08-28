@@ -18,6 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   key is `lsp.depsy`, and the cache lives in `~/.cache/depsy`. Existing users
   must install `depsy` and uninstall `dependi`. `lsp.dependi.initialization_options`
   is still read as a fallback so existing configuration keeps working.
+- The "ignore this package" code action copies any entries from
+  `lsp.dependi.initialization_options.ignore` into the new `lsp.depsy` list.
+  Zed replaces arrays when it merges the two keys, so without this the first
+  new ignore would drop every package ignored under the old key.
 
 ### Fixed
 

@@ -372,7 +372,7 @@ dependencies = [
 
 [[package]]
 name = "depsy-lsp"
-version = "1.10.0"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "async-trait",

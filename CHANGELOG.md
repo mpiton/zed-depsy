@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-08-28
+
 ### Changed
 
 - **Breaking:** the extension is renamed from Dependi to Depsy at the request
@@ -800,7 +802,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - In-memory caching for version data
 - Parallel registry requests (5 concurrent)
 
-[Unreleased]: https://github.com/mpiton/zed-dependi/compare/v1.10.0...HEAD
+[Unreleased]: https://github.com/mpiton/zed-depsy/compare/v2.0.0...HEAD
+[2.0.0]: https://github.com/mpiton/zed-depsy/compare/v1.10.0...v2.0.0
 [1.10.0]: https://github.com/mpiton/zed-dependi/compare/v1.9.1...v1.10.0
 [1.9.1]: https://github.com/mpiton/zed-dependi/compare/v1.9.0...v1.9.1
 [1.9.0]: https://github.com/mpiton/zed-dependi/compare/v1.8.1...v1.9.0

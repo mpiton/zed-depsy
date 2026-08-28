@@ -23,6 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - CI: aarch64 Linux release builds with Rust 1.98 (cargo-zigbuild 0.23.2, rust-cross/cargo-zigbuild#452).
 
+### Security
+
+- Bump `h2` to 0.4.19 (RUSTSEC-2026-0258, unbounded empty HTTP/2 DATA frames).
+
 ## [1.10.0] - 2026-07-11
 
 ### Added

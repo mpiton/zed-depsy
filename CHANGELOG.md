@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.1] - 2026-08-28
+
+### Changed
+
+- The Zed extension id is `depsy-lsp` instead of `depsy`: Zed's
+  [publishing prerequisites](https://zed.dev/docs/extensions/publishing/prerequisites)
+  require language-server-only extensions to carry an `-lsp` or
+  `-language-server` suffix. The extension name stays "Depsy" and the
+  settings key stays `lsp.depsy`.
+
 ## [2.0.0] - 2026-08-28
 
 ### Changed
@@ -810,7 +820,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - In-memory caching for version data
 - Parallel registry requests (5 concurrent)
 
-[Unreleased]: https://github.com/mpiton/zed-depsy/compare/v2.0.0...HEAD
+[Unreleased]: https://github.com/mpiton/zed-depsy/compare/v2.0.1...HEAD
+[2.0.1]: https://github.com/mpiton/zed-depsy/compare/v2.0.0...v2.0.1
 [2.0.0]: https://github.com/mpiton/zed-depsy/compare/v1.10.0...v2.0.0
 [1.10.0]: https://github.com/mpiton/zed-dependi/compare/v1.9.1...v1.10.0
 [1.9.1]: https://github.com/mpiton/zed-dependi/compare/v1.9.0...v1.9.1

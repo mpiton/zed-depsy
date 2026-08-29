@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Rust dependencies refreshed: `tokio` 1.53.1, `clap` 4.6.6, `serde` 1.0.229,
+  `serde_json` 1.0.151, `anyhow` 1.0.104, `futures` 0.3.34, `quick-xml` 0.42,
+  `serial_test` 4, plus lockfile bumps for `toml`, `rusqlite` and `async-trait`.
+  `quick-xml` 0.42 decodes at the reader level, so the Maven, Maven Central and
+  NuGet XML parsers now work on `&str` instead of `&[u8]`; parsing behaviour and
+  reported spans are unchanged.
+- CI: `actions/setup-node` v7 and `CodSpeedHQ/action` v5.
+
 ## [2.0.1] - 2026-08-28
 
 ### Changed

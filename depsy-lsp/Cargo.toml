@@ -35,13 +35,13 @@ clap = { version = "4.6.6", features = ["derive"] }
 futures = "0.3.34"
 taplo = "0.14"
 hashbrown = { version = "0.17.1", features = ["serde"] }
-quick-xml = "0.41.0"
+quick-xml = "0.42.0"
 url = "2.5"
 async-trait = "0.1"
 json-spanned-value = "0.2.2"
 
 [dev-dependencies]
-serial_test = "3"
+serial_test = "4"
 wiremock = "0.6"
 tempfile = "3"
 criterion = { version = "4.6.0", package = "codspeed-criterion-compat", features = ["html_reports"] }

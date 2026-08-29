@@ -22,11 +22,11 @@ enum NugetItemKind {
 }
 
 impl NugetItemKind {
-    fn from_local_name(name: &[u8]) -> Option<Self> {
+    fn from_local_name(name: &str) -> Option<Self> {
         match name {
-            b"PackageReference" => Some(Self::PackageReference),
-            b"PackageVersion" => Some(Self::PackageVersion),
-            b"GlobalPackageReference" => Some(Self::GlobalPackageReference),
+            "PackageReference" => Some(Self::PackageReference),
+            "PackageVersion" => Some(Self::PackageVersion),
+            "GlobalPackageReference" => Some(Self::GlobalPackageReference),
             _ => None,
         }
     }
@@ -63,7 +63,7 @@ impl PendingItem {
         for attribute in event.attributes() {
             let attribute = attribute.map_err(|_| ())?;
             let key = attribute.key.as_ref();
-            if !matches!(key, b"Include" | b"Update" | b"Version") {
+            if !matches!(key, "Include" | "Update" | "Version") {
                 continue;
             }
 
@@ -72,16 +72,16 @@ impl PendingItem {
                 attribute_value_range(event, raw_value).ok_or(())?;
             let value = LocatedValue {
                 value: attribute
-                    .decoded_and_normalized_value(XmlVersion::Implicit1_0, event.decoder())
+                    .normalized_value(XmlVersion::Implicit1_0)
                     .map_err(|_| ())?
                     .into_owned(),
                 absolute_start: event_start.checked_add(relative_start).ok_or(())?,
                 absolute_end: event_start.checked_add(relative_end).ok_or(())?,
             };
             match key {
-                b"Include" => include = Some(value),
-                b"Update" => update = Some(value),
-                b"Version" => version = Some(value),
+                "Include" => include = Some(value),
+                "Update" => update = Some(value),
+                "Version" => version = Some(value),
                 _ => {}
             }
         }
@@ -119,8 +119,8 @@ impl ActiveItem {
         }
     }
 
-    fn begin_child_version(&mut self, local_name: &[u8], event_depth: usize) {
-        if local_name == b"Version"
+    fn begin_child_version(&mut self, local_name: &str, event_depth: usize) {
+        if local_name == "Version"
             && self.item.version.is_none()
             && self.item_depth.checked_add(1) == Some(event_depth)
         {
@@ -285,12 +285,12 @@ impl<'a> ParseState<'a> {
         Ok(())
     }
 
-    fn handle_end(&mut self, local_name: &[u8]) -> Result<(), ()> {
+    fn handle_end(&mut self, local_name: &str) -> Result<(), ()> {
         let event_depth = self.depth.checked_sub(1).ok_or(())?;
         self.depth = event_depth;
 
         if self.active.as_ref().and_then(|active| active.version_depth) == Some(event_depth) {
-            if local_name != b"Version" {
+            if local_name != "Version" {
                 return Err(());
             }
             self.active.as_mut().ok_or(())?.version_depth = None;
@@ -380,12 +380,12 @@ fn parse_xml(content: &str) -> Result<Vec<Dependency>, ()> {
     }
 }
 
-fn is_xml_whitespace(value: &[u8]) -> bool {
-    value.iter().all(u8::is_ascii_whitespace)
+fn is_xml_whitespace(value: &str) -> bool {
+    value.bytes().all(|byte| byte.is_ascii_whitespace())
 }
 
 fn validate_xml_declaration(declaration: &BytesDecl<'_>) -> Result<(), ()> {
-    let raw = std::str::from_utf8(declaration.as_ref()).map_err(|_| ())?;
+    let raw: &str = declaration.as_ref();
     if !raw.as_bytes().get(3).is_some_and(u8::is_ascii_whitespace) {
         return Err(());
     }
@@ -397,9 +397,9 @@ fn validate_xml_declaration(declaration: &BytesDecl<'_>) -> Result<(), ()> {
         let key = attribute.key.as_ref();
         let value = attribute.value.as_ref();
         attribute_position = match (attribute_position, key) {
-            (0, b"version") if matches!(value, b"1.0" | b"1.1") => 1,
-            (1, b"encoding") if is_valid_xml_encoding(value) => 2,
-            (1 | 2, b"standalone") if matches!(value, b"yes" | b"no") => 3,
+            (0, "version") if matches!(value, "1.0" | "1.1") => 1,
+            (1, "encoding") if is_valid_xml_encoding(value) => 2,
+            (1 | 2, "standalone") if matches!(value, "yes" | "no") => 3,
             _ => return Err(()),
         };
     }
@@ -411,12 +411,10 @@ fn validate_xml_declaration(declaration: &BytesDecl<'_>) -> Result<(), ()> {
     }
 }
 
-fn is_valid_xml_encoding(value: &[u8]) -> bool {
-    value.first().is_some_and(u8::is_ascii_alphabetic)
-        && value
-            .iter()
-            .skip(1)
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+fn is_valid_xml_encoding(value: &str) -> bool {
+    let mut bytes = value.bytes();
+    bytes.next().is_some_and(|byte| byte.is_ascii_alphabetic())
+        && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
 fn is_supported_xml_reference(reference: &BytesRef<'_>) -> bool {
@@ -425,9 +423,7 @@ fn is_supported_xml_reference(reference: &BytesRef<'_>) -> bool {
             u32::from(character),
             0x9 | 0xA | 0xD | 0x20..=0xD7FF | 0xE000..=0xFFFD | 0x10000..=0x10FFFF
         ),
-        Ok(None) => reference
-            .decode()
-            .is_ok_and(|entity| resolve_xml_entity(&entity).is_some()),
+        Ok(None) => resolve_xml_entity(reference).is_some(),
         Err(_) => false,
     }
 }
@@ -513,7 +509,7 @@ fn span_from_absolute(
 
 fn event_content_start(event_end: u64, event: &BytesStart<'_>, is_empty: bool) -> Option<usize> {
     let event_end = usize::try_from(event_end).ok()?;
-    let event_raw: &[u8] = event.as_ref();
+    let event_raw: &str = event.as_ref();
     let closing_delimiter_len = if is_empty { 2 } else { 1 };
     event_end
         .checked_sub(event_raw.len())?
@@ -533,7 +529,7 @@ fn located_text(
     content: &str,
 ) -> Result<Option<LocatedValue>, ()> {
     let event_end = usize::try_from(event_end).map_err(|_| ())?;
-    let raw_text: &[u8] = text.as_ref();
+    let raw_text: &str = text.as_ref();
     let raw_start = event_end.checked_sub(raw_text.len()).ok_or(())?;
     let raw = content.get(raw_start..event_end).ok_or(())?;
     let raw_without_leading = raw.trim_start();
@@ -545,7 +541,7 @@ fn located_text(
 
     let absolute_start = raw_start.checked_add(leading_len).ok_or(())?;
     let absolute_end = absolute_start.checked_add(trimmed_raw.len()).ok_or(())?;
-    let value = text.decode().map_err(|_| ())?.trim().to_string();
+    let value = text.trim().to_string();
 
     Ok(Some(LocatedValue {
         value,
@@ -554,8 +550,8 @@ fn located_text(
     }))
 }
 
-fn attribute_value_range(event: &BytesStart<'_>, value: &[u8]) -> Option<(usize, usize)> {
-    let raw: &[u8] = event.as_ref();
+fn attribute_value_range(event: &BytesStart<'_>, value: &str) -> Option<(usize, usize)> {
+    let raw: &str = event.as_ref();
     let start = (value.as_ptr() as usize).checked_sub(raw.as_ptr() as usize)?;
     let end = start.checked_add(value.len())?;
     raw.get(start..end)?;

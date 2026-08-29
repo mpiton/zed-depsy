@@ -158,35 +158,32 @@ pub(crate) fn parse_metadata_xml(
     let mut release: Option<String> = None;
     let mut versions: Vec<String> = Vec::new();
 
-    let mut stack: Vec<Vec<u8>> = Vec::new();
+    let mut stack: Vec<String> = Vec::new();
 
     loop {
         match reader.read_event() {
             Err(_) => return None,
             Ok(Event::Eof) => break,
-            Ok(Event::Start(e)) => stack.push(e.name().as_ref().to_vec()),
+            Ok(Event::Start(e)) => stack.push(e.name().as_ref().to_string()),
             Ok(Event::End(_)) => {
                 stack.pop();
             }
             Ok(Event::Text(e)) => {
-                let text = match e.decode() {
-                    Ok(s) => s.into_owned(),
-                    Err(_) => continue,
-                };
+                let text = e.to_string();
                 // Path checks: metadata > versioning > latest | release
                 // Path: metadata > versioning > versions > version
                 let len = stack.len();
-                if len >= 3 && stack[len - 3] == b"metadata" && stack[len - 2] == b"versioning" {
-                    match stack[len - 1].as_slice() {
-                        b"latest" => latest = Some(text),
-                        b"release" => release = Some(text),
+                if len >= 3 && stack[len - 3] == "metadata" && stack[len - 2] == "versioning" {
+                    match stack[len - 1].as_str() {
+                        "latest" => latest = Some(text),
+                        "release" => release = Some(text),
                         _ => {}
                     }
                 } else if len >= 4
-                    && stack[len - 4] == b"metadata"
-                    && stack[len - 3] == b"versioning"
-                    && stack[len - 2] == b"versions"
-                    && stack[len - 1] == b"version"
+                    && stack[len - 4] == "metadata"
+                    && stack[len - 3] == "versioning"
+                    && stack[len - 2] == "versions"
+                    && stack[len - 1] == "version"
                 {
                     versions.push(text);
                 }
@@ -218,43 +215,40 @@ pub(crate) fn parse_pom_metadata(
     let mut repository: Option<String> = None;
     let mut licenses: Vec<String> = Vec::new();
 
-    let mut stack: Vec<Vec<u8>> = Vec::new();
+    let mut stack: Vec<String> = Vec::new();
 
     loop {
         match reader.read_event() {
             Err(_) => break,
             Ok(Event::Eof) => break,
-            Ok(Event::Start(e)) => stack.push(e.name().as_ref().to_vec()),
+            Ok(Event::Start(e)) => stack.push(e.name().as_ref().to_string()),
             Ok(Event::End(_)) => {
                 stack.pop();
             }
             Ok(Event::Text(e)) => {
-                let text = match e.decode() {
-                    Ok(s) => s.into_owned(),
-                    Err(_) => continue,
-                };
+                let text = e.to_string();
                 let len = stack.len();
                 // project > description
-                if len == 2 && stack[0] == b"project" && stack[1] == b"description" {
+                if len == 2 && stack[0] == "project" && stack[1] == "description" {
                     description = Some(text);
                     continue;
                 }
                 // project > url
-                if len == 2 && stack[0] == b"project" && stack[1] == b"url" {
+                if len == 2 && stack[0] == "project" && stack[1] == "url" {
                     homepage = Some(text);
                     continue;
                 }
                 // project > scm > url
-                if len == 3 && stack[0] == b"project" && stack[1] == b"scm" && stack[2] == b"url" {
+                if len == 3 && stack[0] == "project" && stack[1] == "scm" && stack[2] == "url" {
                     repository = Some(text);
                     continue;
                 }
                 // project > licenses > license > name
                 if len == 4
-                    && stack[0] == b"project"
-                    && stack[1] == b"licenses"
-                    && stack[2] == b"license"
-                    && stack[3] == b"name"
+                    && stack[0] == "project"
+                    && stack[1] == "licenses"
+                    && stack[2] == "license"
+                    && stack[3] == "name"
                 {
                     licenses.push(text);
                 }

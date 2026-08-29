@@ -110,7 +110,7 @@ fn extract_properties(content: &str) -> HashMap<String, String> {
     reader.config_mut().trim_text(true);
 
     let mut out = HashMap::new();
-    let mut depth_stack: Vec<Vec<u8>> = Vec::new();
+    let mut depth_stack: Vec<String> = Vec::new();
     let mut current_key: Option<String> = None;
 
     loop {
@@ -118,33 +118,30 @@ fn extract_properties(content: &str) -> HashMap<String, String> {
             Err(_) => return HashMap::new(),
             Ok(Event::Eof) => break,
             Ok(Event::Start(e)) => {
-                let name = e.local_name().as_ref().to_vec();
-                let parent = depth_stack.last().map(|v| v.as_slice());
+                let name = e.local_name().as_ref().to_string();
+                let parent = depth_stack.last().map(String::as_str);
                 // Properties map: project > properties > <key>
-                if parent == Some(b"properties")
+                if parent == Some("properties")
                     && depth_stack.len() >= 2
-                    && depth_stack[depth_stack.len() - 2] == b"project"
-                    && let Ok(s) = std::str::from_utf8(&name)
+                    && depth_stack[depth_stack.len() - 2] == "project"
                 {
-                    current_key = Some(s.to_string());
+                    current_key = Some(name.clone());
                 }
                 // Built-in project properties: project > (version|groupId|artifactId)
-                if parent == Some(b"project")
-                    && matches!(name.as_slice(), b"version" | b"groupId" | b"artifactId")
-                    && let Ok(s) = std::str::from_utf8(&name)
+                if parent == Some("project")
+                    && matches!(name.as_str(), "version" | "groupId" | "artifactId")
                 {
-                    current_key = Some(format!("project.{s}"));
+                    current_key = Some(format!("project.{name}"));
                 }
                 depth_stack.push(name);
             }
             Ok(Event::Text(e)) => {
                 if let Some(ref key) = current_key
-                    && let Ok(text) = e.decode()
                     && !out.contains_key(key)
                 {
                     // First occurrence wins to avoid overwriting project.version
                     // with a nested <dependency><version>.
-                    out.insert(key.clone(), text.into_owned());
+                    out.insert(key.clone(), e.to_string());
                 }
             }
             Ok(Event::End(_)) => {
@@ -176,7 +173,7 @@ fn extract_dependencies(content: &str, properties: &HashMap<String, String>) -> 
     let mut in_plugins = false;
     let mut in_dependency = false;
     let mut has_parent = false;
-    let mut current_tag: Option<Vec<u8>> = None;
+    let mut current_tag: Option<String> = None;
 
     // Current dependency accumulator
     let mut cur_group: Option<String> = None;
@@ -192,13 +189,13 @@ fn extract_dependencies(content: &str, properties: &HashMap<String, String>) -> 
             Err(_) => return vec![], // invalid XML → empty result
             Ok(Event::Eof) => break,
             Ok(Event::Start(e)) => {
-                let name = e.local_name().as_ref().to_vec();
-                match name.as_slice() {
-                    b"dependencies" if !in_plugins => in_dependencies = true,
-                    b"dependencyManagement" => in_dep_mgmt = true,
-                    b"plugins" | b"pluginManagement" => in_plugins = true,
-                    b"parent" => has_parent = true,
-                    b"dependency" if (in_dependencies || in_dep_mgmt) && !in_plugins => {
+                let name = e.local_name().as_ref().to_string();
+                match name.as_str() {
+                    "dependencies" if !in_plugins => in_dependencies = true,
+                    "dependencyManagement" => in_dep_mgmt = true,
+                    "plugins" | "pluginManagement" => in_plugins = true,
+                    "parent" => has_parent = true,
+                    "dependency" if (in_dependencies || in_dep_mgmt) && !in_plugins => {
                         in_dependency = true;
                         cur_group = None;
                         cur_artifact = None;
@@ -213,12 +210,12 @@ fn extract_dependencies(content: &str, properties: &HashMap<String, String>) -> 
                 current_tag = Some(name);
             }
             Ok(Event::End(e)) => {
-                let name = e.local_name().as_ref().to_vec();
-                match name.as_slice() {
-                    b"dependencies" => in_dependencies = false,
-                    b"dependencyManagement" => in_dep_mgmt = false,
-                    b"plugins" | b"pluginManagement" => in_plugins = false,
-                    b"dependency" if in_dependency => {
+                let name = e.local_name().as_ref().to_string();
+                match name.as_str() {
+                    "dependencies" => in_dependencies = false,
+                    "dependencyManagement" => in_dep_mgmt = false,
+                    "plugins" | "pluginManagement" => in_plugins = false,
+                    "dependency" if in_dependency => {
                         in_dependency = false;
                         let g_opt = cur_group.take();
                         let a_opt = cur_artifact.take();
@@ -297,25 +294,22 @@ fn extract_dependencies(content: &str, properties: &HashMap<String, String>) -> 
                 current_tag = None;
             }
             Ok(Event::Text(e)) if in_dependency => {
-                let raw = match e.decode() {
-                    Ok(s) => s.into_owned(),
-                    Err(_) => continue,
-                };
+                let raw = e.to_string();
                 let text = raw.trim().to_string();
                 match current_tag.as_deref() {
-                    Some(b"groupId") => cur_group = Some(text),
-                    Some(b"artifactId") => {
+                    Some("groupId") => cur_group = Some(text),
+                    Some("artifactId") => {
                         let (s, e_) = trimmed_span(bytes, &reader, raw.len());
                         cur_artifact_span = Some((s, e_));
                         cur_artifact = Some(text);
                     }
-                    Some(b"version") => {
+                    Some("version") => {
                         let (s, e_) = trimmed_span(bytes, &reader, raw.len());
                         cur_version_span = Some((s, e_));
                         cur_version = Some(text);
                     }
-                    Some(b"scope") => cur_scope = Some(text),
-                    Some(b"optional") => cur_optional = text == "true",
+                    Some("scope") => cur_scope = Some(text),
+                    Some("optional") => cur_optional = text == "true",
                     _ => {}
                 }
             }

@@ -18,6 +18,7 @@ use quick_xml::events::Event;
 use quick_xml::reader::Reader;
 
 use crate::parsers::{Dependency, Parser, Span};
+use crate::utils::push_xml_ref;
 
 /// Parser for Maven `pom.xml` files.
 ///
@@ -107,17 +108,24 @@ fn offset_to_position(offsets: &[usize], byte_offset: usize) -> (u32, u32) {
 /// subset of Maven's built-in property resolution that the MVP supports.
 fn extract_properties(content: &str) -> HashMap<String, String> {
     let mut reader = Reader::from_str(content);
-    reader.config_mut().trim_text(true);
+    // Keep the raw text: `trim_text(true)` trims each fragment of a value split by
+    // an entity reference on its own, which would eat the spaces around `&amp;`.
+    // The assembled value is trimmed on `End` instead.
+    reader.config_mut().trim_text(false);
 
     let mut out = HashMap::new();
     let mut depth_stack: Vec<String> = Vec::new();
     let mut current_key: Option<String> = None;
+    // Text of the element being read, assembled across the `Text` / `GeneralRef`
+    // fragments quick-xml emits for a single value.
+    let mut text = String::new();
 
     loop {
         match reader.read_event() {
             Err(_) => return HashMap::new(),
             Ok(Event::Eof) => break,
             Ok(Event::Start(e)) => {
+                text.clear();
                 let name = e.local_name().as_ref().to_string();
                 let parent = depth_stack.last().map(String::as_str);
                 // Properties map: project > properties > <key>
@@ -135,18 +143,20 @@ fn extract_properties(content: &str) -> HashMap<String, String> {
                 }
                 depth_stack.push(name);
             }
-            Ok(Event::Text(e)) => {
-                if let Some(ref key) = current_key
-                    && !out.contains_key(key)
-                {
-                    // First occurrence wins to avoid overwriting project.version
-                    // with a nested <dependency><version>.
-                    out.insert(key.clone(), e.to_string());
-                }
-            }
+            Ok(Event::Text(e)) if current_key.is_some() => text.push_str(&e),
+            Ok(Event::GeneralRef(e)) if current_key.is_some() => push_xml_ref(&mut text, &e),
             Ok(Event::End(_)) => {
+                let value = text.trim();
+                // First occurrence wins to avoid overwriting project.version
+                // with a nested <dependency><version>.
+                if let Some(key) = current_key.take()
+                    && !value.is_empty()
+                    && !out.contains_key(&key)
+                {
+                    out.insert(key, value.to_string());
+                }
                 depth_stack.pop();
-                current_key = None;
+                text.clear();
             }
             _ => {}
         }
@@ -184,11 +194,20 @@ fn extract_dependencies(content: &str, properties: &HashMap<String, String>) -> 
     let mut cur_scope: Option<String> = None;
     let mut cur_optional = false;
 
+    // Text of the element being read plus its byte span, assembled across the
+    // `Text` / `GeneralRef` fragments quick-xml emits for a single value.
+    let mut text = String::new();
+    let mut text_span: Option<(usize, usize)> = None;
+
     loop {
+        // Position before the event is the start offset of its raw bytes.
+        let event_start = reader.buffer_position() as usize;
         match reader.read_event() {
             Err(_) => return vec![], // invalid XML → empty result
             Ok(Event::Eof) => break,
             Ok(Event::Start(e)) => {
+                text.clear();
+                text_span = None;
                 let name = e.local_name().as_ref().to_string();
                 match name.as_str() {
                     "dependencies" if !in_plugins => in_dependencies = true,
@@ -210,6 +229,32 @@ fn extract_dependencies(content: &str, properties: &HashMap<String, String>) -> 
                 current_tag = Some(name);
             }
             Ok(Event::End(e)) => {
+                // Commit the element text before `</dependency>` clears the
+                // per-dependency state below.
+                if in_dependency {
+                    let value = text.trim();
+                    if !value.is_empty() {
+                        match current_tag.as_deref() {
+                            Some("groupId") => cur_group = Some(value.to_string()),
+                            Some("artifactId") => {
+                                cur_artifact_span =
+                                    text_span.map(|(s, e_)| trimmed_span(bytes, s, e_));
+                                cur_artifact = Some(value.to_string());
+                            }
+                            Some("version") => {
+                                cur_version_span =
+                                    text_span.map(|(s, e_)| trimmed_span(bytes, s, e_));
+                                cur_version = Some(value.to_string());
+                            }
+                            Some("scope") => cur_scope = Some(value.to_string()),
+                            Some("optional") => cur_optional = value == "true",
+                            _ => {}
+                        }
+                    }
+                }
+                text.clear();
+                text_span = None;
+
                 let name = e.local_name().as_ref().to_string();
                 match name.as_str() {
                     "dependencies" => in_dependencies = false,
@@ -294,24 +339,14 @@ fn extract_dependencies(content: &str, properties: &HashMap<String, String>) -> 
                 current_tag = None;
             }
             Ok(Event::Text(e)) if in_dependency => {
-                let raw = e.to_string();
-                let text = raw.trim().to_string();
-                match current_tag.as_deref() {
-                    Some("groupId") => cur_group = Some(text),
-                    Some("artifactId") => {
-                        let (s, e_) = trimmed_span(bytes, &reader, raw.len());
-                        cur_artifact_span = Some((s, e_));
-                        cur_artifact = Some(text);
-                    }
-                    Some("version") => {
-                        let (s, e_) = trimmed_span(bytes, &reader, raw.len());
-                        cur_version_span = Some((s, e_));
-                        cur_version = Some(text);
-                    }
-                    Some("scope") => cur_scope = Some(text),
-                    Some("optional") => cur_optional = text == "true",
-                    _ => {}
-                }
+                text.push_str(&e);
+                let start = text_span.map_or(event_start, |(s, _)| s);
+                text_span = Some((start, reader.buffer_position() as usize));
+            }
+            Ok(Event::GeneralRef(e)) if in_dependency => {
+                push_xml_ref(&mut text, &e);
+                let start = text_span.map_or(event_start, |(s, _)| s);
+                text_span = Some((start, reader.buffer_position() as usize));
             }
             _ => {}
         }
@@ -326,13 +361,13 @@ fn extract_dependencies(content: &str, properties: &HashMap<String, String>) -> 
     out
 }
 
-/// Given the raw buffer position after a `Text` event and the raw text length,
-/// return the byte span of the trimmed content (leading + trailing whitespace removed).
-fn trimmed_span(bytes: &[u8], reader: &Reader<&[u8]>, raw_len: usize) -> (usize, usize) {
-    let raw_end = reader.buffer_position() as usize;
-    let raw_start = raw_end.saturating_sub(raw_len);
-    let mut start = raw_start.min(bytes.len());
-    let mut end = raw_end.min(bytes.len());
+/// Narrows the byte span `start..end` to its non-whitespace content.
+///
+/// The span covers the element's raw source, entity references included, so
+/// `<version>3.1&amp;4</version>` reports the whole `3.1&amp;4` run.
+fn trimmed_span(bytes: &[u8], start: usize, end: usize) -> (usize, usize) {
+    let mut start = start.min(bytes.len());
+    let mut end = end.min(bytes.len());
     while start < end && bytes[start].is_ascii_whitespace() {
         start += 1;
     }
@@ -768,6 +803,132 @@ mod tests {
             deps[0].resolved_version.as_deref(),
             Some("1.7.30"),
             "property substitution should work under prefixed namespace"
+        );
+    }
+
+    #[test]
+    fn test_parse_dependency_with_entity_references() {
+        let parser = MavenParser::new();
+        let pom = r#"<?xml version="1.0" encoding="UTF-8"?>
+<project>
+    <dependencies>
+        <dependency>
+            <groupId>org.a&amp;b</groupId>
+            <artifactId>art&amp;fact</artifactId>
+            <version>3.1&amp;4</version>
+        </dependency>
+    </dependencies>
+</project>
+"#;
+        let deps = parser.parse(pom);
+        assert_eq!(deps.len(), 1, "should parse one dependency");
+        assert_eq!(
+            deps[0].name, "org.a&b:art&fact",
+            "entity references must be resolved and concatenated, not truncated"
+        );
+        assert_eq!(deps[0].version, "3.1&4");
+    }
+
+    #[test]
+    fn test_entity_reference_spans_cover_whole_value() {
+        let parser = MavenParser::new();
+        let pom = "<project>\n<dependencies>\n<dependency>\n<groupId>g</groupId>\n<artifactId>art&amp;fact</artifactId>\n<version>3.1&amp;4</version>\n</dependency>\n</dependencies>\n</project>\n";
+        let deps = parser.parse(pom);
+        assert_eq!(deps.len(), 1);
+        let lines: Vec<&str> = pom.lines().collect();
+
+        let ns = &deps[0].name_span;
+        assert_eq!(ns.line, 4, "artifactId is on line 4 (0-indexed)");
+        assert_eq!(
+            &lines[ns.line as usize][ns.line_start as usize..ns.line_end as usize],
+            "art&amp;fact",
+            "name span must cover the whole raw value, entity included"
+        );
+
+        let vs = &deps[0].version_span;
+        assert_eq!(vs.line, 5, "version is on line 5 (0-indexed)");
+        assert_eq!(
+            &lines[vs.line as usize][vs.line_start as usize..vs.line_end as usize],
+            "3.1&amp;4",
+            "version span must cover the whole raw value, entity included"
+        );
+    }
+
+    #[test]
+    fn test_parse_dependency_with_numeric_char_ref() {
+        let parser = MavenParser::new();
+        let pom = r#"<project>
+    <dependencies>
+        <dependency>
+            <groupId>org.example</groupId>
+            <artifactId>lib</artifactId>
+            <version>1.0&#45;beta</version>
+        </dependency>
+    </dependencies>
+</project>"#;
+        let deps = parser.parse(pom);
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps[0].version, "1.0-beta", "numeric char refs resolve too");
+    }
+
+    #[test]
+    fn test_extract_properties_with_entity_reference() {
+        let pom = r#"<?xml version="1.0" encoding="UTF-8"?>
+<project>
+    <properties>
+        <docs.url>https://ex.com/?a=1&amp;b=2</docs.url>
+        <spaced.name>Fast &amp; small</spaced.name>
+    </properties>
+</project>
+"#;
+        let props = extract_properties(pom);
+        assert_eq!(
+            props.get("docs.url").map(String::as_str),
+            Some("https://ex.com/?a=1&b=2"),
+            "property values must keep the text around the entity reference"
+        );
+        assert_eq!(
+            props.get("spaced.name").map(String::as_str),
+            Some("Fast & small"),
+            "spaces around the entity must survive"
+        );
+    }
+
+    #[test]
+    fn test_property_substitution_with_entity_reference() {
+        let parser = MavenParser::new();
+        let pom = r#"<?xml version="1.0" encoding="UTF-8"?>
+<project>
+    <properties>
+        <lib.version>1.0&amp;2</lib.version>
+    </properties>
+    <dependencies>
+        <dependency>
+            <groupId>com.example</groupId>
+            <artifactId>lib</artifactId>
+            <version>${lib.version}</version>
+        </dependency>
+    </dependencies>
+</project>
+"#;
+        let deps = parser.parse(pom);
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps[0].version, "${lib.version}");
+        assert_eq!(deps[0].resolved_version.as_deref(), Some("1.0&2"));
+    }
+
+    #[test]
+    fn test_unknown_entity_kept_verbatim() {
+        let pom = r#"<project>
+    <properties>
+        <odd>a&custom;b</odd>
+    </properties>
+</project>"#;
+        let props = extract_properties(pom);
+        assert_eq!(
+            props.get("odd").map(String::as_str),
+            Some("a&custom;b"),
+            "an entity we cannot resolve is kept as written rather than dropped"
         );
     }
 }

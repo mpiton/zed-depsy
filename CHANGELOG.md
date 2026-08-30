@@ -19,6 +19,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Maven XML values containing an entity reference are no longer truncated.
+  quick-xml reports `&amp;` as its own event between two text events, and the
+  Maven parsers kept a single fragment instead of joining them, so
+  `<description>Fast &amp; small</description>` surfaced as `small` in hover.
+  Element text is now assembled across fragments in the pom parser,
+  `maven-metadata.xml` and the pom metadata used for hover, and the reported
+  spans cover the whole value. Numeric character references (`&#45;`) resolve as
+  well; an entity that cannot be resolved is kept as written rather than dropped
+  ([#394](https://github.com/mpiton/zed-depsy/issues/394))
 - A `Cargo.lock` holding several versions of the same crate no longer resolves
   to whichever entry appears first: the entry is matched against the
   requirement declared in `Cargo.toml`, so `serde = "~1.1"` no longer reports

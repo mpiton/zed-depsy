@@ -2,6 +2,8 @@
 
 use core::fmt::{self, Write as _};
 
+use quick_xml::events::BytesRef;
+
 /// Returns an <code>[fmt::Display] + [fmt::Debug]</code> implementation
 /// which truncates the given string to a maximum character count.
 ///
@@ -78,6 +80,44 @@ pub fn html_escape(s: &str) -> String {
         }
     }
     out
+}
+
+/// Appends the text an XML reference stands for to `out`.
+///
+/// quick-xml emits every `&…;` inside element content as a standalone
+/// [`Event::GeneralRef`](quick_xml::events::Event::GeneralRef) sandwiched
+/// between two `Event::Text` events, so a parser that assembles element text
+/// has to fold the reference back in itself. Numeric character references
+/// (`&#45;`, `&#x2D;`) and the five predefined XML entities (`amp`, `lt`, `gt`,
+/// `apos`, `quot`) are resolved; anything else — a DTD-declared entity, a typo —
+/// is written back verbatim as `&name;` so the value is preserved rather than
+/// silently dropped.
+///
+/// # Examples
+///
+/// ```
+/// use depsy_lsp::utils::push_xml_ref;
+/// use quick_xml::events::BytesRef;
+///
+/// let mut out = String::from("a");
+/// push_xml_ref(&mut out, &BytesRef::new("amp"));
+/// push_xml_ref(&mut out, &BytesRef::new("#98"));
+/// push_xml_ref(&mut out, &BytesRef::new("custom"));
+/// assert_eq!(out, "a&b&custom;");
+/// ```
+pub fn push_xml_ref(out: &mut String, entity: &BytesRef<'_>) {
+    if let Ok(Some(c)) = entity.resolve_char_ref() {
+        out.push(c);
+        return;
+    }
+    let name: &str = entity;
+    match quick_xml::escape::resolve_xml_entity(name) {
+        Some(text) => out.push_str(text),
+        // Unknown entity: keep the source form. Writing to a String never fails.
+        None => {
+            let _ = write!(out, "&{name};");
+        }
+    }
 }
 
 #[cfg(test)]

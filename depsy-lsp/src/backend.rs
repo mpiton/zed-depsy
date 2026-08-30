@@ -43,7 +43,7 @@ use std::{
 };
 
 use dashmap::DashMap;
-use hashbrown::HashMap;
+use hashbrown::{HashMap, HashSet};
 use reqwest::Client as HttpClient;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
@@ -80,7 +80,7 @@ use crate::registries::packagist::PackagistRegistry;
 use crate::registries::pub_dev::PubDevRegistry;
 use crate::registries::pypi::PyPiRegistry;
 use crate::registries::rubygems::RubyGemsRegistry;
-use crate::registries::{Registry, VersionInfo, VulnerabilitySeverity};
+use crate::registries::{Registry, VersionInfo, Vulnerability, VulnerabilitySeverity};
 use crate::reports::{VulnerabilityReportEntry, VulnerabilitySummary};
 use crate::vulnerabilities::cache::VulnerabilityCache;
 use crate::vulnerabilities::osv::OsvClient;
@@ -1236,32 +1236,15 @@ impl DepsyBackend {
         };
 
         // Collect vulnerabilities from the version cache
-        let mut vulnerabilities: Vec<VulnerabilityReportEntry> = Vec::new();
-        let mut summary = VulnerabilitySummary::default();
-
+        let mut hits: Vec<(&crate::parsers::Dependency, Vec<Vulnerability>)> = Vec::new();
         for dep in &dependencies {
             let cache_key = dep_cache_key(dep, file_type);
             if let Some(info) = self.version_cache.get(&cache_key).await {
-                for vuln in &info.vulnerabilities {
-                    summary.total += 1;
-                    match vuln.severity {
-                        VulnerabilitySeverity::Critical => summary.critical += 1,
-                        VulnerabilitySeverity::High => summary.high += 1,
-                        VulnerabilitySeverity::Medium => summary.medium += 1,
-                        VulnerabilitySeverity::Low => summary.low += 1,
-                    }
-
-                    vulnerabilities.push(VulnerabilityReportEntry {
-                        package: dep.name.clone(),
-                        version: dep.version.clone(),
-                        id: vuln.id.clone(),
-                        severity: format!("{:?}", vuln.severity).to_lowercase(),
-                        description: vuln.description.clone(),
-                        url: vuln.url.clone(),
-                    });
-                }
+                hits.push((dep, info.vulnerabilities.clone()));
             }
         }
+        let (summary, vulnerabilities) =
+            build_vulnerability_report(hits.iter().map(|(dep, vulns)| (*dep, vulns.as_slice())));
 
         // Generate report based on format
         match format {
@@ -1287,6 +1270,49 @@ impl DepsyBackend {
 /// Format the hover content for a dependency with version info.
 ///
 /// Extracted from the hover handler to enable unit testing.
+/// Folds cached advisories into a report plus its severity summary.
+///
+/// A crate declared in several sections — the manifest root plus one or more
+/// `[target.<cfg>]` tables — produces one [`Dependency`] per declaration, each
+/// carrying its own span. They all resolve to the same cache entry, so the same
+/// advisory is reachable several times; `(package, version, id)` is counted and
+/// listed once so the summary is not inflated.
+///
+/// [`Dependency`]: crate::parsers::Dependency
+fn build_vulnerability_report<'a>(
+    hits: impl IntoIterator<Item = (&'a crate::parsers::Dependency, &'a [Vulnerability])>,
+) -> (VulnerabilitySummary, Vec<VulnerabilityReportEntry>) {
+    let mut summary = VulnerabilitySummary::default();
+    let mut entries: Vec<VulnerabilityReportEntry> = Vec::new();
+    let mut seen: HashSet<(&str, &str, &str)> = HashSet::new();
+
+    for (dep, vulns) in hits {
+        for vuln in vulns {
+            if !seen.insert((&dep.name, &dep.version, &vuln.id)) {
+                continue;
+            }
+            summary.total += 1;
+            match vuln.severity {
+                VulnerabilitySeverity::Critical => summary.critical += 1,
+                VulnerabilitySeverity::High => summary.high += 1,
+                VulnerabilitySeverity::Medium => summary.medium += 1,
+                VulnerabilitySeverity::Low => summary.low += 1,
+            }
+
+            entries.push(VulnerabilityReportEntry {
+                package: dep.name.clone(),
+                version: dep.version.clone(),
+                id: vuln.id.clone(),
+                severity: format!("{:?}", vuln.severity).to_lowercase(),
+                description: vuln.description.clone(),
+                url: vuln.url.clone(),
+            });
+        }
+    }
+
+    (summary, entries)
+}
+
 fn format_hover_content(
     dep: &crate::parsers::Dependency,
     file_type: FileType,
@@ -2006,6 +2032,60 @@ mod tests {
             resolved_version: resolved.map(str::to_string),
             has_additional_version_constraints: false,
         }
+    }
+
+    #[test]
+    fn vulnerability_report_counts_a_crate_declared_in_several_sections_once() {
+        // Same crate in [dependencies] and two [target.<cfg>.dependencies] tables:
+        // three Dependency values, three spans, one cache entry.
+        let root = make_dep("libc", "0.2", None);
+        let linux = make_dep("libc", "0.2", None);
+        let macos = make_dep("libc", "0.2", None);
+        let vulns = [Vulnerability {
+            id: "RUSTSEC-0000-0000".to_string(),
+            severity: VulnerabilitySeverity::Critical,
+            description: "boom".to_string(),
+            url: None,
+        }];
+
+        let (summary, entries) = build_vulnerability_report([
+            (&root, vulns.as_slice()),
+            (&linux, vulns.as_slice()),
+            (&macos, vulns.as_slice()),
+        ]);
+
+        assert_eq!(summary.total, 1, "{entries:#?}");
+        assert_eq!(summary.critical, 1);
+        assert_eq!(entries.len(), 1);
+    }
+
+    #[test]
+    fn vulnerability_report_keeps_distinct_advisories_and_versions() {
+        let serde = make_dep("serde", "1.0", None);
+        let libc = make_dep("libc", "0.2", None);
+        let critical = Vulnerability {
+            id: "RUSTSEC-0000-0001".to_string(),
+            severity: VulnerabilitySeverity::Critical,
+            description: "one".to_string(),
+            url: None,
+        };
+        let low = Vulnerability {
+            id: "RUSTSEC-0000-0002".to_string(),
+            severity: VulnerabilitySeverity::Low,
+            description: "two".to_string(),
+            url: None,
+        };
+
+        let (summary, entries) = build_vulnerability_report([
+            (&serde, std::slice::from_ref(&critical)),
+            (&libc, std::slice::from_ref(&critical)),
+            (&libc, std::slice::from_ref(&low)),
+        ]);
+
+        assert_eq!(summary.total, 3, "{entries:#?}");
+        assert_eq!(summary.critical, 2);
+        assert_eq!(summary.low, 1);
+        assert_eq!(entries.len(), 3);
     }
 
     #[test]

@@ -24,6 +24,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   variants) are now parsed, so their crates get versions, diagnostics, and
   update actions like any other dependency.
   ([#396](https://github.com/mpiton/zed-depsy/issues/396))
+- The vulnerability report no longer counts a crate twice when it is declared in
+  several sections at once — a common cross-platform pattern is to list the same
+  crate under `[dependencies]` and one or more `[target.<cfg>.dependencies]`
+  tables, which used to inflate the critical/high totals.
 - Maven XML values containing an entity reference are no longer truncated.
   quick-xml reports `&amp;` as its own event between two text events, and the
   Maven parsers kept a single fragment instead of joining them, so

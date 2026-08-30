@@ -113,6 +113,24 @@ criterion = "0.5"
 cc = "1.0"
 ```
 
+### Target-Specific Dependencies
+
+```toml
+[target.'cfg(unix)'.dependencies]
+nix = "0.29"
+```
+
+The `dev-dependencies` and `build-dependencies` variants work the same way, and
+the target can be an explicit triple instead of a `cfg` expression:
+
+```toml
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = "0.59"
+
+[target.x86_64-unknown-linux-gnu.build-dependencies]
+cc = "1.0"
+```
+
 ## Version Specification
 
 Cargo uses semantic versioning with these operators:

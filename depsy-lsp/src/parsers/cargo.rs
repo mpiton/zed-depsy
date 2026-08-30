@@ -8,7 +8,8 @@
 //! - Package alias: `serde1 = { package = "serde", version = "1.0" }`
 //! - Workspace dependencies: `[workspace.dependencies]`
 //! - All three scopes: `[dependencies]`, `[dev-dependencies]`, `[build-dependencies]`
-//! - Target-specific scopes: `[target.'cfg(unix)'.dependencies]` and friends
+//! - Target-specific scopes: `[target.'cfg(unix)'.dependencies]`, plus the
+//!   `dev-dependencies` and `build-dependencies` variants under any `[target.<cfg>]`
 //!
 //! Parsing is performed with `taplo` so that byte-accurate [`Span`] values are
 //! available for every token; this allows LSP quick-fix `TextEdit`s to replace
@@ -113,42 +114,15 @@ impl Parser for CargoParser {
 
         let mut dependencies = Vec::new();
 
-        // Define dependency sections to parse: (section_name, is_dev)
-        let sections = [
-            ("dependencies", false),
-            ("dev-dependencies", true),
-            ("build-dependencies", false),
-        ];
+        // Root sections: [dependencies], [dev-dependencies], [build-dependencies]
+        collect_section_deps(&dom, &line_ranges, &mut dependencies);
 
-        for (section_name, is_dev) in sections {
-            // Parse regular section dependencies (e.g., [dependencies])
-            let section_node = dom.get(section_name);
-            let Some(section) = section_node.as_table() else {
-                continue;
-            };
-            let entries = section.entries().read();
-            let deps = entries
-                .iter()
-                .filter_map(|(name, value)| parse_dependency(name, value, &line_ranges, is_dev));
-            dependencies.extend(deps);
-        }
-
-        // Parse target-specific sections (e.g. [target.'cfg(unix)'.dependencies])
+        // Target-specific sections (e.g. [target.'cfg(unix)'.dependencies])
         let target_node = dom.get("target");
         if let Some(target_table) = target_node.as_table() {
             let targets = target_table.entries().read();
             for (_, cfg_node) in targets.iter() {
-                for (section_name, is_dev) in sections {
-                    let section_node = cfg_node.get(section_name);
-                    let Some(section) = section_node.as_table() else {
-                        continue;
-                    };
-                    let entries = section.entries().read();
-                    let deps = entries.iter().filter_map(|(name, value)| {
-                        parse_dependency(name, value, &line_ranges, is_dev)
-                    });
-                    dependencies.extend(deps);
-                }
+                collect_section_deps(cfg_node, &line_ranges, &mut dependencies);
             }
         }
 
@@ -165,6 +139,34 @@ impl Parser for CargoParser {
         }
 
         dependencies
+    }
+}
+
+/// Dependency scopes Cargo accepts under a manifest root or a `[target.<cfg>]`
+/// table, paired with whether the scope is dev-only.
+const DEPENDENCY_SECTIONS: [(&str, bool); 3] = [
+    ("dependencies", false),
+    ("dev-dependencies", true),
+    ("build-dependencies", false),
+];
+
+/// Parses every [`DEPENDENCY_SECTIONS`] table found directly under `container`
+/// and appends the dependencies to `out`.
+///
+/// `container` is the manifest root for `[dependencies]` and friends, or a
+/// single `[target.<cfg>]` table for the target-specific variants.
+fn collect_section_deps(container: &Node, line_spans: &[TextRange], out: &mut Vec<Dependency>) {
+    for (section_name, is_dev) in DEPENDENCY_SECTIONS {
+        let section_node = container.get(section_name);
+        let Some(section) = section_node.as_table() else {
+            continue;
+        };
+        let entries = section.entries().read();
+        out.extend(
+            entries
+                .iter()
+                .filter_map(|(name, value)| parse_dependency(name, value, line_spans, is_dev)),
+        );
     }
 }
 
@@ -547,6 +549,13 @@ members = ["crate-a"]
         assert_eq!(cargo_root_package_name("not [valid toml ="), None);
     }
 
+    /// Slices the text a [`Span`] points at, so a test can pin the exact range a
+    /// version-update `TextEdit` would rewrite.
+    fn span_text<'a>(content: &'a str, span: &Span) -> &'a str {
+        let line = content.lines().nth(span.line as usize).unwrap();
+        &line[span.line_start as usize..span.line_end as usize]
+    }
+
     #[test]
     fn test_target_specific_dependencies() {
         let parser = CargoParser::new();
@@ -565,9 +574,12 @@ criterion = "0.5"
 
 [target.'cfg(target_os = "macos")'.build-dependencies]
 cc = "1.0"
+
+[target.'cfg(unix)'.dependencies.reqwest]
+version = "0.12"
 "#;
         let deps = parser.parse(content);
-        assert_eq!(deps.len(), 5, "{deps:#?}");
+        assert_eq!(deps.len(), 6, "{deps:#?}");
 
         let nix = deps.iter().find(|d| d.name == "nix").unwrap();
         assert_eq!(nix.version, "0.29.0");
@@ -580,6 +592,18 @@ cc = "1.0"
         let criterion = deps.iter().find(|d| d.name == "criterion").unwrap();
         assert!(criterion.dev);
 
-        assert!(deps.iter().any(|d| d.name == "cc"));
+        // The update TextEdit is built from version_span, so pin it on a target dep.
+        let cc = deps.iter().find(|d| d.name == "cc").unwrap();
+        assert_eq!(cc.version, "1.0");
+        assert!(!cc.dev);
+        assert_eq!(cc.version_span.line, 14);
+        assert_eq!(span_text(content, &cc.version_span), "1.0");
+
+        // Sub-table form: the name lives on the header line, the version below it.
+        let reqwest = deps.iter().find(|d| d.name == "reqwest").unwrap();
+        assert_eq!(reqwest.version, "0.12");
+        assert_eq!(reqwest.name_span.line, 16);
+        assert_eq!(reqwest.version_span.line, 17);
+        assert_eq!(span_text(content, &reqwest.version_span), "0.12");
     }
 }

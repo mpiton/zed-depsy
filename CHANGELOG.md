@@ -19,6 +19,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Cargo target-specific sections (`[target.'cfg(unix)'.dependencies]`,
+  `[target.<triple>.dev-dependencies]`, and their `build-dependencies`
+  variants) are now parsed, so their crates get versions, diagnostics, and
+  update actions like any other dependency.
+  ([#396](https://github.com/mpiton/zed-depsy/issues/396))
 - Maven XML values containing an entity reference are no longer truncated.
   quick-xml reports `&amp;` as its own event between two text events, and the
   Maven parsers kept a single fragment instead of joining them, so

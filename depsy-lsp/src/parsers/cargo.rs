@@ -8,6 +8,7 @@
 //! - Package alias: `serde1 = { package = "serde", version = "1.0" }`
 //! - Workspace dependencies: `[workspace.dependencies]`
 //! - All three scopes: `[dependencies]`, `[dev-dependencies]`, `[build-dependencies]`
+//! - Target-specific scopes: `[target.'cfg(unix)'.dependencies]` and friends
 //!
 //! Parsing is performed with `taplo` so that byte-accurate [`Span`] values are
 //! available for every token; this allows LSP quick-fix `TextEdit`s to replace
@@ -62,8 +63,9 @@ pub fn cargo_root_package_name(manifest_content: &str) -> Option<String> {
 ///
 /// Delegates to the `taplo` TOML parser for robust span tracking.
 /// All three standard dependency scopes (`dependencies`, `dev-dependencies`,
-/// `build-dependencies`) as well as `workspace.dependencies` are parsed in a
-/// single pass.
+/// `build-dependencies`), their target-specific counterparts
+/// (`[target.<cfg>.dependencies]`), and `workspace.dependencies` are parsed in
+/// a single pass.
 ///
 /// # Examples
 ///
@@ -129,6 +131,25 @@ impl Parser for CargoParser {
                 .iter()
                 .filter_map(|(name, value)| parse_dependency(name, value, &line_ranges, is_dev));
             dependencies.extend(deps);
+        }
+
+        // Parse target-specific sections (e.g. [target.'cfg(unix)'.dependencies])
+        let target_node = dom.get("target");
+        if let Some(target_table) = target_node.as_table() {
+            let targets = target_table.entries().read();
+            for (_, cfg_node) in targets.iter() {
+                for (section_name, is_dev) in sections {
+                    let section_node = cfg_node.get(section_name);
+                    let Some(section) = section_node.as_table() else {
+                        continue;
+                    };
+                    let entries = section.entries().read();
+                    let deps = entries.iter().filter_map(|(name, value)| {
+                        parse_dependency(name, value, &line_ranges, is_dev)
+                    });
+                    dependencies.extend(deps);
+                }
+            }
         }
 
         // Parse workspace.dependencies section
@@ -524,5 +545,41 @@ members = ["crate-a"]
     #[test]
     fn test_cargo_root_package_name_returns_none_for_invalid_toml() {
         assert_eq!(cargo_root_package_name("not [valid toml ="), None);
+    }
+
+    #[test]
+    fn test_target_specific_dependencies() {
+        let parser = CargoParser::new();
+        let content = r#"
+[dependencies]
+serde = "1.0"
+
+[target.'cfg(unix)'.dependencies]
+nix = "0.29.0"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59.0", features = ["Win32_Foundation"] }
+
+[target.x86_64-unknown-linux-gnu.dev-dependencies]
+criterion = "0.5"
+
+[target.'cfg(target_os = "macos")'.build-dependencies]
+cc = "1.0"
+"#;
+        let deps = parser.parse(content);
+        assert_eq!(deps.len(), 5, "{deps:#?}");
+
+        let nix = deps.iter().find(|d| d.name == "nix").unwrap();
+        assert_eq!(nix.version, "0.29.0");
+        assert!(!nix.dev);
+        assert_eq!(nix.name_span.line, 5);
+
+        let win = deps.iter().find(|d| d.name == "windows-sys").unwrap();
+        assert_eq!(win.version, "0.59.0");
+
+        let criterion = deps.iter().find(|d| d.name == "criterion").unwrap();
+        assert!(criterion.dev);
+
+        assert!(deps.iter().any(|d| d.name == "cc"));
     }
 }

@@ -97,6 +97,15 @@ async fn parsed_manifests_keep_safe_constraint_shapes_when_updated() {
             expected: "[dependencies]\npackage = \"^5.1.0\"\n",
         },
         UpdateCase {
+            parser: Box::new(CargoParser::new()),
+            file_type: FileType::Cargo,
+            uri: "file:///test/Cargo.toml",
+            package: "package",
+            manifest: "[target.'cfg(unix)'.dependencies]\npackage = \"^4.0.2\"\n",
+            latest: "5.1.0",
+            expected: "[target.'cfg(unix)'.dependencies]\npackage = \"^5.1.0\"\n",
+        },
+        UpdateCase {
             parser: Box::new(NpmParser::new()),
             file_type: FileType::Npm,
             uri: "file:///test/package.json",

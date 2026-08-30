@@ -196,6 +196,43 @@ pub async fn find_cargo_lock(cargo_toml_path: &Path) -> Option<PathBuf> {
     }
 }
 
+/// True when `v` satisfies `req`, treating a pre-release as its release core.
+/// Used as a fallback only: `semver` excludes pre-releases from a range whose
+/// comparators carry none, but a lockfile pinning one is still ground truth
+fn satisfies(req: &semver::VersionReq, v: &semver::Version) -> bool {
+    req.matches(v)
+        || (!v.pre.is_empty() && req.matches(&semver::Version::new(v.major, v.minor, v.patch)))
+}
+
+/// Choose which `Cargo.lock` entry to use when the lockfile pins several
+/// versions of the same crate
+fn select_locked_version<'a>(
+    declared: &str,
+    candidates: impl IntoIterator<Item = &'a str>,
+) -> Option<&'a str> {
+    let candidates: Vec<&'a str> = candidates.into_iter().collect();
+    let Ok(req) = semver::VersionReq::parse(declared.trim()) else {
+        return candidates.first().copied();
+    };
+    let parsed: Vec<(semver::Version, &'a str)> = candidates
+        .iter()
+        .filter_map(|c| semver::Version::parse(c).ok().map(|v| (v, *c)))
+        .collect();
+
+    if parsed.len() != candidates.len() {
+        return candidates.first().copied();
+    }
+
+    // Strict match first: a stable release present in the lockfile must win
+    // over a pre-release of the same version. Only when nothing matches
+    // strictly does the pre-release fallback apply
+    parsed
+        .iter()
+        .find(|(v, _)| req.matches(v))
+        .or_else(|| parsed.iter().find(|(v, _)| satisfies(&req, v)))
+        .map(|(_, c)| *c)
+}
+
 /// Resolves versions from `Cargo.lock` for a Rust project.
 pub struct CargoResolver {
     /// Captured at selection time from the manifest's `[package].name`.
@@ -231,16 +268,30 @@ impl LockfileResolver for CargoResolver {
                     && crate_name == dep.name
                 {
                     let version = version_part.split(' ').next().unwrap_or(version_part);
-                    return Some(version.to_string());
+                    // The root pin still has to satisfy the manifest: a stale
+                    // lockfile may name a version the declared range forbids
+                    // `select_locked_version` keeps the tolerant behaviour for
+                    // unparseable requirements/versions
+                    if select_locked_version(&dep.version, [version]).is_some() {
+                        return Some(version.to_string());
+                    }
+                    // Names are unique in the root's dependency array; fall
+                    // through to the whole-graph lookup below
+                    break;
                 }
             }
         }
-        // Fallback: first-wins lookup by name.
-        graph
-            .packages
-            .iter()
-            .find(|p| p.name == dep.name)
-            .map(|p| p.version.clone())
+        // Fallback: pick the locked entry matching the declared requirement
+        // (a lockfile may carry several versions of the same crate)
+        select_locked_version(
+            &dep.version,
+            graph
+                .packages
+                .iter()
+                .filter(|p| p.name == dep.name)
+                .map(|p| p.version.as_str()),
+        )
+        .map(str::to_owned)
     }
 }
 
@@ -568,6 +619,114 @@ version = "1.0.0"
         assert_eq!(
             resolver.resolve_version(&dep, &graph),
             Some("1.0.0".to_string())
+        );
+    }
+
+    /// Builds a dependency with only the fields `resolve_version` reads
+    fn dep(name: &str, version: &str) -> crate::parsers::Dependency {
+        crate::parsers::Dependency {
+            name: name.to_string(),
+            version: version.to_string(),
+            name_span: crate::parsers::Span {
+                line: 0,
+                line_start: 0,
+                line_end: 0,
+            },
+            version_span: crate::parsers::Span {
+                line: 0,
+                line_start: 0,
+                line_end: 0,
+            },
+            dev: false,
+            optional: false,
+            registry: None,
+            resolved_version: None,
+            has_additional_version_constraints: false,
+        }
+    }
+
+    #[test]
+    fn select_locked_version_picks_the_compatible_entry() {
+        // The case this PR is about: a lone pin the manifest forbids
+        assert_eq!(select_locked_version("~1.1", ["1.2.0"]), None);
+        assert_eq!(select_locked_version("~1.1", ["1.1.9"]), Some("1.1.9"));
+        assert_eq!(
+            select_locked_version("0.52", ["0.52.0", "0.59.0"]),
+            Some("0.52.0")
+        );
+        assert_eq!(
+            select_locked_version("0.59", ["0.52.0", "0.59.0"]),
+            Some("0.59.0")
+        );
+        // Ties keep lockfile order rather than jumping to the newest entry:
+        // the question is which one Cargo installed, not which one is highest
+        assert_eq!(
+            select_locked_version("1", ["1.2.0", "1.9.0"]),
+            Some("1.2.0")
+        );
+        // Pre-release pins are kept: `semver` would exclude them from `^1.3`
+        assert_eq!(
+            select_locked_version("1.3", ["1.3.0-rc.1"]),
+            Some("1.3.0-rc.1")
+        );
+        // ...but only as a fallback: a stable entry that matches strictly wins
+        // over a pre-release of the same version, whatever the lockfile order
+        assert_eq!(
+            select_locked_version("4.0.0", ["4.0.0-rc.1", "4.0.0"]),
+            Some("4.0.0")
+        );
+        assert_eq!(
+            select_locked_version("^4.0.0", ["4.0.0-rc.1", "4.0.0"]),
+            Some("4.0.0")
+        );
+        // Tolerant fallbacks
+        assert_eq!(select_locked_version("not a req", ["1.0.0"]), Some("1.0.0"));
+        assert_eq!(select_locked_version("^1.0", ["oops"]), Some("oops"));
+        assert_eq!(
+            select_locked_version("^1.0", std::iter::empty::<&str>()),
+            None
+        );
+    }
+
+    #[test]
+    fn cargo_resolver_rejects_a_root_pin_the_manifest_forbids() {
+        use crate::parsers::lockfile_resolver::LockfileResolver;
+
+        // Stale lockfile: the root still points at 2.0.0 while the manifest
+        // has been narrowed to `~1.1`
+        let content = r#"
+    version = 3
+
+    [[package]]
+    name = "demo"
+    version = "0.1.0"
+    dependencies = [
+     "multi 2.0.0",
+    ]
+
+    [[package]]
+    name = "multi"
+    version = "2.0.0"
+
+    [[package]]
+    name = "multi"
+    version = "1.1.3"
+    "#;
+        let resolver = super::CargoResolver {
+            root_package: Some("demo".to_string()),
+        };
+        let graph = resolver.parse_graph(content);
+        // Root pin is incompatible: resolution continues into the graph
+        assert_eq!(
+            resolver.resolve_version(&dep("multi", "~1.1"), &graph),
+            Some("1.1.3".to_string()),
+            "an incompatible root pin must not shadow the compatible entry"
+        );
+        // Nothing satisfies the requirement: leave it unresolved rather than
+        // reporting 2.0.0 as installed
+        assert_eq!(
+            resolver.resolve_version(&dep("multi", "~1.5"), &graph),
+            None
         );
     }
 

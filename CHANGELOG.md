@@ -17,6 +17,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reported spans are unchanged.
 - CI: `actions/setup-node` v7 and `CodSpeedHQ/action` v5.
 
+### Fixed
+
+- A `Cargo.lock` holding several versions of the same crate no longer resolves
+  to whichever entry appears first: the entry is matched against the
+  requirement declared in `Cargo.toml`, so `serde = "~1.1"` no longer reports
+  `1.2.0` as installed. The root package's own pin is validated the same way.
+  Lockfile order is preserved among compatible entries, pre-release pins are
+  kept, and anything `semver` cannot parse keeps the previous behaviour
+  ([#392](https://github.com/mpiton/zed-depsy/pull/392))
+
 ## [2.0.1] - 2026-08-28
 
 ### Changed

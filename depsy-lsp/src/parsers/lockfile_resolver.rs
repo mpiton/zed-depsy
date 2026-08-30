@@ -56,7 +56,7 @@ pub trait LockfileResolver: Send + Sync {
 
     /// Resolve the locked version for a single dependency from a parsed graph.
     ///
-    /// The default implementation performs a first-wins lookup by normalized name,
+    /// The default implementation looks the package up by normalized name,
     /// applying [`normalize_name`](LockfileResolver::normalize_name) to **both**
     /// `dep.name` and each [`crate::parsers::lockfile_graph::LockfilePackage`]`::name`
     /// so the comparison is consistent regardless of whether the parser pre-normalized
@@ -132,7 +132,7 @@ pub async fn select_resolver(
 ///
 /// Locates the lockfile, parses it into a [`LockfileGraph`], then sets each
 /// `dependency.resolved_version` to the exact version pinned in the lockfile.
-/// Dependencies that are absent from the lockfile are left unchanged.
+/// Dependencies that are absent from the lockfile are left unchanged
 ///
 /// # Returns
 ///

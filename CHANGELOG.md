@@ -28,6 +28,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   spans cover the whole value. Numeric character references (`&#45;`) resolve as
   well; an entity that cannot be resolved is kept as written rather than dropped
   ([#394](https://github.com/mpiton/zed-depsy/issues/394))
+- A `<![CDATA[...]]>` section inside a pom value is part of that value again,
+  in the pom parser, `maven-metadata.xml` and the pom metadata used for hover.
+  It was dropped and only the surrounding text survived.
+- An `<exclusions>` block no longer renames the dependency that declares it.
+  `<exclusion>` repeats `<groupId>` and `<artifactId>` for the artifact being
+  excluded, and the parser committed those over the dependency's own
+  coordinates, so hover, diagnostics and the update quick-fix all pointed at the
+  excluded artifact. Only direct children of `<dependency>` are read now.
+- A `<dependency>` whose `groupId`, `artifactId` or `version` the parser cannot
+  read as written is skipped rather than reported under a value it made up. This
+  covers a DTD-declared entity (`<version>&ver;</version>`, which would have
+  been queried against Maven Central verbatim), a value interrupted by a comment
+  (`<version>1.<!-- why -->7.30</version>`, which has no contiguous range for
+  the update quick-fix to overwrite), a value written across two lines, and a
+  `<version>` holding only whitespace. A comment placed *after* the value, as in
+  `<version>1.7.30<!-- pinned --></version>`, is unaffected.
 - A `Cargo.lock` holding several versions of the same crate no longer resolves
   to whichever entry appears first: the entry is matched against the
   requirement declared in `Cargo.toml`, so `serde = "~1.1"` no longer reports

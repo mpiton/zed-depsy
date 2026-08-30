@@ -175,7 +175,11 @@ pub(crate) fn parse_metadata_xml(
                 stack.push(e.name().as_ref().to_string());
             }
             Ok(Event::Text(e)) => text.push_str(&e),
-            Ok(Event::GeneralRef(e)) => push_xml_ref(&mut text, &e),
+            // CDATA carries the value literally, entity references included.
+            Ok(Event::CData(e)) => text.push_str(&e),
+            Ok(Event::GeneralRef(e)) => {
+                push_xml_ref(&mut text, &e);
+            }
             Ok(Event::End(_)) => {
                 let value = text.trim();
                 // Path checks: metadata > versioning > latest | release
@@ -244,7 +248,11 @@ pub(crate) fn parse_pom_metadata(
                 stack.push(e.name().as_ref().to_string());
             }
             Ok(Event::Text(e)) => text.push_str(&e),
-            Ok(Event::GeneralRef(e)) => push_xml_ref(&mut text, &e),
+            // CDATA carries the value literally, entity references included.
+            Ok(Event::CData(e)) => text.push_str(&e),
+            Ok(Event::GeneralRef(e)) => {
+                push_xml_ref(&mut text, &e);
+            }
             Ok(Event::End(_)) => {
                 let value = text.trim();
                 let len = stack.len();

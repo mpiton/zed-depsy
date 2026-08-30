@@ -50,6 +50,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with `<version>${ver}</version>` reported the dependency at version
   `&custom;`, which was then queried against Maven Central; `${ver}` now stays
   unsubstituted, the same as a property that was never declared.
+- A version in `maven-metadata.xml` holding an entity the parser cannot resolve
+  is dropped instead of being interpolated into the pom URL. `<release>` and
+  each `<version>` end up in `{base}/{group}/{artifact}/{v}/{artifact}-{v}.pom`,
+  so the literal `&name;` became a request and was reported as the latest
+  version.
+- A `<dependency>` whose `<artifactId>` has no range on a single line is skipped
+  rather than reported with a name span on line 0, which is where hover, the
+  document link and the diagnostic were anchored. Applies to an artifactId
+  written across two lines or interrupted by a comment, matching the rule
+  already in place for `<version>`.
 - A `Cargo.lock` holding several versions of the same crate no longer resolves
   to whichever entry appears first: the entry is matched against the
   requirement declared in `Cargo.toml`, so `serde = "~1.1"` no longer reports

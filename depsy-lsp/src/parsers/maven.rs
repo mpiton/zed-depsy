@@ -326,6 +326,11 @@ fn extract_dependencies(content: &str, properties: &HashMap<String, String>) -> 
                             && !g.is_empty()
                             && !a.is_empty()
                             && let Some(version_span) = single_line_span(&offsets, vs, ve)
+                            // Same rule for the name: without a range on one line
+                            // there is nothing to anchor hover, the document link or
+                            // the diagnostic to, and line 0 is not that place.
+                            && let Some(name_span) = artifact_span
+                                .and_then(|(s, e_)| single_line_span(&offsets, s, e_))
                         {
                             let dev = scope == "test" || scope == "provided";
                             let resolved = substitute(&raw_version, properties);
@@ -344,14 +349,6 @@ fn extract_dependencies(content: &str, properties: &HashMap<String, String>) -> 
                                 } else {
                                     (resolved, None)
                                 };
-
-                            let name_span = artifact_span
-                                .and_then(|(s, e_)| single_line_span(&offsets, s, e_))
-                                .unwrap_or(Span {
-                                    line: 0,
-                                    line_start: 0,
-                                    line_end: 0,
-                                });
 
                             out.push(Dependency {
                                 name: format!("{g}:{a}"),
@@ -786,6 +783,44 @@ mod tests {
         assert!(
             deps.is_empty(),
             "a multi-line value has no single-line span"
+        );
+    }
+
+    #[test]
+    fn test_parse_artifact_id_without_usable_span_is_skipped() {
+        // The name span anchors hover, the document link and the diagnostic. When
+        // it cannot be built the dependency used to be emitted anyway, pointing at
+        // line 0.
+        let parser = MavenParser::new();
+        let across_lines = r#"<project>
+    <dependencies>
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-
+api</artifactId>
+            <version>1.7.30</version>
+        </dependency>
+    </dependencies>
+</project>
+"#;
+        assert!(
+            parser.parse(across_lines).is_empty(),
+            "an artifactId written across two lines has no single-line span"
+        );
+
+        let interrupted = r#"<project>
+    <dependencies>
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j<!-- renamed -->-api</artifactId>
+            <version>1.7.30</version>
+        </dependency>
+    </dependencies>
+</project>
+"#;
+        assert!(
+            parser.parse(interrupted).is_empty(),
+            "an artifactId interrupted by a comment has no contiguous span"
         );
     }
 

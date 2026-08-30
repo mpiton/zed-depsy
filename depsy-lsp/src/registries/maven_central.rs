@@ -165,6 +165,10 @@ pub(crate) fn parse_metadata_xml(
     // Text of the element being read, assembled across the `Text` / `GeneralRef`
     // fragments quick-xml emits for a single value.
     let mut text = String::new();
+    // Every value this function keeps is a version, and `get_version_info` puts it
+    // straight into the pom URL. A reference we cannot resolve is not a version, so
+    // the entry is dropped rather than requested as the literal `&name;`.
+    let mut unresolved = false;
 
     loop {
         match reader.read_event() {
@@ -172,20 +176,21 @@ pub(crate) fn parse_metadata_xml(
             Ok(Event::Eof) => break,
             Ok(Event::Start(e)) => {
                 text.clear();
+                unresolved = false;
                 stack.push(e.name().as_ref().to_string());
             }
             Ok(Event::Text(e)) => text.push_str(&e),
             // CDATA carries the value literally, entity references included.
             Ok(Event::CData(e)) => text.push_str(&e),
             Ok(Event::GeneralRef(e)) => {
-                push_xml_ref(&mut text, &e);
+                unresolved |= !push_xml_ref(&mut text, &e);
             }
             Ok(Event::End(_)) => {
                 let value = text.trim();
                 // Path checks: metadata > versioning > latest | release
                 // Path: metadata > versioning > versions > version
                 let len = stack.len();
-                if !value.is_empty() {
+                if !value.is_empty() && !unresolved {
                     if len >= 3 && stack[len - 3] == "metadata" && stack[len - 2] == "versioning" {
                         match stack[len - 1].as_str() {
                             "latest" => latest = Some(value.to_string()),
@@ -203,6 +208,7 @@ pub(crate) fn parse_metadata_xml(
                 }
                 stack.pop();
                 text.clear();
+                unresolved = false;
             }
             _ => {}
         }
@@ -485,5 +491,25 @@ mod tests {
         let (latest, _release, versions) = parse_metadata_xml(xml).expect("parse ok");
         assert_eq!(latest.as_deref(), Some("1.0&2"));
         assert_eq!(versions, vec!["1.0&2"]);
+    }
+
+    #[test]
+    fn test_parse_metadata_xml_drops_unresolvable_entity() {
+        // Every value here ends up in the pom URL `{base}/{group}/{artifact}/{v}/…`,
+        // so a version we cannot read as written must not become a request.
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<metadata>
+  <versioning>
+    <release>&custom;</release>
+    <versions>
+      <version>&custom;</version>
+      <version>1.0</version>
+    </versions>
+  </versioning>
+</metadata>
+"#;
+        let (_latest, release, versions) = parse_metadata_xml(xml).expect("parse ok");
+        assert_eq!(release, None, "an unresolvable <release> is not a version");
+        assert_eq!(versions, vec!["1.0"], "siblings are still collected");
     }
 }

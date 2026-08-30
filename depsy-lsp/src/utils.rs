@@ -2,6 +2,8 @@
 
 use core::fmt::{self, Write as _};
 
+use quick_xml::events::BytesRef;
+
 /// Returns an <code>[fmt::Display] + [fmt::Debug]</code> implementation
 /// which truncates the given string to a maximum character count.
 ///
@@ -78,6 +80,55 @@ pub fn html_escape(s: &str) -> String {
         }
     }
     out
+}
+
+/// Appends the text an XML reference stands for, reporting whether it resolved.
+///
+/// quick-xml emits every `&…;` inside element content as a standalone
+/// [`Event::GeneralRef`](quick_xml::events::Event::GeneralRef) sitting between
+/// the surrounding `Event::Text` runs, so a parser that assembles element text
+/// has to fold the reference back in itself. There is no `Text` event on a side
+/// where the reference starts or ends the content: `<version>&amp;</version>`
+/// yields one `GeneralRef` and nothing else.
+///
+/// Numeric character references (`&#45;`, `&#x2D;`) and the five predefined XML
+/// entities (`amp`, `lt`, `gt`, `apos`, `quot`) resolve and the call returns
+/// `true`. Anything else — a DTD-declared entity, a typo, a code point that is
+/// not a character — is written back verbatim as `&name;` so the value is
+/// preserved rather than silently dropped, and the call returns `false`.
+/// Callers feeding the text into something stricter than free prose (a registry
+/// lookup, a version comparison) should read `false` as "value not understood"
+/// rather than accept the literal `&name;`.
+///
+/// # Examples
+///
+/// ```
+/// use depsy_lsp::utils::push_xml_ref;
+/// use quick_xml::events::BytesRef;
+///
+/// let mut out = String::from("a");
+/// assert!(push_xml_ref(&mut out, &BytesRef::new("amp")));
+/// assert!(push_xml_ref(&mut out, &BytesRef::new("#98")));
+/// assert!(!push_xml_ref(&mut out, &BytesRef::new("custom")));
+/// assert_eq!(out, "a&b&custom;");
+/// ```
+pub fn push_xml_ref(out: &mut String, entity: &BytesRef<'_>) -> bool {
+    if let Ok(Some(c)) = entity.resolve_char_ref() {
+        out.push(c);
+        return true;
+    }
+    let name: &str = entity;
+    match quick_xml::escape::resolve_xml_entity(name) {
+        Some(text) => {
+            out.push_str(text);
+            true
+        }
+        // Unknown entity: keep the source form. Writing to a String never fails.
+        None => {
+            let _ = write!(out, "&{name};");
+            false
+        }
+    }
 }
 
 #[cfg(test)]
@@ -175,5 +226,43 @@ mod tests {
     fn test_html_escape_idempotent_on_safe_text() {
         let safe = "plain text with digits 42 and unicode é";
         assert_eq!(html_escape(safe), safe);
+    }
+
+    #[test]
+    fn test_push_xml_ref_resolves_numeric_refs() {
+        let mut out = String::new();
+        assert!(push_xml_ref(&mut out, &BytesRef::new("#45")));
+        assert!(push_xml_ref(&mut out, &BytesRef::new("#x2D")));
+        assert_eq!(out, "--", "decimal and hex forms both yield U+002D");
+    }
+
+    #[test]
+    fn test_push_xml_ref_resolves_predefined_entities() {
+        let mut out = String::new();
+        for name in ["amp", "lt", "gt", "quot", "apos"] {
+            assert!(
+                push_xml_ref(&mut out, &BytesRef::new(name)),
+                "predefined entity {name} should resolve"
+            );
+        }
+        assert_eq!(out, "&<>\"'");
+    }
+
+    #[test]
+    fn test_push_xml_ref_keeps_unresolvable_refs_verbatim() {
+        // A lone surrogate is not a character, so the numeric form cannot resolve.
+        let mut out = String::new();
+        assert!(!push_xml_ref(&mut out, &BytesRef::new("#xD800")));
+        assert_eq!(out, "&#xD800;");
+
+        // Neither predefined nor numeric: an HTML entity a pom may still carry.
+        out.clear();
+        assert!(!push_xml_ref(&mut out, &BytesRef::new("nbsp")));
+        assert_eq!(out, "&nbsp;");
+
+        // A malformed numeric reference falls through the same way.
+        out.clear();
+        assert!(!push_xml_ref(&mut out, &BytesRef::new("#zz")));
+        assert_eq!(out, "&#zz;");
     }
 }

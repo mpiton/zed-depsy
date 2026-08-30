@@ -25,6 +25,7 @@ use quick_xml::reader::Reader;
 use reqwest::Client;
 
 use crate::config::MavenRegistryConfig;
+use crate::utils::push_xml_ref;
 
 use super::{Registry, VersionInfo};
 
@@ -152,41 +153,62 @@ pub(crate) fn parse_metadata_xml(
     content: &str,
 ) -> Option<(Option<String>, Option<String>, Vec<String>)> {
     let mut reader = Reader::from_str(content);
-    reader.config_mut().trim_text(true);
+    // Keep the raw text: `trim_text(true)` trims each fragment of a value split by
+    // an entity reference on its own. The assembled value is trimmed on `End`.
+    reader.config_mut().trim_text(false);
 
     let mut latest: Option<String> = None;
     let mut release: Option<String> = None;
     let mut versions: Vec<String> = Vec::new();
 
     let mut stack: Vec<String> = Vec::new();
+    // Text of the element being read, assembled across the `Text` / `GeneralRef`
+    // fragments quick-xml emits for a single value.
+    let mut text = String::new();
+    // Every value this function keeps is a version, and `get_version_info` puts it
+    // straight into the pom URL. A reference we cannot resolve is not a version, so
+    // the entry is dropped rather than requested as the literal `&name;`.
+    let mut unresolved = false;
 
     loop {
         match reader.read_event() {
             Err(_) => return None,
             Ok(Event::Eof) => break,
-            Ok(Event::Start(e)) => stack.push(e.name().as_ref().to_string()),
-            Ok(Event::End(_)) => {
-                stack.pop();
+            Ok(Event::Start(e)) => {
+                text.clear();
+                unresolved = false;
+                stack.push(e.name().as_ref().to_string());
             }
-            Ok(Event::Text(e)) => {
-                let text = e.to_string();
+            Ok(Event::Text(e)) => text.push_str(&e),
+            // CDATA carries the value literally, entity references included.
+            Ok(Event::CData(e)) => text.push_str(&e),
+            Ok(Event::GeneralRef(e)) => {
+                unresolved |= !push_xml_ref(&mut text, &e);
+            }
+            Ok(Event::End(_)) => {
+                let value = text.trim();
                 // Path checks: metadata > versioning > latest | release
                 // Path: metadata > versioning > versions > version
                 let len = stack.len();
-                if len >= 3 && stack[len - 3] == "metadata" && stack[len - 2] == "versioning" {
-                    match stack[len - 1].as_str() {
-                        "latest" => latest = Some(text),
-                        "release" => release = Some(text),
-                        _ => {}
+                if !value.is_empty() && !unresolved {
+                    if len >= 3 && stack[len - 3] == "metadata" && stack[len - 2] == "versioning" {
+                        match stack[len - 1].as_str() {
+                            "latest" => latest = Some(value.to_string()),
+                            "release" => release = Some(value.to_string()),
+                            _ => {}
+                        }
+                    } else if len >= 4
+                        && stack[len - 4] == "metadata"
+                        && stack[len - 3] == "versioning"
+                        && stack[len - 2] == "versions"
+                        && stack[len - 1] == "version"
+                    {
+                        versions.push(value.to_string());
                     }
-                } else if len >= 4
-                    && stack[len - 4] == "metadata"
-                    && stack[len - 3] == "versioning"
-                    && stack[len - 2] == "versions"
-                    && stack[len - 1] == "version"
-                {
-                    versions.push(text);
                 }
+                stack.pop();
+                text.clear();
+                unresolved = false;
             }
             _ => {}
         }
@@ -208,7 +230,10 @@ pub(crate) fn parse_pom_metadata(
     Option<String>,
 ) {
     let mut reader = Reader::from_str(content);
-    reader.config_mut().trim_text(true);
+    // Keep the raw text: `trim_text(true)` trims each fragment of a value split by
+    // an entity reference on its own, which would eat the spaces around `&amp;` in
+    // e.g. `<name>GPL &amp; Classpath Exception</name>`.
+    reader.config_mut().trim_text(false);
 
     let mut description: Option<String> = None;
     let mut homepage: Option<String> = None;
@@ -216,42 +241,56 @@ pub(crate) fn parse_pom_metadata(
     let mut licenses: Vec<String> = Vec::new();
 
     let mut stack: Vec<String> = Vec::new();
+    // Text of the element being read, assembled across the `Text` / `GeneralRef`
+    // fragments quick-xml emits for a single value.
+    let mut text = String::new();
 
     loop {
         match reader.read_event() {
             Err(_) => break,
             Ok(Event::Eof) => break,
-            Ok(Event::Start(e)) => stack.push(e.name().as_ref().to_string()),
-            Ok(Event::End(_)) => {
-                stack.pop();
+            Ok(Event::Start(e)) => {
+                text.clear();
+                stack.push(e.name().as_ref().to_string());
             }
-            Ok(Event::Text(e)) => {
-                let text = e.to_string();
+            Ok(Event::Text(e)) => text.push_str(&e),
+            // CDATA carries the value literally, entity references included.
+            Ok(Event::CData(e)) => text.push_str(&e),
+            Ok(Event::GeneralRef(e)) => {
+                push_xml_ref(&mut text, &e);
+            }
+            Ok(Event::End(_)) => {
+                let value = text.trim();
                 let len = stack.len();
-                // project > description
-                if len == 2 && stack[0] == "project" && stack[1] == "description" {
-                    description = Some(text);
-                    continue;
+                if !value.is_empty() {
+                    // project > description
+                    if len == 2 && stack[0] == "project" && stack[1] == "description" {
+                        description = Some(value.to_string());
+                    }
+                    // project > url
+                    else if len == 2 && stack[0] == "project" && stack[1] == "url" {
+                        homepage = Some(value.to_string());
+                    }
+                    // project > scm > url
+                    else if len == 3
+                        && stack[0] == "project"
+                        && stack[1] == "scm"
+                        && stack[2] == "url"
+                    {
+                        repository = Some(value.to_string());
+                    }
+                    // project > licenses > license > name
+                    else if len == 4
+                        && stack[0] == "project"
+                        && stack[1] == "licenses"
+                        && stack[2] == "license"
+                        && stack[3] == "name"
+                    {
+                        licenses.push(value.to_string());
+                    }
                 }
-                // project > url
-                if len == 2 && stack[0] == "project" && stack[1] == "url" {
-                    homepage = Some(text);
-                    continue;
-                }
-                // project > scm > url
-                if len == 3 && stack[0] == "project" && stack[1] == "scm" && stack[2] == "url" {
-                    repository = Some(text);
-                    continue;
-                }
-                // project > licenses > license > name
-                if len == 4
-                    && stack[0] == "project"
-                    && stack[1] == "licenses"
-                    && stack[2] == "license"
-                    && stack[3] == "name"
-                {
-                    licenses.push(text);
-                }
+                stack.pop();
+                text.clear();
             }
             _ => {}
         }
@@ -391,5 +430,86 @@ mod tests {
         // `-m` alone (no digit) must NOT classify as milestone.
         assert!(!is_prerelease("1.0-metrics"));
         assert!(!is_prerelease("2.4-mixed"));
+    }
+
+    #[test]
+    fn test_parse_pom_metadata_with_entity_references() {
+        let pom = r#"<?xml version="1.0"?>
+<project>
+    <description>Fast &amp; small logging</description>
+    <url>https://example.com/?a=1&amp;b=2</url>
+    <scm>
+        <url>https://github.com/ex/ex?tab=1&amp;view=2</url>
+    </scm>
+    <licenses>
+        <license>
+            <name>GPL &amp; Classpath Exception</name>
+        </license>
+        <license>
+            <name>CDDL &amp; GPL</name>
+        </license>
+    </licenses>
+</project>
+"#;
+        let (description, homepage, repository, license) = parse_pom_metadata(pom);
+        assert_eq!(
+            description.as_deref(),
+            Some("Fast & small logging"),
+            "entity references must be resolved, not truncate the value"
+        );
+        assert_eq!(homepage.as_deref(), Some("https://example.com/?a=1&b=2"));
+        assert_eq!(
+            repository.as_deref(),
+            Some("https://github.com/ex/ex?tab=1&view=2")
+        );
+        assert_eq!(
+            license.as_deref(),
+            Some("GPL & Classpath Exception, CDDL & GPL")
+        );
+    }
+
+    #[test]
+    fn test_parse_pom_metadata_empty_elements_stay_none() {
+        let pom = "<project><description></description><url>   </url></project>";
+        let (description, homepage, _, _) = parse_pom_metadata(pom);
+        assert_eq!(description, None, "an empty element yields no value");
+        assert_eq!(homepage, None, "a whitespace-only element yields no value");
+    }
+
+    #[test]
+    fn test_parse_metadata_xml_with_entity_reference() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<metadata>
+  <versioning>
+    <latest>1.0&amp;2</latest>
+    <versions>
+      <version>1.0&amp;2</version>
+    </versions>
+  </versioning>
+</metadata>
+"#;
+        let (latest, _release, versions) = parse_metadata_xml(xml).expect("parse ok");
+        assert_eq!(latest.as_deref(), Some("1.0&2"));
+        assert_eq!(versions, vec!["1.0&2"]);
+    }
+
+    #[test]
+    fn test_parse_metadata_xml_drops_unresolvable_entity() {
+        // Every value here ends up in the pom URL `{base}/{group}/{artifact}/{v}/…`,
+        // so a version we cannot read as written must not become a request.
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<metadata>
+  <versioning>
+    <release>&custom;</release>
+    <versions>
+      <version>&custom;</version>
+      <version>1.0</version>
+    </versions>
+  </versioning>
+</metadata>
+"#;
+        let (_latest, release, versions) = parse_metadata_xml(xml).expect("parse ok");
+        assert_eq!(release, None, "an unresolvable <release> is not a version");
+        assert_eq!(versions, vec!["1.0"], "siblings are still collected");
     }
 }

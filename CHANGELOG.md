@@ -19,6 +19,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Maven XML values containing an entity reference are no longer truncated.
+  quick-xml reports `&amp;` as its own event between two text events, and the
+  Maven parsers kept a single fragment instead of joining them, so
+  `<description>Fast &amp; small</description>` surfaced as `small` in hover.
+  Element text is now assembled across fragments in the pom parser,
+  `maven-metadata.xml` and the pom metadata used for hover, and the reported
+  spans cover the whole value. Numeric character references (`&#45;`) resolve as
+  well; an entity that cannot be resolved is kept as written rather than dropped
+  in free text such as `<description>` and `<url>`
+  ([#394](https://github.com/mpiton/zed-depsy/issues/394))
+- A `<![CDATA[...]]>` section inside a pom value is part of that value again,
+  in the pom parser, `maven-metadata.xml` and the pom metadata used for hover.
+  It was dropped and only the surrounding text survived.
+- An `<exclusions>` block no longer renames the dependency that declares it.
+  `<exclusion>` repeats `<groupId>` and `<artifactId>` for the artifact being
+  excluded, and the parser committed those over the dependency's own
+  coordinates, so hover, diagnostics and the update quick-fix all pointed at the
+  excluded artifact. Only direct children of `<dependency>` are read now.
+- A `<dependency>` whose `groupId`, `artifactId` or `version` the parser cannot
+  read as written is skipped rather than reported under a value it made up. This
+  covers a DTD-declared entity (`<version>&ver;</version>`, which would have
+  been queried against Maven Central verbatim), a value interrupted by a comment
+  (`<version>1.<!-- why -->7.30</version>`, which has no contiguous range for
+  the update quick-fix to overwrite), a value written across two lines, and a
+  `<version>` holding only whitespace. A comment placed *after* the value, as in
+  `<version>1.7.30<!-- pinned --></version>`, is unaffected.
+- A `<properties>` entry holding an entity the parser cannot resolve is dropped
+  instead of being substituted into a coordinate. `<ver>&custom;</ver>` paired
+  with `<version>${ver}</version>` reported the dependency at version
+  `&custom;`, which was then queried against Maven Central; `${ver}` now stays
+  unsubstituted, the same as a property that was never declared.
+- A version in `maven-metadata.xml` holding an entity the parser cannot resolve
+  is dropped instead of being interpolated into the pom URL. `<release>` and
+  each `<version>` end up in `{base}/{group}/{artifact}/{v}/{artifact}-{v}.pom`,
+  so the literal `&name;` became a request and was reported as the latest
+  version.
+- A `<dependency>` whose `<artifactId>` has no range on a single line is skipped
+  rather than reported with a name span on line 0, which is where hover, the
+  document link and the diagnostic were anchored. Applies to an artifactId
+  written across two lines or interrupted by a comment, matching the rule
+  already in place for `<version>`.
 - A `Cargo.lock` holding several versions of the same crate no longer resolves
   to whichever entry appears first: the entry is matched against the
   requirement declared in `Cargo.toml`, so `serde = "~1.1"` no longer reports

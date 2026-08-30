@@ -1,7 +1,8 @@
 //! Regression tests for fuzz crashes
 
 use depsy_lsp::parsers::{
-    Parser, cargo::CargoParser, npm::NpmParser, php::PhpParser, python::PythonParser,
+    Parser, cargo::CargoParser, maven::MavenParser, npm::NpmParser, php::PhpParser,
+    python::PythonParser,
 };
 use std::panic::AssertUnwindSafe;
 
@@ -357,6 +358,82 @@ extra-dependencies = [
         match result {
             Ok(deps) => validate_deps(&deps, content, "Python/hatch-standalone"),
             Err(_) => panic!("Python parser panicked on standalone hatch.toml input:\n{content:?}"),
+        }
+    }
+}
+
+#[test]
+fn test_maven_fuzz_spans() {
+    // The pom parser reports spans assembled from several XML events, so a value
+    // interrupted by an entity reference, a comment or a line break must still
+    // land inside one line of the source.
+    let parser = MavenParser::new();
+
+    let valid = r#"<?xml version="1.0" encoding="UTF-8"?>
+<project>
+    <groupId>com.example</groupId>
+    <artifactId>app</artifactId>
+    <version>1.0.0</version>
+    <properties>
+        <slf4j.version>1.7.30</slf4j.version>
+    </properties>
+    <dependencies>
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-api</artifactId>
+            <version>${slf4j.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <version>5.10.0</version>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+</project>
+"#;
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| parser.parse(valid)));
+    let deps = result.expect("should not panic on a valid pom.xml");
+    assert_eq!(deps.len(), 2, "expected both declared dependencies");
+    validate_deps(&deps, valid, "Maven");
+
+    // --- Edge cases: must not panic and must satisfy position invariants ---
+    let edge_cases: &[&str] = &[
+        // entity reference splitting the version
+        "<project><dependencies><dependency><groupId>g</groupId><artifactId>a</artifactId><version>1.0&amp;2</version></dependency></dependencies></project>",
+        // value straddling a line break
+        "<project><dependencies><dependency><groupId>g</groupId><artifactId>a</artifactId><version>1.0&amp;\n2</version></dependency></dependencies></project>",
+        // comment inside the version
+        "<project><dependencies><dependency><groupId>g</groupId><artifactId>a</artifactId><version>1.0<!-- c -->2.0</version></dependency></dependencies></project>",
+        // CDATA inside the version
+        "<project><dependencies><dependency><groupId>g</groupId><artifactId>a</artifactId><version>1.<![CDATA[0]]>5</version></dependency></dependencies></project>",
+        // unexpandable entity as the whole version
+        "<project><dependencies><dependency><groupId>g</groupId><artifactId>a</artifactId><version>&ver;</version></dependency></dependencies></project>",
+        // exclusions repeating the coordinate element names
+        "<project><dependencies><dependency><groupId>g</groupId><artifactId>a</artifactId><version>1.0</version><exclusions><exclusion><groupId>x</groupId><artifactId>y</artifactId></exclusion></exclusions></dependency></dependencies></project>",
+        // multi-line artifactId
+        "<project><dependencies><dependency><groupId>g</groupId><artifactId>a&amp;\nb</artifactId><version>1.0</version></dependency></dependencies></project>",
+        // whitespace-only version
+        "<project><dependencies><dependency><groupId>g</groupId><artifactId>a</artifactId><version>   </version></dependency></dependencies></project>",
+        // self-closing coordinate elements
+        "<project><dependencies><dependency><groupId/><artifactId/><version/></dependency></dependencies></project>",
+        // stray end tag
+        "<project></dependency></project>",
+        // truncated document
+        "<project><dependencies><dependency><groupId>g",
+        // empty input
+        "",
+        // control characters in a coordinate
+        "<project><dependencies><dependency><groupId>\u{1}g</groupId><artifactId>a</artifactId><version>1.0</version></dependency></dependencies></project>",
+        // non-ASCII coordinate
+        "<project><dependencies><dependency><groupId>café</groupId><artifactId>naïve</artifactId><version>1.0</version></dependency></dependencies></project>",
+    ];
+
+    for content in edge_cases {
+        let result = std::panic::catch_unwind(AssertUnwindSafe(|| parser.parse(content)));
+        match result {
+            Ok(deps) => validate_deps(&deps, content, "Maven"),
+            Err(_) => panic!("Maven parser panicked on input:\n{content:?}"),
         }
     }
 }

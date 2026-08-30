@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.2] - 2026-08-30
+
 ### Changed
 
 - Rust dependencies refreshed: `tokio` 1.53.1, `clap` 4.6.6, `serde` 1.0.229,
@@ -890,7 +892,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - In-memory caching for version data
 - Parallel registry requests (5 concurrent)
 
-[Unreleased]: https://github.com/mpiton/zed-depsy/compare/v2.0.1...HEAD
+[Unreleased]: https://github.com/mpiton/zed-depsy/compare/v2.0.2...HEAD
+[2.0.2]: https://github.com/mpiton/zed-depsy/compare/v2.0.1...v2.0.2
 [2.0.1]: https://github.com/mpiton/zed-depsy/compare/v2.0.0...v2.0.1
 [2.0.0]: https://github.com/mpiton/zed-depsy/compare/v1.10.0...v2.0.0
 [1.10.0]: https://github.com/mpiton/zed-dependi/compare/v1.9.1...v1.10.0

@@ -124,6 +124,10 @@ fn extract_properties(content: &str) -> HashMap<String, String> {
     // Text of the element being read, assembled across the `Text` / `GeneralRef`
     // fragments quick-xml emits for a single value.
     let mut text = String::new();
+    // A value holding a reference we cannot resolve is not what the pom declares.
+    // Dropping the property leaves `${key}` unsubstituted, the same as a key that
+    // was never defined, instead of feeding `&name;` to a coordinate.
+    let mut unresolved = false;
 
     loop {
         match reader.read_event() {
@@ -131,6 +135,7 @@ fn extract_properties(content: &str) -> HashMap<String, String> {
             Ok(Event::Eof) => break,
             Ok(Event::Start(e)) => {
                 text.clear();
+                unresolved = false;
                 let name = e.local_name().as_ref().to_string();
                 let parent = depth_stack.last().map(String::as_str);
                 // Properties map: project > properties > <key>
@@ -152,13 +157,14 @@ fn extract_properties(content: &str) -> HashMap<String, String> {
             // CDATA carries the value literally, entity references included.
             Ok(Event::CData(e)) if current_key.is_some() => text.push_str(&e),
             Ok(Event::GeneralRef(e)) if current_key.is_some() => {
-                push_xml_ref(&mut text, &e);
+                unresolved |= !push_xml_ref(&mut text, &e);
             }
             Ok(Event::End(_)) => {
                 let value = text.trim();
                 // First occurrence wins to avoid overwriting project.version
                 // with a nested <dependency><version>.
                 if let Some(key) = current_key.take()
+                    && !unresolved
                     && !value.is_empty()
                     && !out.contains_key(&key)
                 {
@@ -166,6 +172,7 @@ fn extract_properties(content: &str) -> HashMap<String, String> {
                 }
                 depth_stack.pop();
                 text.clear();
+                unresolved = false;
             }
             _ => {}
         }
@@ -1168,17 +1175,39 @@ mod tests {
     }
 
     #[test]
-    fn test_unknown_entity_kept_verbatim() {
+    fn test_property_with_unknown_entity_is_dropped() {
         let pom = r#"<project>
     <properties>
         <odd>a&custom;b</odd>
     </properties>
 </project>"#;
         let props = extract_properties(pom);
-        assert_eq!(
-            props.get("odd").map(String::as_str),
-            Some("a&custom;b"),
-            "an entity we cannot resolve is kept as written rather than dropped"
+        assert!(
+            !props.contains_key("odd"),
+            "a property we cannot read as written must not reach substitution"
         );
+    }
+
+    #[test]
+    fn test_unknown_entity_in_property_does_not_reach_the_version() {
+        let pom = r#"<project>
+    <properties>
+        <lib.version>&custom;</lib.version>
+    </properties>
+    <dependencies>
+        <dependency>
+            <groupId>com.example</groupId>
+            <artifactId>lib</artifactId>
+            <version>${lib.version}</version>
+        </dependency>
+    </dependencies>
+</project>"#;
+        let deps = MavenParser::new().parse(pom);
+        assert_eq!(deps.len(), 1);
+        // The placeholder stays unsubstituted, exactly as for an undefined key, so
+        // `&custom;` never becomes the version sent to Maven Central.
+        assert_eq!(deps[0].version, "${lib.version}");
+        assert_eq!(deps[0].resolved_version, None);
+        assert_eq!(deps[0].effective_version(), "${lib.version}");
     }
 }

@@ -27,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `maven-metadata.xml` and the pom metadata used for hover, and the reported
   spans cover the whole value. Numeric character references (`&#45;`) resolve as
   well; an entity that cannot be resolved is kept as written rather than dropped
+  in free text such as `<description>` and `<url>`
   ([#394](https://github.com/mpiton/zed-depsy/issues/394))
 - A `<![CDATA[...]]>` section inside a pom value is part of that value again,
   in the pom parser, `maven-metadata.xml` and the pom metadata used for hover.
@@ -44,6 +45,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the update quick-fix to overwrite), a value written across two lines, and a
   `<version>` holding only whitespace. A comment placed *after* the value, as in
   `<version>1.7.30<!-- pinned --></version>`, is unaffected.
+- A `<properties>` entry holding an entity the parser cannot resolve is dropped
+  instead of being substituted into a coordinate. `<ver>&custom;</ver>` paired
+  with `<version>${ver}</version>` reported the dependency at version
+  `&custom;`, which was then queried against Maven Central; `${ver}` now stays
+  unsubstituted, the same as a property that was never declared.
 - A `Cargo.lock` holding several versions of the same crate no longer resolves
   to whichever entry appears first: the entry is matched against the
   requirement declared in `Cargo.toml`, so `serde = "~1.1"` no longer reports

@@ -12,7 +12,23 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  check-tag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Tag matches depsy-zed version
+        run: |
+          version="v$(grep -m1 '^version = ' depsy-zed/Cargo.toml | cut -d'"' -f2)"
+          if [ "$GITHUB_REF_NAME" != "$version" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match depsy-zed/Cargo.toml version $version"
+            exit 1
+          fi
+
   build:
+    needs: check-tag
     strategy:
       matrix:
         include:

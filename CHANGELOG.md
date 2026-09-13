@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   version, by direct download URL. Once the binary is on disk no network
   request is made at start-up, and `api.github.com` is no longer contacted at
   all. Older downloaded releases are removed after a verified download.
+- CI runs the `depsy-zed` tests and clippy, and the release workflow rejects a
+  tag that differs from the `depsy-zed/Cargo.toml` version.
 
 ### Fixed
 
@@ -21,8 +23,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and prints a line on stderr saying so. `lsp.depsy.binary.path` is now
   documented for offline installations.
   ([#400](https://github.com/mpiton/zed-depsy/issues/400))
-- A download that fails checksum verification is deleted instead of being
-  started as is at the next launch.
+- A download is verified in a staging directory and only moved into place
+  once its checksum matches the published one. A download whose checksum file
+  is missing or does not match is deleted instead of being started as is at
+  the next launch, and a mismatch is reported by Zed instead of silently
+  starting an older release.
 
 ## [2.0.2] - 2026-08-30
 

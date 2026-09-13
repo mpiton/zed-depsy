@@ -363,7 +363,9 @@ When preparing a release, move items from `[Unreleased]` to the new version sect
    version = "X.Y.Z"
    ```
    The extension only installs the language-server release tagged with its own
-   version, so the three must match. `cargo test` in `depsy-zed/` fails otherwise.
+   version, so the three must match: `cargo test` in `depsy-zed/` (run by CI)
+   fails otherwise, and the release workflow rejects a tag that differs from
+   the `depsy-zed/Cargo.toml` version.
 
 2. **Update CHANGELOG.md**
    - Move `[Unreleased]` items to new version section

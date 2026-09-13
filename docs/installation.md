@@ -130,7 +130,7 @@ Depsy needs network access to package registries and the vulnerability database:
 | NuGet | `https://api.nuget.org` | .NET packages |
 | RubyGems | `https://rubygems.org` | Ruby gems |
 | OSV.dev | `https://api.osv.dev` | Vulnerability data |
-| GitHub | `https://github.com` | Language server download, once per extension version |
+| GitHub | `https://github.com`, `https://release-assets.githubusercontent.com` | Language server download, once per extension version |
 
 If you're behind a corporate firewall, ensure these URLs are allowed. If only `github.com` is blocked, see [Offline / Air-Gapped Installation](#offline--air-gapped-installation).
 

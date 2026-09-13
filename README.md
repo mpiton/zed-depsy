@@ -666,7 +666,7 @@ security-scan:
    - `https://api.nuget.org`
    - `https://rubygems.org`
    - `https://api.osv.dev` (vulnerability scanning)
-   - `https://github.com` (language server download, once per extension version)
+   - `https://github.com` and `https://release-assets.githubusercontent.com` (language server download, once per extension version)
 3. Check DNS resolution for registry domains
 4. Try temporarily disabling VPN if using one
 

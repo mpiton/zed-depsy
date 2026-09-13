@@ -79,6 +79,16 @@ jobs:
           cd depsy-zed
           cargo build --release --target wasm32-wasip1
 
+      - name: Clippy
+        run: |
+          cd depsy-zed
+          cargo clippy --all-targets -- -D warnings
+
+      - name: Run tests
+        run: |
+          cd depsy-zed
+          cargo test
+
   docs-validation:
     name: Validate documentation
     runs-on: ubuntu-latest

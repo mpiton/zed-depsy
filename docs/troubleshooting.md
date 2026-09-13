@@ -35,6 +35,22 @@ Solutions for common issues with Depsy.
    ```
 3. Reinstall the extension from Zed Extensions marketplace
 4. Check if firewall/proxy is blocking network requests to package registries
+5. If `github.com` is blocked on your network, point Zed at a binary you provide with `lsp.depsy.binary.path` (see [Offline / Air-Gapped Installation]({% link installation.md %}#offline--air-gapped-installation))
+
+## Language Server Runs an Older Version
+
+**Symptoms:**
+- The terminal running `zed --foreground` shows a line starting with `depsy: could not install depsy-lsp vX.Y.Z` (written to stderr, it does not appear in `Zed.log`)
+- Features from the latest release are missing
+
+**Cause:**
+
+The extension could not download the language-server release matching its own version (no access to `github.com`) and started the newest release already on disk instead.
+
+**Solutions:**
+
+1. Restore access to `https://github.com` and `https://release-assets.githubusercontent.com`, then restart Zed: the download is retried at every start
+2. Or provide the binary yourself with `lsp.depsy.binary.path` (see [Offline / Air-Gapped Installation]({% link installation.md %}#offline--air-gapped-installation))
 
 ## LSP Server Crashes or Freezes
 
@@ -111,6 +127,7 @@ Solutions for common issues with Depsy.
    - `https://api.nuget.org`
    - `https://rubygems.org`
    - `https://api.osv.dev` (vulnerability scanning)
+   - `https://github.com` and `https://release-assets.githubusercontent.com` (language server download, once per extension version)
 3. Check DNS resolution for registry domains
 4. Try temporarily disabling VPN if using one
 

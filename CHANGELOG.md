@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   all. Older downloaded releases are removed after a verified download.
 - CI runs the `depsy-zed` tests and clippy, and the release workflow rejects a
   tag that differs from the `depsy-zed/Cargo.toml` version.
+- Rust dependencies refreshed: `dirs` 7, `reqwest` 0.13.5, `toml` 1.1.6 and
+  `codspeed-criterion-compat` 5 for the benchmarks, plus lockfile refreshes in
+  `depsy-lsp`, `depsy-zed` and the fuzz crate. `dirs` 7 only changes
+  `preference_dir` on Windows, which Depsy does not use, so the cache location
+  is unchanged.
 
 ### Fixed
 

@@ -356,9 +356,14 @@ When preparing a release, move items from `[Unreleased]` to the new version sect
    # Update depsy-lsp/Cargo.toml
    version = "X.Y.Z"
 
+   # Update depsy-zed/Cargo.toml
+   version = "X.Y.Z"
+
    # Update depsy-zed/extension.toml
    version = "X.Y.Z"
    ```
+   The extension only installs the language-server release tagged with its own
+   version, so the three must match. `cargo test` in `depsy-zed/` fails otherwise.
 
 2. **Update CHANGELOG.md**
    - Move `[Unreleased]` items to new version section
@@ -382,6 +387,12 @@ When preparing a release, move items from `[Unreleased]` to the new version sect
    - Check [GitHub Releases](https://github.com/mpiton/zed-depsy/releases)
    - Verify all platform binaries are attached
    - Test installation from release
+
+6. **Publish the extension**
+   - Open a PR on [zed-industries/extensions](https://github.com/zed-industries/extensions)
+     that bumps the `depsy-lsp` submodule and its `version` in `extensions.toml`
+   - Until that PR is merged, users keep the previous language server: the
+     extension only installs the release matching its own version
 
 ### Build Commands Reference
 

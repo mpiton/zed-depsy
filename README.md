@@ -69,6 +69,31 @@ Dependency management extension for the [Zed](https://zed.dev) editor.
 
 The extension will automatically download and install the language server.
 
+The download happens once per extension version, from `https://github.com/mpiton/zed-depsy/releases`: the extension installs the language-server release that matches its own version. Later start-ups use the binary already on disk and make no network request.
+
+### Offline / Air-Gapped Installation
+
+When Zed cannot reach `github.com` (corporate proxy, air-gapped machine), two options:
+
+- **Keep an earlier download.** If an earlier extension version already downloaded a language server, the extension starts that one and prints a line on stderr (`zed --foreground`) saying which. Nothing to configure.
+- **Provide the binary yourself.** Download the archive for your platform from the [releases page](https://github.com/mpiton/zed-depsy/releases), or build it with `cargo build --release` in `depsy-lsp/`, copy the binary onto the machine and point Zed at it in `settings.json`:
+
+  ```json
+  {
+    "lsp": {
+      "depsy": {
+        "binary": {
+          "path": "/opt/depsy/depsy-lsp"
+        }
+      }
+    }
+  }
+  ```
+
+  Zed then starts that binary directly and never asks the extension to download anything. Keeping it in step with the extension version is up to you.
+
+Downloaded binaries live in Zed's extension work directory: `~/.local/share/zed/extensions/work/depsy-lsp/` on Linux, `~/Library/Application Support/Zed/extensions/work/depsy-lsp/` on macOS, `%LOCALAPPDATA%\Zed\extensions\work\depsy-lsp\` on Windows.
+
 ### Manual Installation (Development)
 
 1. Clone this repository
@@ -568,6 +593,7 @@ security-scan:
 2. View Zed logs for errors: run `zed --foreground` from terminal
 3. Reinstall the extension from Zed Extensions marketplace
 4. Check if firewall/proxy is blocking network requests to package registries
+5. If `github.com` is blocked on your network, point Zed at a binary you provide with `lsp.depsy.binary.path` (see [Offline / Air-Gapped Installation](#offline--air-gapped-installation))
 
 ### LSP Server Crashes or Freezes
 
@@ -640,6 +666,7 @@ security-scan:
    - `https://api.nuget.org`
    - `https://rubygems.org`
    - `https://api.osv.dev` (vulnerability scanning)
+   - `https://github.com` (language server download, once per extension version)
 3. Check DNS resolution for registry domains
 4. Try temporarily disabling VPN if using one
 

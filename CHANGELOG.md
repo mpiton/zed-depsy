@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The Zed extension installs the language-server release matching its own
+  version, by direct download URL. Once the binary is on disk no network
+  request is made at start-up, and `api.github.com` is no longer contacted at
+  all. Older downloaded releases are removed after a verified download.
+
+### Fixed
+
+- The language server starts without access to GitHub when an earlier release
+  was already downloaded: the extension falls back to the newest one on disk
+  and prints a line on stderr saying so. `lsp.depsy.binary.path` is now
+  documented for offline installations.
+  ([#400](https://github.com/mpiton/zed-depsy/issues/400))
+- A download that fails checksum verification is deleted instead of being
+  started as is at the next launch.
+
 ## [2.0.2] - 2026-08-30
 
 ### Changed

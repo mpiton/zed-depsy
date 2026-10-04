@@ -6,6 +6,13 @@
 pub mod cache;
 pub mod osv;
 
+use dashmap::DashMap;
+
+use crate::parsers::Dependency;
+use crate::registries::VersionInfo;
+use cache::VulnCacheKey;
+use osv::QueryResult;
+
 /// Ecosystem identifiers for vulnerability sources
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Ecosystem {
@@ -112,6 +119,26 @@ pub fn normalize_version_for_osv(version: &str) -> String {
         trimmed.to_string()
     } else {
         result.to_string()
+    }
+}
+
+/// Overlays the OSV result for `dep`'s resolved version onto `info`.
+///
+/// The version cache is keyed by package name only, so it cannot tell two
+/// declarations of the same package at different versions apart. OSV results
+/// are kept in `osv_results`, keyed by (ecosystem, name, version), and each
+/// reader applies the one matching its own dependency. `info` is left as is
+/// when that version has not been queried yet.
+pub fn apply_osv_result(
+    info: &mut VersionInfo,
+    osv_results: &DashMap<VulnCacheKey, QueryResult>,
+    ecosystem: Ecosystem,
+    dep: &Dependency,
+) {
+    let version = normalize_version_for_osv(dep.effective_version());
+    if let Some(result) = osv_results.get(&VulnCacheKey::new(ecosystem, &dep.name, &version)) {
+        info.vulnerabilities = result.vulnerabilities.clone();
+        info.deprecated = result.deprecated;
     }
 }
 

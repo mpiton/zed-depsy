@@ -20,6 +20,7 @@
 
 use core::fmt;
 
+use dashmap::DashMap;
 use tower_lsp::lsp_types::*;
 
 use crate::cache::ReadCache;
@@ -28,6 +29,20 @@ use crate::parsers::Dependency;
 use crate::providers::inlay_hints::{VersionStatus, compare_versions, is_local_dependency};
 use crate::registries::{TransitiveVuln, VersionInfo, Vulnerability, VulnerabilitySeverity};
 use crate::utils::fmt_truncate_string;
+use crate::vulnerabilities::apply_osv_result;
+use crate::vulnerabilities::cache::VulnCacheKey;
+use crate::vulnerabilities::osv::QueryResult;
+
+/// Vulnerability data kept outside the name-keyed version cache.
+#[derive(Clone, Copy)]
+pub struct VulnSources<'a> {
+    /// OSV results keyed by (ecosystem, name, version). The entry matching a
+    /// dependency's resolved version supplies its advisories and deprecation status.
+    pub osv_results: &'a DashMap<VulnCacheKey, QueryResult>,
+    /// Per-document transitive findings keyed by direct-dependency name. Stored
+    /// apart from the shared version cache to avoid cross-workspace contamination.
+    pub transitive: &'a hashbrown::HashMap<String, Vec<TransitiveVuln>>,
+}
 
 /// Build LSP diagnostics for the given dependency list.
 ///
@@ -44,9 +59,7 @@ use crate::utils::fmt_truncate_string;
 /// - `min_severity` — when `Some`, vulnerability diagnostics are suppressed
 ///   unless at least one vulnerability meets the threshold.
 /// - `file_type` — used to format registry names in yanked-version messages.
-/// - `doc_transitive_vulns` — per-document transitive vulnerability data keyed
-///   by direct-dependency name.  Stored separately from the shared version cache
-///   to avoid cross-workspace contamination.
+/// - `vulns` — direct and transitive vulnerability data, see [`VulnSources`].
 /// - `ignored` — package names (wildcards supported) that should be skipped.
 ///
 /// # Returns
@@ -59,7 +72,7 @@ pub async fn create_diagnostics(
     cache_key_fn: impl Fn(&str) -> String,
     min_severity: Option<VulnerabilitySeverity>,
     file_type: FileType,
-    doc_transitive_vulns: &hashbrown::HashMap<String, Vec<TransitiveVuln>>,
+    vulns: VulnSources<'_>,
     ignored: &[String],
 ) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
@@ -80,7 +93,10 @@ pub async fn create_diagnostics(
         // yanked, deprecated, and vulnerability checks below. Avoids two
         // back-to-back `spawn_blocking` round-trips against `SqliteCache`.
         let cache_key = cache_key_fn(&dep.name);
-        let cached = cache.get(&cache_key).await;
+        let mut cached = cache.get(&cache_key).await;
+        if let Some(info) = cached.as_mut() {
+            apply_osv_result(info, vulns.osv_results, file_type.to_ecosystem(), dep);
+        }
 
         // Add outdated version diagnostic
         if let Some(diag) = create_outdated_diagnostic(dep, cached.as_ref()) {
@@ -106,7 +122,7 @@ pub async fn create_diagnostics(
                 diagnostics.push(create_deprecation_diagnostic(dep, &version_info));
             } else {
                 // Add vulnerability diagnostic (summary) only if not deprecated or yanked.
-                // Per-document transitive vulns are sourced from doc_transitive_vulns to avoid
+                // Per-document transitive vulns are sourced from vulns.transitive to avoid
                 // cross-workspace contamination from the shared global version_cache.
                 let filtered_vulns: Vec<_> = version_info
                     .vulnerabilities
@@ -119,7 +135,8 @@ pub async fn create_diagnostics(
                     })
                     .collect();
 
-                let filtered_transitive: Vec<&TransitiveVuln> = doc_transitive_vulns
+                let filtered_transitive: Vec<&TransitiveVuln> = vulns
+                    .transitive
                     .get(&dep.name)
                     .map(|v| {
                         v.iter()
@@ -588,7 +605,10 @@ mod tests {
             |name| format!("test:{name}"),
             None,
             FileType::Cargo,
-            &hashbrown::HashMap::new(),
+            VulnSources {
+                osv_results: &DashMap::new(),
+                transitive: &hashbrown::HashMap::new(),
+            },
             &[],
         )
         .await;
@@ -618,7 +638,10 @@ mod tests {
             |name| format!("test:{name}"),
             None,
             FileType::Cargo,
-            &hashbrown::HashMap::new(),
+            VulnSources {
+                osv_results: &DashMap::new(),
+                transitive: &hashbrown::HashMap::new(),
+            },
             &[],
         )
         .await;
@@ -636,7 +659,10 @@ mod tests {
             |name| format!("test:{name}"),
             None,
             FileType::Cargo,
-            &hashbrown::HashMap::new(),
+            VulnSources {
+                osv_results: &DashMap::new(),
+                transitive: &hashbrown::HashMap::new(),
+            },
             &[],
         )
         .await;
@@ -686,7 +712,10 @@ mod tests {
             |name| format!("test:{name}"),
             None,
             FileType::Cargo,
-            &hashbrown::HashMap::new(),
+            VulnSources {
+                osv_results: &DashMap::new(),
+                transitive: &hashbrown::HashMap::new(),
+            },
             &[],
         )
         .await;
@@ -734,7 +763,10 @@ mod tests {
             |name| format!("test:{name}"),
             None,
             FileType::Cargo,
-            &hashbrown::HashMap::new(),
+            VulnSources {
+                osv_results: &DashMap::new(),
+                transitive: &hashbrown::HashMap::new(),
+            },
             &[],
         )
         .await;
@@ -781,7 +813,10 @@ mod tests {
             |name| format!("test:{name}"),
             None,
             FileType::Cargo,
-            &hashbrown::HashMap::new(),
+            VulnSources {
+                osv_results: &DashMap::new(),
+                transitive: &hashbrown::HashMap::new(),
+            },
             &[],
         )
         .await;
@@ -841,7 +876,10 @@ mod tests {
             |name| format!("test:{name}"),
             None,
             FileType::Cargo,
-            &hashbrown::HashMap::new(),
+            VulnSources {
+                osv_results: &DashMap::new(),
+                transitive: &hashbrown::HashMap::new(),
+            },
             &[],
         )
         .await;
@@ -885,7 +923,10 @@ mod tests {
             |name| format!("test:{name}"),
             None,
             FileType::Cargo,
-            &hashbrown::HashMap::new(),
+            VulnSources {
+                osv_results: &DashMap::new(),
+                transitive: &hashbrown::HashMap::new(),
+            },
             &[],
         )
         .await;
@@ -928,7 +969,10 @@ mod tests {
             |name| format!("test:{name}"),
             None,
             FileType::Cargo,
-            &hashbrown::HashMap::new(),
+            VulnSources {
+                osv_results: &DashMap::new(),
+                transitive: &hashbrown::HashMap::new(),
+            },
             &[],
         )
         .await;
@@ -994,7 +1038,10 @@ mod tests {
             |name| format!("test:{name}"),
             None,
             FileType::Cargo,
-            &hashbrown::HashMap::new(),
+            VulnSources {
+                osv_results: &DashMap::new(),
+                transitive: &hashbrown::HashMap::new(),
+            },
             &[],
         )
         .await;
@@ -1044,7 +1091,10 @@ mod tests {
             |name| format!("test:{name}"),
             None,
             FileType::Cargo,
-            &hashbrown::HashMap::new(),
+            VulnSources {
+                osv_results: &DashMap::new(),
+                transitive: &hashbrown::HashMap::new(),
+            },
             &[],
         )
         .await;
@@ -1088,7 +1138,10 @@ mod tests {
             |name| format!("test:{name}"),
             None,
             FileType::Cargo,
-            &hashbrown::HashMap::new(),
+            VulnSources {
+                osv_results: &DashMap::new(),
+                transitive: &hashbrown::HashMap::new(),
+            },
             &[],
         )
         .await;
@@ -1142,7 +1195,10 @@ mod tests {
             |name| format!("test:{name}"),
             Some(VulnerabilitySeverity::High),
             FileType::Cargo,
-            &hashbrown::HashMap::new(),
+            VulnSources {
+                osv_results: &DashMap::new(),
+                transitive: &hashbrown::HashMap::new(),
+            },
             &[],
         )
         .await;
@@ -1182,7 +1238,10 @@ mod tests {
             |name| format!("test:{name}"),
             None,
             FileType::Cargo,
-            &hashbrown::HashMap::new(),
+            VulnSources {
+                osv_results: &DashMap::new(),
+                transitive: &hashbrown::HashMap::new(),
+            },
             &[],
         )
         .await;
@@ -1224,7 +1283,10 @@ mod tests {
             |name| format!("test:{name}"),
             None,
             FileType::Cargo,
-            &hashbrown::HashMap::new(),
+            VulnSources {
+                osv_results: &DashMap::new(),
+                transitive: &hashbrown::HashMap::new(),
+            },
             &[],
         )
         .await;
@@ -1319,7 +1381,10 @@ mod tests {
             |name| format!("test:{name}"),
             None,
             FileType::Cargo,
-            &hashbrown::HashMap::new(),
+            VulnSources {
+                osv_results: &DashMap::new(),
+                transitive: &hashbrown::HashMap::new(),
+            },
             &[],
         )
         .await;
@@ -1363,7 +1428,10 @@ mod tests {
             |name| format!("test:{name}"),
             None,
             FileType::Cargo,
-            &hashbrown::HashMap::new(),
+            VulnSources {
+                osv_results: &DashMap::new(),
+                transitive: &hashbrown::HashMap::new(),
+            },
             &[],
         )
         .await;
@@ -1407,7 +1475,10 @@ mod tests {
             |name| format!("test:{name}"),
             None,
             FileType::Cargo,
-            &hashbrown::HashMap::new(),
+            VulnSources {
+                osv_results: &DashMap::new(),
+                transitive: &hashbrown::HashMap::new(),
+            },
             &[],
         )
         .await;
@@ -1446,7 +1517,10 @@ mod tests {
             |name| format!("test:{name}"),
             None,
             FileType::Npm,
-            &hashbrown::HashMap::new(),
+            VulnSources {
+                osv_results: &DashMap::new(),
+                transitive: &hashbrown::HashMap::new(),
+            },
             &[],
         )
         .await;
@@ -1514,7 +1588,10 @@ mod tests {
             |name| format!("test:{name}"),
             None,
             FileType::Cargo,
-            &doc_transitives,
+            VulnSources {
+                osv_results: &DashMap::new(),
+                transitive: &doc_transitives,
+            },
             &[],
         )
         .await;
@@ -1594,7 +1671,10 @@ mod tests {
             |name| format!("test:{name}"),
             Some(VulnerabilitySeverity::High),
             FileType::Cargo,
-            &doc_transitives,
+            VulnSources {
+                osv_results: &DashMap::new(),
+                transitive: &doc_transitives,
+            },
             &[],
         )
         .await;
@@ -1646,7 +1726,10 @@ mod tests {
             |name| format!("test:{name}"),
             None,
             FileType::Cargo,
-            &hashbrown::HashMap::new(),
+            VulnSources {
+                osv_results: &DashMap::new(),
+                transitive: &hashbrown::HashMap::new(),
+            },
             &ignored,
         )
         .await;
@@ -1678,7 +1761,10 @@ mod tests {
             |name| format!("test:{name}"),
             None,
             FileType::Cargo,
-            &hashbrown::HashMap::new(),
+            VulnSources {
+                osv_results: &DashMap::new(),
+                transitive: &hashbrown::HashMap::new(),
+            },
             &ignored,
         )
         .await;
@@ -1710,7 +1796,10 @@ mod tests {
             |name| format!("test:{name}"),
             None,
             FileType::Cargo,
-            &hashbrown::HashMap::new(),
+            VulnSources {
+                osv_results: &DashMap::new(),
+                transitive: &hashbrown::HashMap::new(),
+            },
             &ignored,
         )
         .await;

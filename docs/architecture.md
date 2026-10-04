@@ -169,7 +169,7 @@ The central handler struct that implements `tower_lsp::LanguageServer`. All shar
 | `http_client: Arc<reqwest::Client>` | Shared HTTP client (one connection pool). |
 | `token_manager: Arc<TokenProviderManager>` | URL → auth-header resolution. |
 | `osv_client`, `vuln_cache`, `advisory_cache`, `negative_advisory_cache` | Vulnerability subsystem. |
-| `transitive_vuln_data: Arc<DashMap<VulnCacheKey, Vec<Vulnerability>>>` | Per-package transitive vuln payloads. |
+| `osv_results: Arc<DashMap<VulnCacheKey, QueryResult>>` | OSV results (advisories + deprecated flag) per ecosystem, name and version, for direct and transitive packages. |
 | `debounce_tasks: Arc<DashMap<Url, (u64, JoinHandle<()>)>>`, `debounce_generation: Arc<AtomicU64>`, `pending_changes: Arc<DashMap<Url, String>>` | Debounce coordination. |
 | `version_cache: Arc<HybridCache>` | Two-tier version-info cache. |
 
@@ -346,7 +346,7 @@ Read path: check L1 → on miss, read L2 → on hit, write back to L1. Write pat
 
 ### `VulnerabilityCache` — seen-set
 
-A side-cache (`depsy-lsp/src/vulnerabilities/cache.rs`) that does **not** store any payload. Key = `VulnCacheKey { ecosystem, package_name, version }`. Value = `(inserted_at,)` only. TTL 6 hours. Purpose: prevent redundant OSV API calls for packages already queried. The actual vulnerability data lives in `VersionInfo` inside the main `HybridCache`.
+A side-cache (`depsy-lsp/src/vulnerabilities/cache.rs`) that does **not** store any payload. Key = `VulnCacheKey { ecosystem, package_name, version }`. Value = `(inserted_at,)` only. TTL 6 hours. Purpose: prevent redundant OSV API calls for packages already queried. The OSV results themselves live in `osv_results` on `DepsyBackend`, under the same key. They are not written into `VersionInfo`: the `HybridCache` is keyed by package name, so it cannot hold two versions of one package (two manifests, or pnpm named catalogs). Readers (diagnostics, inlay hints, hover, report) overlay the result for each dependency's resolved version with `apply_osv_result`.
 
 ### `HybridAdvisoryCache` — RUSTSEC advisories
 
@@ -414,7 +414,7 @@ Non-numeric CVSS strings default to `Medium` (defensive — do not silently swal
 
 ### Transitive vulnerability attribution
 
-When a transitive dependency is vulnerable, we point the diagnostic at the *direct* dependency that pulled it in. The `LockfileGraph::reverse_index` from §5 produces this attribution. Resulting payloads land in `transitive_vuln_data: Arc<DashMap<VulnCacheKey, Vec<Vulnerability>>>` on `DepsyBackend`, and the diagnostic provider consults this map alongside the per-package vulnerabilities in `VersionInfo`.
+When a transitive dependency is vulnerable, we point the diagnostic at the *direct* dependency that pulled it in. The `LockfileGraph::reverse_index` from §5 produces this attribution. Transitive OSV results are stored in `osv_results` like direct ones. The per-document attribution lands in `DocumentState::transitive_vulns_by_direct`, keyed by direct dependency name, and the diagnostic provider reads it alongside the direct dependency's own result.
 
 ## 9. Providers
 
@@ -423,7 +423,7 @@ The five LSP feature providers are **plain functions** living in `depsy-lsp/src/
 | Provider | Module | Signature (abridged) | When invoked |
 |---|---|---|---|
 | **Inlay hints** | `inlay_hints.rs` | `fn create_inlay_hint(dep, version_info, file_type) -> InlayHint` | `inlayHint` request, after `process_document` finishes. |
-| **Diagnostics** | `diagnostics.rs` | `async fn create_diagnostics(deps, cache, …, file_type, transitive_vulns, ignored) -> Vec<Diagnostic>` | After `process_document` and again after vulnerability fetch. |
+| **Diagnostics** | `diagnostics.rs` | `async fn create_diagnostics(deps, cache, …, file_type, transitive_vulns, osv_results, ignored) -> Vec<Diagnostic>` | After `process_document` and again after vulnerability fetch. |
 | **Code actions** | `code_actions.rs` | `async fn create_code_actions(deps, cache, uri, range, file_type, …) -> Vec<CodeActionOrCommand>` | `codeAction` request. |
 | **Completions** | `completion.rs` | `async fn get_completions(deps, position, cache, …) -> Option<Vec<CompletionItem>>` | `completion` request when cursor is inside a version field. |
 | **Document links** | `document_links.rs` | `fn create_document_links(deps, file_type) -> Vec<DocumentLink>` | `documentLink` request. |

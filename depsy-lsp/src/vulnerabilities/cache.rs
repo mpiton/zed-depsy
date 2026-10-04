@@ -1,8 +1,8 @@
 //! Vulnerability cache for tracking queried packages
 //!
 //! Tracks which packages have been queried for vulnerabilities to avoid
-//! redundant API calls. The actual vulnerability data is stored in the
-//! version cache alongside version information.
+//! redundant API calls. The OSV results themselves are kept by the backend,
+//! keyed by [`VulnCacheKey`].
 
 use std::fmt::Display;
 use std::sync::Arc;
@@ -50,7 +50,7 @@ const CLEANUP_INTERVAL: Duration = Duration::from_secs(30 * 60);
 ///
 /// This is a "seen set" with TTL - it prevents redundant API calls to OSV.dev
 /// by tracking which package@version combinations have already been queried.
-/// The actual vulnerability data is stored in the version cache.
+/// The OSV results themselves are kept by the backend, keyed by [`VulnCacheKey`].
 #[derive(Clone)]
 pub struct VulnerabilityCache {
     /// Cache entries (package key -> query timestamp)

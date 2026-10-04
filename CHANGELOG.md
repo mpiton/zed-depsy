@@ -14,6 +14,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   actions on the entries of the default `catalog` and of named `catalogs`.
   `depsy-lsp scan --file pnpm-workspace.yaml` scans the catalog entries too.
 
+### Fixed
+
+- A package declared at two versions (in two manifests, or in two pnpm named
+  catalogs) now shows the vulnerabilities and deprecation status of each
+  version. OSV results were stored per package name, so the last version
+  checked overwrote the other one
+  ([#408](https://github.com/mpiton/zed-depsy/issues/408)).
+
 ### Security
 
 - `rustls` 0.23.45 fixes RUSTSEC-2026-0285 (TLS 1.3 handshake messages

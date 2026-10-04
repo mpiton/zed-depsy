@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- `rustls` 0.23.45 fixes RUSTSEC-2026-0285 (TLS 1.3 handshake messages
+  accepted across encryption level boundaries), pulled in through `reqwest`.
+  Lockfiles of `depsy-lsp`, `depsy-zed` and the fuzz crate are refreshed with
+  semver-compatible updates, including `tokio` 1.53.2 and `clap` 4.6.7.
+
 ## [2.1.0] - 2026-09-13
 
 ### Changed

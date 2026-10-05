@@ -20,7 +20,6 @@
 
 use core::fmt;
 
-use dashmap::DashMap;
 use tower_lsp::lsp_types::*;
 
 use crate::cache::ReadCache;
@@ -29,16 +28,15 @@ use crate::parsers::Dependency;
 use crate::providers::inlay_hints::{VersionStatus, compare_versions, is_local_dependency};
 use crate::registries::{TransitiveVuln, VersionInfo, Vulnerability, VulnerabilitySeverity};
 use crate::utils::fmt_truncate_string;
-use crate::vulnerabilities::apply_osv_result;
-use crate::vulnerabilities::cache::VulnCacheKey;
-use crate::vulnerabilities::osv::QueryResult;
+use crate::vulnerabilities::cache::VulnerabilityCache;
+use crate::vulnerabilities::cached_version_info;
 
 /// Vulnerability data kept outside the name-keyed version cache.
 #[derive(Clone, Copy)]
 pub struct VulnSources<'a> {
     /// OSV results keyed by (ecosystem, name, version). The entry matching a
     /// dependency's resolved version supplies its advisories and deprecation status.
-    pub osv_results: &'a DashMap<VulnCacheKey, QueryResult>,
+    pub osv_results: &'a VulnerabilityCache,
     /// Per-document transitive findings keyed by direct-dependency name. Stored
     /// apart from the shared version cache to avoid cross-workspace contamination.
     pub transitive: &'a hashbrown::HashMap<String, Vec<TransitiveVuln>>,
@@ -58,7 +56,8 @@ pub struct VulnSources<'a> {
 /// - `cache_key_fn` — maps a package name to its cache key.
 /// - `min_severity` — when `Some`, vulnerability diagnostics are suppressed
 ///   unless at least one vulnerability meets the threshold.
-/// - `file_type` — used to format registry names in yanked-version messages.
+/// - `file_type` — selects the OSV ecosystem used to look up `vulns.osv_results`,
+///   and formats registry names in yanked-version messages.
 /// - `vulns` — direct and transitive vulnerability data, see [`VulnSources`].
 /// - `ignored` — package names (wildcards supported) that should be skipped.
 ///
@@ -93,10 +92,14 @@ pub async fn create_diagnostics(
         // yanked, deprecated, and vulnerability checks below. Avoids two
         // back-to-back `spawn_blocking` round-trips against `SqliteCache`.
         let cache_key = cache_key_fn(&dep.name);
-        let mut cached = cache.get(&cache_key).await;
-        if let Some(info) = cached.as_mut() {
-            apply_osv_result(info, vulns.osv_results, file_type.to_ecosystem(), dep);
-        }
+        let cached = cached_version_info(
+            cache,
+            &cache_key,
+            vulns.osv_results,
+            file_type.to_ecosystem(),
+            dep,
+        )
+        .await;
 
         // Add outdated version diagnostic
         if let Some(diag) = create_outdated_diagnostic(dep, cached.as_ref()) {
@@ -562,6 +565,26 @@ mod tests {
     use crate::file_types::FileType;
     use crate::parsers::Span;
     use crate::registries::VersionInfo;
+    use crate::vulnerabilities::cache::VulnCacheKey;
+    use crate::vulnerabilities::osv::QueryResult;
+
+    /// OSV results giving each of `deps` the same advisories.
+    fn osv_results_for(
+        deps: &[Dependency],
+        vulnerabilities: Vec<Vulnerability>,
+    ) -> VulnerabilityCache {
+        let osv_results = VulnerabilityCache::with_ttl(3600);
+        for dep in deps {
+            osv_results.insert(
+                VulnCacheKey::for_dependency(FileType::Cargo.to_ecosystem(), dep),
+                QueryResult {
+                    vulnerabilities: vulnerabilities.clone(),
+                    deprecated: false,
+                },
+            );
+        }
+        osv_results
+    }
 
     fn create_test_dependency(name: &str, version: &str, line: u32) -> Dependency {
         Dependency {
@@ -606,7 +629,7 @@ mod tests {
             None,
             FileType::Cargo,
             VulnSources {
-                osv_results: &DashMap::new(),
+                osv_results: &VulnerabilityCache::with_ttl(3600),
                 transitive: &hashbrown::HashMap::new(),
             },
             &[],
@@ -639,7 +662,7 @@ mod tests {
             None,
             FileType::Cargo,
             VulnSources {
-                osv_results: &DashMap::new(),
+                osv_results: &VulnerabilityCache::with_ttl(3600),
                 transitive: &hashbrown::HashMap::new(),
             },
             &[],
@@ -660,7 +683,7 @@ mod tests {
             None,
             FileType::Cargo,
             VulnSources {
-                osv_results: &DashMap::new(),
+                osv_results: &VulnerabilityCache::with_ttl(3600),
                 transitive: &hashbrown::HashMap::new(),
             },
             &[],
@@ -713,7 +736,7 @@ mod tests {
             None,
             FileType::Cargo,
             VulnSources {
-                osv_results: &DashMap::new(),
+                osv_results: &VulnerabilityCache::with_ttl(3600),
                 transitive: &hashbrown::HashMap::new(),
             },
             &[],
@@ -764,7 +787,7 @@ mod tests {
             None,
             FileType::Cargo,
             VulnSources {
-                osv_results: &DashMap::new(),
+                osv_results: &VulnerabilityCache::with_ttl(3600),
                 transitive: &hashbrown::HashMap::new(),
             },
             &[],
@@ -796,17 +819,20 @@ mod tests {
                 "test:vuln-dep".to_string(),
                 VersionInfo {
                     deprecated: true,
-                    vulnerabilities: vec![Vulnerability {
-                        id: "CVE-2024-1234".to_string(),
-                        severity: VulnerabilitySeverity::High,
-                        description: "Test vulnerability".to_string(),
-                        url: None,
-                    }],
                     ..Default::default()
                 },
             )
             .await;
 
+        let osv_results = osv_results_for(
+            &deps,
+            vec![Vulnerability {
+                id: "CVE-2024-1234".to_string(),
+                severity: VulnerabilitySeverity::High,
+                description: "Test vulnerability".to_string(),
+                url: None,
+            }],
+        );
         let diagnostics = create_diagnostics(
             &deps,
             &cache,
@@ -814,7 +840,7 @@ mod tests {
             None,
             FileType::Cargo,
             VulnSources {
-                osv_results: &DashMap::new(),
+                osv_results: &osv_results,
                 transitive: &hashbrown::HashMap::new(),
             },
             &[],
@@ -877,7 +903,7 @@ mod tests {
             None,
             FileType::Cargo,
             VulnSources {
-                osv_results: &DashMap::new(),
+                osv_results: &VulnerabilityCache::with_ttl(3600),
                 transitive: &hashbrown::HashMap::new(),
             },
             &[],
@@ -924,7 +950,7 @@ mod tests {
             None,
             FileType::Cargo,
             VulnSources {
-                osv_results: &DashMap::new(),
+                osv_results: &VulnerabilityCache::with_ttl(3600),
                 transitive: &hashbrown::HashMap::new(),
             },
             &[],
@@ -970,7 +996,7 @@ mod tests {
             None,
             FileType::Cargo,
             VulnSources {
-                osv_results: &DashMap::new(),
+                osv_results: &VulnerabilityCache::with_ttl(3600),
                 transitive: &hashbrown::HashMap::new(),
             },
             &[],
@@ -1020,18 +1046,21 @@ mod tests {
                 "test:serde".to_string(),
                 VersionInfo {
                     yanked_versions: vec!["1.0.0".to_string()],
-                    vulnerabilities: vec![Vulnerability {
-                        id: "CVE-2024-1234".to_string(),
-                        severity: VulnerabilitySeverity::High,
-                        description: "Test vulnerability".to_string(),
-                        url: None,
-                    }],
                     latest: Some("2.0.0".to_string()),
                     ..Default::default()
                 },
             )
             .await;
 
+        let osv_results = osv_results_for(
+            &deps,
+            vec![Vulnerability {
+                id: "CVE-2024-1234".to_string(),
+                severity: VulnerabilitySeverity::High,
+                description: "Test vulnerability".to_string(),
+                url: None,
+            }],
+        );
         let diagnostics = create_diagnostics(
             &deps,
             &cache,
@@ -1039,7 +1068,7 @@ mod tests {
             None,
             FileType::Cargo,
             VulnSources {
-                osv_results: &DashMap::new(),
+                osv_results: &osv_results,
                 transitive: &hashbrown::HashMap::new(),
             },
             &[],
@@ -1092,7 +1121,7 @@ mod tests {
             None,
             FileType::Cargo,
             VulnSources {
-                osv_results: &DashMap::new(),
+                osv_results: &VulnerabilityCache::with_ttl(3600),
                 transitive: &hashbrown::HashMap::new(),
             },
             &[],
@@ -1113,25 +1142,28 @@ mod tests {
                 "test:vuln-dep".to_string(),
                 VersionInfo {
                     latest: Some("1.0.0".to_string()),
-                    vulnerabilities: vec![
-                        Vulnerability {
-                            id: "CVE-2024-1234".to_string(),
-                            severity: VulnerabilitySeverity::High,
-                            description: "High severity vulnerability".to_string(),
-                            url: Some("https://osv.dev/CVE-2024-1234".to_string()),
-                        },
-                        Vulnerability {
-                            id: "CVE-2024-5678".to_string(),
-                            severity: VulnerabilitySeverity::Medium,
-                            description: "Medium severity vulnerability".to_string(),
-                            url: None,
-                        },
-                    ],
                     ..Default::default()
                 },
             )
             .await;
 
+        let osv_results = osv_results_for(
+            &deps,
+            vec![
+                Vulnerability {
+                    id: "CVE-2024-1234".to_string(),
+                    severity: VulnerabilitySeverity::High,
+                    description: "High severity vulnerability".to_string(),
+                    url: Some("https://osv.dev/CVE-2024-1234".to_string()),
+                },
+                Vulnerability {
+                    id: "CVE-2024-5678".to_string(),
+                    severity: VulnerabilitySeverity::Medium,
+                    description: "Medium severity vulnerability".to_string(),
+                    url: None,
+                },
+            ],
+        );
         let diagnostics = create_diagnostics(
             &deps,
             &cache,
@@ -1139,7 +1171,7 @@ mod tests {
             None,
             FileType::Cargo,
             VulnSources {
-                osv_results: &DashMap::new(),
+                osv_results: &osv_results,
                 transitive: &hashbrown::HashMap::new(),
             },
             &[],
@@ -1170,25 +1202,28 @@ mod tests {
                 "test:vuln-dep".to_string(),
                 VersionInfo {
                     latest: Some("1.0.0".to_string()),
-                    vulnerabilities: vec![
-                        Vulnerability {
-                            id: "CVE-2024-LOW".to_string(),
-                            severity: VulnerabilitySeverity::Low,
-                            description: "Low severity".to_string(),
-                            url: None,
-                        },
-                        Vulnerability {
-                            id: "CVE-2024-HIGH".to_string(),
-                            severity: VulnerabilitySeverity::High,
-                            description: "High severity".to_string(),
-                            url: None,
-                        },
-                    ],
                     ..Default::default()
                 },
             )
             .await;
 
+        let osv_results = osv_results_for(
+            &deps,
+            vec![
+                Vulnerability {
+                    id: "CVE-2024-LOW".to_string(),
+                    severity: VulnerabilitySeverity::Low,
+                    description: "Low severity".to_string(),
+                    url: None,
+                },
+                Vulnerability {
+                    id: "CVE-2024-HIGH".to_string(),
+                    severity: VulnerabilitySeverity::High,
+                    description: "High severity".to_string(),
+                    url: None,
+                },
+            ],
+        );
         let diagnostics = create_diagnostics(
             &deps,
             &cache,
@@ -1196,7 +1231,7 @@ mod tests {
             Some(VulnerabilitySeverity::High),
             FileType::Cargo,
             VulnSources {
-                osv_results: &DashMap::new(),
+                osv_results: &osv_results,
                 transitive: &hashbrown::HashMap::new(),
             },
             &[],
@@ -1239,7 +1274,7 @@ mod tests {
             None,
             FileType::Cargo,
             VulnSources {
-                osv_results: &DashMap::new(),
+                osv_results: &VulnerabilityCache::with_ttl(3600),
                 transitive: &hashbrown::HashMap::new(),
             },
             &[],
@@ -1284,7 +1319,7 @@ mod tests {
             None,
             FileType::Cargo,
             VulnSources {
-                osv_results: &DashMap::new(),
+                osv_results: &VulnerabilityCache::with_ttl(3600),
                 transitive: &hashbrown::HashMap::new(),
             },
             &[],
@@ -1364,17 +1399,20 @@ mod tests {
                 "test:vuln-dep".to_string(),
                 VersionInfo {
                     latest: Some("1.0.0".to_string()),
-                    vulnerabilities: vec![Vulnerability {
-                        id: "CVE-2024-LOW".to_string(),
-                        severity: VulnerabilitySeverity::Low,
-                        description: "Low severity".to_string(),
-                        url: None,
-                    }],
                     ..Default::default()
                 },
             )
             .await;
 
+        let osv_results = osv_results_for(
+            &deps,
+            vec![Vulnerability {
+                id: "CVE-2024-LOW".to_string(),
+                severity: VulnerabilitySeverity::Low,
+                description: "Low severity".to_string(),
+                url: None,
+            }],
+        );
         let diagnostics = create_diagnostics(
             &deps,
             &cache,
@@ -1382,7 +1420,7 @@ mod tests {
             None,
             FileType::Cargo,
             VulnSources {
-                osv_results: &DashMap::new(),
+                osv_results: &osv_results,
                 transitive: &hashbrown::HashMap::new(),
             },
             &[],
@@ -1411,17 +1449,20 @@ mod tests {
                 "test:vuln-dep".to_string(),
                 VersionInfo {
                     latest: Some("1.0.0".to_string()),
-                    vulnerabilities: vec![Vulnerability {
-                        id: "CVE-2024-MED".to_string(),
-                        severity: VulnerabilitySeverity::Medium,
-                        description: "Medium severity".to_string(),
-                        url: None,
-                    }],
                     ..Default::default()
                 },
             )
             .await;
 
+        let osv_results = osv_results_for(
+            &deps,
+            vec![Vulnerability {
+                id: "CVE-2024-MED".to_string(),
+                severity: VulnerabilitySeverity::Medium,
+                description: "Medium severity".to_string(),
+                url: None,
+            }],
+        );
         let diagnostics = create_diagnostics(
             &deps,
             &cache,
@@ -1429,7 +1470,7 @@ mod tests {
             None,
             FileType::Cargo,
             VulnSources {
-                osv_results: &DashMap::new(),
+                osv_results: &osv_results,
                 transitive: &hashbrown::HashMap::new(),
             },
             &[],
@@ -1458,17 +1499,20 @@ mod tests {
                 "test:vuln-dep".to_string(),
                 VersionInfo {
                     latest: Some("1.0.0".to_string()),
-                    vulnerabilities: vec![Vulnerability {
-                        id: "CVE-2024-CRIT".to_string(),
-                        severity: VulnerabilitySeverity::Critical,
-                        description: "Critical severity".to_string(),
-                        url: None,
-                    }],
                     ..Default::default()
                 },
             )
             .await;
 
+        let osv_results = osv_results_for(
+            &deps,
+            vec![Vulnerability {
+                id: "CVE-2024-CRIT".to_string(),
+                severity: VulnerabilitySeverity::Critical,
+                description: "Critical severity".to_string(),
+                url: None,
+            }],
+        );
         let diagnostics = create_diagnostics(
             &deps,
             &cache,
@@ -1476,7 +1520,7 @@ mod tests {
             None,
             FileType::Cargo,
             VulnSources {
-                osv_results: &DashMap::new(),
+                osv_results: &osv_results,
                 transitive: &hashbrown::HashMap::new(),
             },
             &[],
@@ -1518,7 +1562,7 @@ mod tests {
             None,
             FileType::Npm,
             VulnSources {
-                osv_results: &DashMap::new(),
+                osv_results: &VulnerabilityCache::with_ttl(3600),
                 transitive: &hashbrown::HashMap::new(),
             },
             &[],
@@ -1589,7 +1633,7 @@ mod tests {
             None,
             FileType::Cargo,
             VulnSources {
-                osv_results: &DashMap::new(),
+                osv_results: &VulnerabilityCache::with_ttl(3600),
                 transitive: &doc_transitives,
             },
             &[],
@@ -1672,7 +1716,7 @@ mod tests {
             Some(VulnerabilitySeverity::High),
             FileType::Cargo,
             VulnSources {
-                osv_results: &DashMap::new(),
+                osv_results: &VulnerabilityCache::with_ttl(3600),
                 transitive: &doc_transitives,
             },
             &[],
@@ -1727,7 +1771,7 @@ mod tests {
             None,
             FileType::Cargo,
             VulnSources {
-                osv_results: &DashMap::new(),
+                osv_results: &VulnerabilityCache::with_ttl(3600),
                 transitive: &hashbrown::HashMap::new(),
             },
             &ignored,
@@ -1762,7 +1806,7 @@ mod tests {
             None,
             FileType::Cargo,
             VulnSources {
-                osv_results: &DashMap::new(),
+                osv_results: &VulnerabilityCache::with_ttl(3600),
                 transitive: &hashbrown::HashMap::new(),
             },
             &ignored,
@@ -1797,7 +1841,7 @@ mod tests {
             None,
             FileType::Cargo,
             VulnSources {
-                osv_results: &DashMap::new(),
+                osv_results: &VulnerabilityCache::with_ttl(3600),
                 transitive: &hashbrown::HashMap::new(),
             },
             &ignored,

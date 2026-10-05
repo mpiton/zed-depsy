@@ -85,8 +85,10 @@ use crate::registries::rubygems::RubyGemsRegistry;
 use crate::registries::{Registry, VersionInfo, Vulnerability, VulnerabilitySeverity};
 use crate::reports::{VulnerabilityReportEntry, VulnerabilitySummary};
 use crate::vulnerabilities::cache::{VulnCacheKey, VulnerabilityCache};
-use crate::vulnerabilities::osv::{OsvClient, QueryResult};
-use crate::vulnerabilities::{VulnerabilityQuery, apply_osv_result, normalize_version_for_osv};
+use crate::vulnerabilities::osv::OsvClient;
+use crate::vulnerabilities::{
+    VulnerabilityQuery, apply_osv_result, cached_version_info, normalize_version_for_osv,
+};
 use crate::{
     auth::{EnvTokenProvider, TokenProviderManager, cargo_credentials, fmt_redact_token},
     reports::fmt_markdown_report,
@@ -154,8 +156,6 @@ struct ProcessingContext {
     maven_central: Arc<tokio::sync::RwLock<MavenCentralRegistry>>,
     osv_client: Arc<OsvClient>,
     vuln_cache: Arc<VulnerabilityCache>,
-    /// Per-(ecosystem, name, version) OSV results shared across document processing runs.
-    osv_results: Arc<DashMap<VulnCacheKey, QueryResult>>,
 }
 
 /// Parse an npm-ecosystem manifest: the catalogs of a `pnpm-workspace.yaml`,
@@ -338,71 +338,7 @@ impl ProcessingContext {
         );
 
         // Publish diagnostics IMMEDIATELY (versions are available, vulnerabilities will update later)
-        let (
-            diagnostics_enabled,
-            security_show_diags,
-            min_severity,
-            security_enabled,
-            ignored_packages,
-        ) = self
-            .config
-            .read()
-            .map(|c| {
-                (
-                    c.diagnostics.enabled,
-                    c.security.show_diagnostics,
-                    if c.security.show_diagnostics {
-                        Some(c.security.min_severity_level())
-                    } else {
-                        None
-                    },
-                    c.security.enabled,
-                    c.ignore.clone(),
-                )
-            })
-            .unwrap_or((true, true, None, true, Vec::new()));
-
-        if diagnostics_enabled {
-            let severity_filter = if security_show_diags {
-                min_severity
-            } else {
-                None
-            };
-            // Pre-build cache key map for registry-aware lookups
-            let cache_key_map: HashMap<String, String> = dependencies
-                .iter()
-                .map(|dep| (dep.name.clone(), dep_cache_key(dep, file_type)))
-                .collect();
-            // Transitive vulns are not yet available at this point (background task hasn't run).
-            // They will be populated in DocumentState.transitive_vulns_by_direct once the
-            // background vulnerability fetch completes.
-            let empty_transitives: hashbrown::HashMap<
-                String,
-                Vec<crate::registries::TransitiveVuln>,
-            > = hashbrown::HashMap::new();
-            let diagnostics = create_diagnostics(
-                &dependencies,
-                &self.version_cache,
-                |name| {
-                    cache_key_map
-                        .get(name)
-                        .cloned()
-                        .unwrap_or_else(|| file_type.cache_key(name))
-                },
-                severity_filter,
-                file_type,
-                VulnSources {
-                    osv_results: &self.osv_results,
-                    transitive: &empty_transitives,
-                },
-                &ignored_packages,
-            )
-            .await;
-
-            self.client
-                .publish_diagnostics(uri.clone(), diagnostics, None)
-                .await;
-        }
+        self.publish_diagnostics(uri).await;
 
         // Refresh inlay hints IMMEDIATELY (versions are available)
         self.client
@@ -410,33 +346,96 @@ impl ProcessingContext {
             .await
             .ok();
 
-        // Fetch vulnerabilities from OSV.dev in BACKGROUND (non-blocking)
+        let security_enabled = self
+            .config
+            .read()
+            .map(|c| c.security.enabled)
+            .unwrap_or(true);
+
+        // Fetch vulnerabilities from OSV.dev in BACKGROUND (non-blocking), then
+        // republish so the findings reach the Problems panel without an edit.
         if security_enabled && !dependencies.is_empty() {
-            let dependencies_clone = dependencies.clone();
-            let osv_client_clone = Arc::clone(&self.osv_client);
-            let vuln_cache_clone = Arc::clone(&self.vuln_cache);
-            let osv_results_clone = Arc::clone(&self.osv_results);
-            let client_clone = self.client.clone();
-            let documents_clone = Arc::clone(&self.documents);
-            let uri_clone = uri.clone();
+            let ctx = self.clone();
+            let uri = uri.clone();
 
             tokio::spawn(async move {
                 DepsyBackend::fetch_vulnerabilities_background(
-                    dependencies_clone,
+                    dependencies,
                     file_type,
-                    osv_client_clone,
-                    vuln_cache_clone,
-                    client_clone,
+                    Arc::clone(&ctx.osv_client),
+                    Arc::clone(&ctx.vuln_cache),
+                    ctx.client.clone(),
                     VulnBgContext {
-                        documents: documents_clone,
-                        uri: uri_clone,
+                        documents: Arc::clone(&ctx.documents),
+                        uri: uri.clone(),
                         lockfile_graph,
-                        osv_results: osv_results_clone,
                     },
                 )
                 .await;
+                ctx.publish_diagnostics(&uri).await;
             });
         }
+    }
+
+    /// Publishes diagnostics for `uri` from its current document state.
+    ///
+    /// Runs once versions are fetched and again after the background OSV
+    /// check. Does nothing when the document was closed in the meantime.
+    async fn publish_diagnostics(&self, uri: &Url) {
+        // Snapshot the document so no DashMap guard is held across an await.
+        let Some((dependencies, file_type, transitive)) = self.documents.get(uri).map(|doc| {
+            (
+                doc.dependencies.clone(),
+                doc.file_type,
+                doc.transitive_vulns_by_direct.clone(),
+            )
+        }) else {
+            return;
+        };
+        let (diagnostics_enabled, severity_filter, ignored_packages) = self
+            .config
+            .read()
+            .map(|c| {
+                (
+                    c.diagnostics.enabled,
+                    c.security
+                        .show_diagnostics
+                        .then(|| c.security.min_severity_level()),
+                    c.ignore.clone(),
+                )
+            })
+            .unwrap_or((true, None, Vec::new()));
+        if !diagnostics_enabled {
+            return;
+        }
+
+        // Pre-build cache key map for registry-aware lookups
+        let cache_key_map: HashMap<String, String> = dependencies
+            .iter()
+            .map(|dep| (dep.name.clone(), dep_cache_key(dep, file_type)))
+            .collect();
+        let diagnostics = create_diagnostics(
+            &dependencies,
+            &self.version_cache,
+            |name| {
+                cache_key_map
+                    .get(name)
+                    .cloned()
+                    .unwrap_or_else(|| file_type.cache_key(name))
+            },
+            severity_filter,
+            file_type,
+            VulnSources {
+                osv_results: &self.vuln_cache,
+                transitive: &transitive,
+            },
+            &ignored_packages,
+        )
+        .await;
+
+        self.client
+            .publish_diagnostics(uri.clone(), diagnostics, None)
+            .await;
     }
 }
 
@@ -492,15 +491,11 @@ fn build_advisory_runtime(
 }
 
 /// Context passed to the background vulnerability fetch task so it can store
-/// OSV results and per-document transitive attribution after the query completes.
+/// per-document transitive attribution after the query completes.
 struct VulnBgContext {
     documents: Arc<DashMap<Url, DocumentState>>,
     uri: Url,
     lockfile_graph: Option<std::sync::Arc<crate::parsers::lockfile_graph::LockfileGraph>>,
-    /// Per-(ecosystem, name, version) OSV results for direct and transitive packages.
-    /// Populated by the fresh-query loop and read by the cached-query loop so
-    /// re-attribution works on subsequent document opens.
-    osv_results: Arc<DashMap<VulnCacheKey, QueryResult>>,
 }
 
 /// The main LSP backend for Depsy.
@@ -594,10 +589,6 @@ pub struct DepsyBackend {
     /// tasks keep ticking forever holding `Arc` clones of the previous
     /// memory/SQLite layers (a slow leak that grows on every reconfigure).
     advisory_cleanup_handles: Arc<tokio::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
-    /// Per-(ecosystem, name, version) OSV results for direct and transitive packages.
-    /// The version cache is keyed by name only, so each reader overlays the result
-    /// matching its dependency's resolved version (see [`apply_osv_result`]).
-    osv_results: Arc<DashMap<VulnCacheKey, QueryResult>>,
     /// Debounce tasks for did_change notifications (per-URI)
     /// Maps URI -> (generation, JoinHandle) for safe cleanup with racing tasks
     debounce_tasks: Arc<DashMap<Url, (u64, tokio::task::JoinHandle<()>)>>,
@@ -720,7 +711,6 @@ impl DepsyBackend {
             advisory_cache: Arc::new(tokio::sync::RwLock::new(advisory_cache)),
             negative_advisory_cache: Arc::new(tokio::sync::RwLock::new(negative_advisory_cache)),
             advisory_cleanup_handles: Arc::new(tokio::sync::Mutex::new(advisory_cleanup_handles)),
-            osv_results: Arc::new(DashMap::new()),
             debounce_tasks: Arc::new(DashMap::new()),
             debounce_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             pending_changes: Arc::new(DashMap::new()),
@@ -782,7 +772,6 @@ impl DepsyBackend {
             maven_central: Arc::clone(&self.maven_central),
             osv_client: Arc::clone(&*self.osv_client.read().await),
             vuln_cache: Arc::clone(&self.vuln_cache),
-            osv_results: Arc::clone(&self.osv_results),
         }
     }
 
@@ -896,33 +885,36 @@ impl DepsyBackend {
         // Build queries for direct packages not in vulnerability cache.
         // Track the filtered subset so we can correlate results back.
         let mut direct_queries: Vec<VulnerabilityQuery> = Vec::new();
-        let mut direct_query_deps: Vec<&crate::parsers::Dependency> = Vec::new();
+        let mut direct_query_keys: Vec<VulnCacheKey> = Vec::new();
         for dep in dependencies.iter() {
-            let normalized_version = normalize_version_for_osv(dep.effective_version());
-            let vuln_key = VulnCacheKey::new(ecosystem, &dep.name, &normalized_version);
+            let vuln_key = VulnCacheKey::for_dependency(ecosystem, dep);
             if vuln_cache.contains(&vuln_key) {
                 continue;
             }
             direct_queries.push(VulnerabilityQuery {
                 ecosystem,
                 package_name: dep.name.clone(),
-                version: normalized_version,
+                version: vuln_key.version.clone(),
             });
-            direct_query_deps.push(dep);
+            direct_query_keys.push(vuln_key);
         }
 
         // Build queries for transitive packages not in vulnerability cache.
-        // Cached transitives are tracked separately so we can still attribute their vulns.
+        // Cached transitives with advisories are kept so we can still attribute them.
         let mut transitive_queries: Vec<VulnerabilityQuery> = Vec::new();
         let mut transitive_query_pkgs: Vec<&crate::parsers::lockfile_graph::LockfilePackage> =
             Vec::new();
-        let mut transitive_cached_pkgs: Vec<&crate::parsers::lockfile_graph::LockfilePackage> =
-            Vec::new();
+        let mut transitive_cached_vulns: Vec<(
+            &crate::parsers::lockfile_graph::LockfilePackage,
+            Vec<Vulnerability>,
+        )> = Vec::new();
         for t in transitives.iter() {
             let normalized_version = normalize_version_for_osv(&t.version);
             let vuln_key = VulnCacheKey::new(ecosystem, &t.name, &normalized_version);
-            if vuln_cache.contains(&vuln_key) {
-                transitive_cached_pkgs.push(t);
+            if let Some(result) = vuln_cache.get(&vuln_key) {
+                if !result.vulnerabilities.is_empty() {
+                    transitive_cached_vulns.push((t, result.vulnerabilities));
+                }
                 continue;
             }
             transitive_queries.push(VulnerabilityQuery {
@@ -952,27 +944,23 @@ impl DepsyBackend {
                 // Store direct results per (ecosystem, name, version), not in the
                 // name-keyed version_cache: the same package can be declared at two
                 // versions (two manifests, or pnpm named catalogs).
-                // direct_query_deps is the filtered list (cached ones were skipped above).
-                for (dep, result) in direct_query_deps.iter().zip(direct_results.iter()) {
-                    let normalized_version = normalize_version_for_osv(dep.effective_version());
+                // direct_query_keys is the filtered list (cached ones were skipped above).
+                for (vuln_key, result) in direct_query_keys.into_iter().zip(direct_results.iter()) {
                     if result.deprecated {
                         tracing::info!(
                             "Background: Package {} {} is deprecated (unmaintained)",
-                            dep.name,
-                            normalized_version
+                            vuln_key.package_name,
+                            vuln_key.version
                         );
                     }
                     tracing::debug!(
                         "Background: Updated {} {} with {} vulnerabilities, deprecated={}",
-                        dep.name,
-                        normalized_version,
+                        vuln_key.package_name,
+                        vuln_key.version,
                         result.vulnerabilities.len(),
                         result.deprecated
                     );
-                    // Mark this package as queried in vuln_cache
-                    let vuln_key = VulnCacheKey::new(ecosystem, &dep.name, &normalized_version);
-                    vuln_cache.insert(vuln_key.clone());
-                    bg_ctx.osv_results.insert(vuln_key, result.clone());
+                    vuln_cache.insert(vuln_key, result.clone());
                 }
 
                 // Attribute transitive vulnerabilities to ALL direct parents that reach them.
@@ -993,12 +981,11 @@ impl DepsyBackend {
                     for (tpkg, result) in
                         transitive_query_pkgs.iter().zip(transitive_results.iter())
                     {
-                        // Mark this transitive package as queried in vuln_cache
                         let normalized_version = normalize_version_for_osv(&tpkg.version);
-                        let vuln_key =
-                            VulnCacheKey::new(ecosystem, &tpkg.name, &normalized_version);
-                        vuln_cache.insert(vuln_key.clone());
-                        bg_ctx.osv_results.insert(vuln_key, result.clone());
+                        vuln_cache.insert(
+                            VulnCacheKey::new(ecosystem, &tpkg.name, &normalized_version),
+                            result.clone(),
+                        );
 
                         if result.vulnerabilities.is_empty() {
                             continue;
@@ -1048,22 +1035,32 @@ impl DepsyBackend {
                         }
                     }
 
-                    // Attribute transitive vulns for packages already in vuln_cache.
-                    // Vuln data for transitives is stored in osv_results. This ensures
-                    // re-processing a document never drops transitive attribution just because
-                    // the OSV query was skipped on the second run (FIX C).
-                    for tpkg in &transitive_cached_pkgs {
-                        let normalized_version = normalize_version_for_osv(&tpkg.version);
-                        let vuln_data_key =
-                            VulnCacheKey::new(ecosystem, &tpkg.name, &normalized_version);
-                        if let Some(result) = bg_ctx.osv_results.get(&vuln_data_key) {
-                            let vulns: Vec<_> = result.vulnerabilities.clone();
-                            // No else: absence means no vulns, nothing to do.
-                            let parents = inverse.get(&tpkg.name).cloned().unwrap_or_default();
-                            if parents.is_empty() {
-                                for v in &vulns {
+                    // Attribute transitive vulns for packages already in vuln_cache, so
+                    // re-processing a document keeps its transitive findings even though
+                    // the OSV query was skipped on the second run.
+                    for (tpkg, vulns) in &transitive_cached_vulns {
+                        let parents = inverse.get(&tpkg.name).cloned().unwrap_or_default();
+                        if parents.is_empty() {
+                            for v in vulns {
+                                transitive_vulns_by_direct
+                                    .entry_ref("(unknown)")
+                                    .or_default()
+                                    .push(TransitiveVuln {
+                                        package_name: tpkg.name.clone(),
+                                        package_version: tpkg.version.clone(),
+                                        vulnerability: v.clone(),
+                                    });
+                            }
+                        } else {
+                            for parent in &parents {
+                                // Translate normalized parent name back to raw manifest name.
+                                let raw_parent = normalized_to_raw
+                                    .get(parent.as_str())
+                                    .cloned()
+                                    .unwrap_or_else(|| parent.clone());
+                                for v in vulns {
                                     transitive_vulns_by_direct
-                                        .entry_ref("(unknown)")
+                                        .entry_ref(raw_parent.as_str())
                                         .or_default()
                                         .push(TransitiveVuln {
                                             package_name: tpkg.name.clone(),
@@ -1071,38 +1068,14 @@ impl DepsyBackend {
                                             vulnerability: v.clone(),
                                         });
                                 }
-                            } else {
-                                for parent in &parents {
-                                    // Translate normalized parent name back to raw manifest name.
-                                    let raw_parent = normalized_to_raw
-                                        .get(parent.as_str())
-                                        .cloned()
-                                        .unwrap_or_else(|| parent.clone());
-                                    for v in &vulns {
-                                        transitive_vulns_by_direct
-                                            .entry_ref(raw_parent.as_str())
-                                            .or_default()
-                                            .push(TransitiveVuln {
-                                                package_name: tpkg.name.clone(),
-                                                package_version: tpkg.version.clone(),
-                                                vulnerability: v.clone(),
-                                            });
-                                    }
-                                    tracing::debug!(
-                                        "Background: Re-attributed (cached) {} transitive vulns from {}@{} to direct dep {}",
-                                        vulns.len(),
-                                        tpkg.name,
-                                        tpkg.version,
-                                        raw_parent
-                                    );
-                                }
+                                tracing::debug!(
+                                    "Background: Re-attributed (cached) {} transitive vulns from {}@{} to direct dep {}",
+                                    vulns.len(),
+                                    tpkg.name,
+                                    tpkg.version,
+                                    raw_parent
+                                );
                             }
-                        } else {
-                            tracing::debug!(
-                                "vuln_cache hit without osv_results entry for {}@{} — skipping attribution",
-                                tpkg.name,
-                                tpkg.version
-                            );
                         }
                     }
 
@@ -1217,8 +1190,15 @@ impl DepsyBackend {
         let mut hits: Vec<(&crate::parsers::Dependency, Vec<Vulnerability>)> = Vec::new();
         for dep in &dependencies {
             let cache_key = dep_cache_key(dep, file_type);
-            if let Some(mut info) = self.version_cache.get(&cache_key).await {
-                apply_osv_result(&mut info, &self.osv_results, file_type.to_ecosystem(), dep);
+            if let Some(info) = cached_version_info(
+                &self.version_cache,
+                &cache_key,
+                &self.vuln_cache,
+                file_type.to_ecosystem(),
+                dep,
+            )
+            .await
+            {
                 hits.push((dep, info.vulnerabilities));
             }
         }
@@ -1746,30 +1726,36 @@ impl LanguageServer for DepsyBackend {
         // Bound the fan-out so a large file or canceled inlay-hint request can't
         // enqueue an unbounded number of `spawn_blocking` SQLite jobs (which are
         // not cancelable: a dropped future may still complete the underlying op).
+        // Prefetch per dependency, not per cache key: two declarations of one
+        // package (pnpm named catalogs) share a key but need their own overlay.
         const PREFETCH_CONCURRENCY: usize = 8;
-        let cache_keys: Vec<String> = visible_deps
-            .iter()
-            .map(|dep| dep_cache_key(dep, file_type))
-            .collect();
-        let cache_values: HashMap<String, Option<crate::registries::VersionInfo>> = {
+        let version_infos: Vec<Option<VersionInfo>> = {
             use futures::stream::{self, StreamExt};
-            stream::iter(cache_keys.into_iter().map(|cache_key| async move {
-                let value = self.version_cache.get(&cache_key).await;
-                (cache_key, value)
-            }))
-            .buffer_unordered(PREFETCH_CONCURRENCY)
-            .collect()
-            .await
+            // Collected first: keeping the `&Dependency` closure inside the stream
+            // trips a higher-ranked lifetime error in the async-trait future.
+            let lookups: Vec<_> = visible_deps
+                .iter()
+                .map(|dep| async move {
+                    cached_version_info(
+                        &self.version_cache,
+                        &dep_cache_key(dep, file_type),
+                        &self.vuln_cache,
+                        file_type.to_ecosystem(),
+                        dep,
+                    )
+                    .await
+                })
+                .collect();
+            stream::iter(lookups)
+                .buffered(PREFETCH_CONCURRENCY)
+                .collect()
+                .await
         };
 
         let hints: Vec<InlayHint> = visible_deps
             .into_iter()
-            .filter_map(|dep| {
-                let cache_key = dep_cache_key(&dep, file_type);
-                let mut version_info = cache_values.get(&cache_key).cloned().flatten();
-                if let Some(info) = version_info.as_mut() {
-                    apply_osv_result(info, &self.osv_results, file_type.to_ecosystem(), &dep);
-                }
+            .zip(version_infos)
+            .filter_map(|(dep, version_info)| {
                 let hint = create_inlay_hint(&dep, version_info.as_ref(), file_type);
 
                 // Optionally filter out up-to-date hints
@@ -1852,7 +1838,7 @@ impl LanguageServer for DepsyBackend {
             .get_version_info(file_type, dep_name, dep.registry.as_deref())
             .await;
         if let Some(info) = version_info.as_mut() {
-            apply_osv_result(info, &self.osv_results, file_type.to_ecosystem(), &dep);
+            apply_osv_result(info, &self.vuln_cache, file_type.to_ecosystem(), &dep);
         }
 
         let content = match version_info {
@@ -2286,14 +2272,9 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn direct_vulnerabilities_follow_each_declared_version() {
-        // Given minimist declared at 1.2.5 in one manifest and at 1.2.8 in another
-        // And OSV reports an advisory for 1.2.5 only
-        // When the background vulnerability check runs for both manifests
-        // Then only the 1.2.5 declaration gets a vulnerability diagnostic
-        use crate::cache::MemoryCache;
-        use wiremock::matchers::{method, path, path_regex};
+    /// Starts an OSV mock that reports `GHSA-vh95-rmgr-6w4m` for version 1.2.5 only.
+    async fn osv_server_flagging_1_2_5() -> wiremock::MockServer {
+        use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
@@ -2319,22 +2300,56 @@ mod tests {
             })
             .mount(&server)
             .await;
-        Mock::given(method("GET"))
-            .and(path_regex(r"^/vulns/.+"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "id": "GHSA-vh95-rmgr-6w4m",
-                "summary": "Prototype Pollution in minimist",
-                "severity": [{ "type": "CVSS_V3", "score": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H" }]
-            })))
-            .mount(&server)
-            .await;
+        server
+    }
 
+    /// Lines of the direct-vulnerability diagnostics built for `deps`.
+    async fn vulnerable_lines(deps: &[Dependency], osv_results: &VulnerabilityCache) -> Vec<u32> {
+        use crate::cache::MemoryCache;
+
+        let version_cache = MemoryCache::new();
+        version_cache
+            .insert(
+                FileType::Npm.cache_key("minimist"),
+                VersionInfo {
+                    latest: Some("1.2.8".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await;
+        create_diagnostics(
+            deps,
+            &version_cache,
+            |name| FileType::Npm.cache_key(name),
+            None,
+            FileType::Npm,
+            VulnSources {
+                osv_results,
+                transitive: &hashbrown::HashMap::new(),
+            },
+            &[],
+        )
+        .await
+        .iter()
+        .filter(|diagnostic| {
+            matches!(&diagnostic.code, Some(NumberOrString::String(code)) if code.ends_with("-vulns"))
+        })
+        .map(|diagnostic| diagnostic.range.start.line)
+        .collect()
+    }
+
+    #[tokio::test]
+    async fn direct_vulnerabilities_follow_each_declared_version() {
+        // Given minimist declared at 1.2.5 in one manifest and at 1.2.8 in another
+        // And OSV reports an advisory for 1.2.5 only
+        // When the background vulnerability check runs for both manifests
+        // Then only the 1.2.5 declaration gets a vulnerability diagnostic
+        let server = osv_server_flagging_1_2_5().await;
         let (service, _socket) = tower_lsp::LspService::new(UninitializedServer);
         let client = service.inner().0.clone();
         let osv_client = Arc::new(OsvClient::with_endpoint(server.uri()).unwrap());
         let vuln_cache = Arc::new(VulnerabilityCache::new());
         let documents = Arc::new(DashMap::new());
-        let osv_results = Arc::new(DashMap::new());
 
         let vulnerable = make_dep("minimist", "1.2.5", None);
         let mut patched = make_dep("minimist", "1.2.8", None);
@@ -2352,43 +2367,123 @@ mod tests {
                     documents: Arc::clone(&documents),
                     uri: Url::parse(&format!("file:///{manifest}/package.json")).unwrap(),
                     lockfile_graph: None,
-                    osv_results: Arc::clone(&osv_results),
                 },
             )
             .await;
         }
 
-        let version_cache = MemoryCache::new();
-        version_cache
-            .insert(
-                FileType::Npm.cache_key("minimist"),
-                VersionInfo {
-                    latest: Some("1.2.8".to_string()),
-                    ..Default::default()
-                },
-            )
-            .await;
-        let diagnostics = create_diagnostics(
-            &[vulnerable, patched],
-            &version_cache,
-            |name| FileType::Npm.cache_key(name),
-            None,
+        assert_eq!(
+            vulnerable_lines(&[vulnerable, patched], &vuln_cache).await,
+            vec![0]
+        );
+    }
+
+    #[tokio::test]
+    async fn one_manifest_declaring_two_versions_keeps_them_apart() {
+        // Given one manifest declaring minimist at 1.2.5 and 1.2.8 (pnpm named catalogs)
+        // And OSV reports an advisory for 1.2.5 only
+        // When the background vulnerability check queries both in one batch
+        // Then only the 1.2.5 declaration gets a vulnerability diagnostic
+        let server = osv_server_flagging_1_2_5().await;
+        let (service, _socket) = tower_lsp::LspService::new(UninitializedServer);
+        let vuln_cache = Arc::new(VulnerabilityCache::new());
+
+        let vulnerable = make_dep("minimist", "1.2.5", None);
+        let mut patched = make_dep("minimist", "1.2.8", None);
+        patched.name_span.line = 1;
+        patched.version_span.line = 1;
+
+        DepsyBackend::fetch_vulnerabilities_background(
+            vec![vulnerable.clone(), patched.clone()],
             FileType::Npm,
-            VulnSources {
-                osv_results: &osv_results,
-                transitive: &hashbrown::HashMap::new(),
+            Arc::new(OsvClient::with_endpoint(server.uri()).unwrap()),
+            Arc::clone(&vuln_cache),
+            service.inner().0.clone(),
+            VulnBgContext {
+                documents: Arc::new(DashMap::new()),
+                uri: Url::parse("file:///pnpm-workspace.yaml").unwrap(),
+                lockfile_graph: None,
             },
-            &[],
         )
         .await;
 
-        let vulnerable_lines: Vec<u32> = diagnostics
-            .iter()
-            .filter(|diagnostic| {
-                matches!(&diagnostic.code, Some(NumberOrString::String(code)) if code.ends_with("-vulns"))
-            })
-            .map(|diagnostic| diagnostic.range.start.line)
+        assert_eq!(
+            vulnerable_lines(&[vulnerable, patched], &vuln_cache).await,
+            vec![0]
+        );
+    }
+
+    #[tokio::test]
+    async fn cached_transitive_vulnerabilities_are_attributed_again() {
+        // Given direct dependency `a` pulling minimist 1.2.5 through the lockfile
+        // And OSV reports an advisory for minimist 1.2.5
+        // When the document is processed a second time, with OSV results cached
+        // Then the advisory is attributed to `a` again without a new OSV query
+        use crate::parsers::lockfile_graph::{LockfileGraph, LockfilePackage};
+
+        let server = osv_server_flagging_1_2_5().await;
+        let (service, _socket) = tower_lsp::LspService::new(UninitializedServer);
+        let client = service.inner().0.clone();
+        let osv_client = Arc::new(OsvClient::with_endpoint(server.uri()).unwrap());
+        let vuln_cache = Arc::new(VulnerabilityCache::new());
+        let documents = Arc::new(DashMap::new());
+        let uri = Url::parse("file:///app/package.json").unwrap();
+        let direct = make_dep("a", "1.0.0", None);
+        let graph = Arc::new(LockfileGraph {
+            packages: vec![
+                LockfilePackage {
+                    name: "a".to_string(),
+                    version: "1.0.0".to_string(),
+                    dependencies: vec!["minimist".to_string()],
+                    is_root: false,
+                },
+                LockfilePackage {
+                    name: "minimist".to_string(),
+                    version: "1.2.5".to_string(),
+                    dependencies: vec![],
+                    is_root: false,
+                },
+            ],
+        });
+
+        for _ in 0..2 {
+            // process_document resets the transitive findings on every run.
+            documents.insert(
+                uri.clone(),
+                DocumentState {
+                    dependencies: vec![direct.clone()],
+                    file_type: FileType::Npm,
+                    lockfile_graph: Some(Arc::clone(&graph)),
+                    transitive_vulns_by_direct: hashbrown::HashMap::new(),
+                },
+            );
+            DepsyBackend::fetch_vulnerabilities_background(
+                vec![direct.clone()],
+                FileType::Npm,
+                Arc::clone(&osv_client),
+                Arc::clone(&vuln_cache),
+                client.clone(),
+                VulnBgContext {
+                    documents: Arc::clone(&documents),
+                    uri: uri.clone(),
+                    lockfile_graph: Some(Arc::clone(&graph)),
+                },
+            )
+            .await;
+        }
+
+        let osv_queries = server.received_requests().await.unwrap_or_default().len();
+        let attributed: Vec<String> = documents
+            .get(&uri)
+            .and_then(|doc| doc.transitive_vulns_by_direct.get("a").cloned())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|finding| finding.vulnerability.id)
             .collect();
-        assert_eq!(vulnerable_lines, vec![0]);
+        assert_eq!(
+            osv_queries, 1,
+            "the second run must be served from the cache"
+        );
+        assert_eq!(attributed, vec!["GHSA-vh95-rmgr-6w4m".to_string()]);
     }
 }

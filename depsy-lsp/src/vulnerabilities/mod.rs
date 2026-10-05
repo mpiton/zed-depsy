@@ -6,12 +6,10 @@
 pub mod cache;
 pub mod osv;
 
-use dashmap::DashMap;
-
+use crate::cache::ReadCache;
 use crate::parsers::Dependency;
 use crate::registries::VersionInfo;
-use cache::VulnCacheKey;
-use osv::QueryResult;
+use cache::{VulnCacheKey, VulnerabilityCache};
 
 /// Ecosystem identifiers for vulnerability sources
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -126,25 +124,187 @@ pub fn normalize_version_for_osv(version: &str) -> String {
 ///
 /// The version cache is keyed by package name only, so it cannot tell two
 /// declarations of the same package at different versions apart. OSV results
-/// are kept in `osv_results`, keyed by (ecosystem, name, version), and each
-/// reader applies the one matching its own dependency. `info` is left as is
-/// when that version has not been queried yet.
+/// live in `osv_results`, keyed by (ecosystem, name, version), and each reader
+/// applies the one matching its own dependency.
+///
+/// Vulnerabilities come only from OSV, so they are cleared when that version
+/// has no live result. This also drops advisories that older releases stored
+/// in the persistent version cache. `deprecated` is shared with the registry:
+/// OSV can set it but never clears it.
 pub fn apply_osv_result(
     info: &mut VersionInfo,
-    osv_results: &DashMap<VulnCacheKey, QueryResult>,
+    osv_results: &VulnerabilityCache,
     ecosystem: Ecosystem,
     dep: &Dependency,
 ) {
-    let version = normalize_version_for_osv(dep.effective_version());
-    if let Some(result) = osv_results.get(&VulnCacheKey::new(ecosystem, &dep.name, &version)) {
-        info.vulnerabilities = result.vulnerabilities.clone();
-        info.deprecated = result.deprecated;
+    match osv_results.get(&VulnCacheKey::for_dependency(ecosystem, dep)) {
+        Some(result) => {
+            info.vulnerabilities = result.vulnerabilities;
+            info.deprecated |= result.deprecated;
+        }
+        None => info.vulnerabilities.clear(),
     }
+}
+
+/// Reads `dep`'s cached version info with its OSV result applied.
+///
+/// Readers of `vulnerabilities` or `deprecated` go through this helper or
+/// [`apply_osv_result`], so none of them can skip the overlay.
+pub async fn cached_version_info(
+    cache: &impl ReadCache,
+    cache_key: &str,
+    osv_results: &VulnerabilityCache,
+    ecosystem: Ecosystem,
+    dep: &Dependency,
+) -> Option<VersionInfo> {
+    let mut info = cache.get(cache_key).await?;
+    apply_osv_result(&mut info, osv_results, ecosystem, dep);
+    Some(info)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_version_for_osv;
+    use super::cache::{VulnCacheKey, VulnerabilityCache};
+    use super::osv::QueryResult;
+    use super::{Ecosystem, apply_osv_result, cached_version_info, normalize_version_for_osv};
+    use crate::cache::{MemoryCache, WriteCache};
+    use crate::parsers::{Dependency, Span};
+    use crate::registries::{VersionInfo, Vulnerability, VulnerabilitySeverity};
+
+    const SPAN: Span = Span {
+        line: 0,
+        line_start: 0,
+        line_end: 0,
+    };
+
+    fn dep(name: &str, version: &str) -> Dependency {
+        Dependency {
+            name: name.to_string(),
+            version: version.to_string(),
+            name_span: SPAN,
+            version_span: SPAN,
+            dev: false,
+            optional: false,
+            registry: None,
+            resolved_version: None,
+            has_additional_version_constraints: false,
+        }
+    }
+
+    fn advisory(id: &str) -> Vulnerability {
+        Vulnerability {
+            id: id.to_string(),
+            severity: VulnerabilitySeverity::High,
+            description: String::new(),
+            url: None,
+        }
+    }
+
+    fn osv_results_with(dep: &Dependency, result: QueryResult) -> VulnerabilityCache {
+        let cache = VulnerabilityCache::with_ttl(3600);
+        cache.insert(VulnCacheKey::for_dependency(Ecosystem::Npm, dep), result);
+        cache
+    }
+
+    #[test]
+    fn clean_result_replaces_advisories_and_keeps_registry_deprecation() {
+        let patched = dep("minimist", "^1.2.8");
+        let osv_results = osv_results_with(&patched, QueryResult::default());
+        let mut info = VersionInfo {
+            vulnerabilities: vec![advisory("GHSA-xvch-5gv4-984h")],
+            deprecated: true,
+            ..VersionInfo::default()
+        };
+
+        apply_osv_result(&mut info, &osv_results, Ecosystem::Npm, &patched);
+
+        assert!(info.vulnerabilities.is_empty());
+        assert!(info.deprecated);
+    }
+
+    #[test]
+    fn osv_deprecation_applies_only_to_its_version() {
+        let unmaintained = dep("minimist", "1.2.5");
+        let osv_results = osv_results_with(
+            &unmaintained,
+            QueryResult {
+                deprecated: true,
+                ..QueryResult::default()
+            },
+        );
+        let mut matching = VersionInfo::default();
+        let mut other = VersionInfo::default();
+
+        apply_osv_result(&mut matching, &osv_results, Ecosystem::Npm, &unmaintained);
+        apply_osv_result(
+            &mut other,
+            &osv_results,
+            Ecosystem::Npm,
+            &dep("minimist", "1.2.8"),
+        );
+
+        assert!(matching.deprecated);
+        assert!(!other.deprecated);
+    }
+
+    #[test]
+    fn missing_result_clears_stale_advisories_only() {
+        let mut info = VersionInfo {
+            vulnerabilities: vec![advisory("GHSA-xvch-5gv4-984h")],
+            deprecated: true,
+            ..VersionInfo::default()
+        };
+
+        apply_osv_result(
+            &mut info,
+            &VulnerabilityCache::with_ttl(3600),
+            Ecosystem::Npm,
+            &dep("minimist", "1.2.8"),
+        );
+
+        assert!(info.vulnerabilities.is_empty());
+        assert!(info.deprecated);
+    }
+
+    #[tokio::test]
+    async fn cached_version_info_applies_the_overlay() {
+        let vulnerable = dep("minimist", "1.2.5");
+        let osv_results = osv_results_with(
+            &vulnerable,
+            QueryResult {
+                vulnerabilities: vec![advisory("GHSA-xvch-5gv4-984h")],
+                deprecated: false,
+            },
+        );
+        let cache = MemoryCache::new();
+        cache
+            .insert("npm:minimist".to_string(), VersionInfo::default())
+            .await;
+
+        let info = cached_version_info(
+            &cache,
+            "npm:minimist",
+            &osv_results,
+            Ecosystem::Npm,
+            &vulnerable,
+        )
+        .await;
+        let missing = cached_version_info(
+            &cache,
+            "npm:absent",
+            &osv_results,
+            Ecosystem::Npm,
+            &vulnerable,
+        )
+        .await;
+
+        assert_eq!(
+            info.map(|info| info.vulnerabilities.len()),
+            Some(1),
+            "the matching advisory must be applied"
+        );
+        assert!(missing.is_none());
+    }
 
     #[test]
     fn test_python_operators() {

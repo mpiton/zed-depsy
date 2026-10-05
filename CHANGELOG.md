@@ -21,6 +21,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   version. OSV results were stored per package name, so the last version
   checked overwrote the other one
   ([#408](https://github.com/mpiton/zed-depsy/issues/408)).
+- Vulnerability diagnostics are published again once the background OSV
+  check finishes. Before, vulnerabilities reached the Problems panel only
+  after the next edit, and transitive vulnerabilities never did.
+- An OSV result no longer clears a deprecation reported by the registry.
+- Advisories that older releases stored in the version cache are no longer
+  shown. Only the OSV check run by the current server counts.
 
 ### Security
 

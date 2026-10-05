@@ -1,8 +1,7 @@
-//! Vulnerability cache for tracking queried packages
+//! Vulnerability cache for queried packages.
 //!
-//! Tracks which packages have been queried for vulnerabilities to avoid
-//! redundant API calls. The OSV results themselves are kept by the backend,
-//! keyed by [`VulnCacheKey`].
+//! Keeps the OSV result of each queried package version, so repeated lookups
+//! skip the API until the entry expires.
 
 use std::fmt::Display;
 use std::sync::Arc;
@@ -10,7 +9,9 @@ use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 
-use super::Ecosystem;
+use super::osv::QueryResult;
+use super::{Ecosystem, normalize_version_for_osv};
+use crate::parsers::Dependency;
 
 /// Default TTL for vulnerability cache (6 hours)
 const DEFAULT_VULN_CACHE_TTL: Duration = Duration::from_secs(6 * 3600);
@@ -35,25 +36,39 @@ impl VulnCacheKey {
             version: version.to_string(),
         }
     }
+
+    /// Creates the key for `dep`'s resolved version.
+    ///
+    /// The version is normalized the same way as the OSV query, so readers
+    /// and the background fetch agree on the key.
+    pub fn for_dependency(ecosystem: Ecosystem, dep: &Dependency) -> Self {
+        Self::new(
+            ecosystem,
+            &dep.name,
+            &normalize_version_for_osv(dep.effective_version()),
+        )
+    }
 }
 
-/// Tracks when a package was queried for vulnerabilities
+/// OSV result of one package version and when it was stored
 struct VulnCacheEntry {
     /// When the entry was inserted
     inserted_at: Instant,
+    /// OSV result for this package version
+    result: QueryResult,
 }
 
 /// Cleanup interval for background task (30 minutes)
 const CLEANUP_INTERVAL: Duration = Duration::from_secs(30 * 60);
 
-/// Tracks which packages have been queried for vulnerabilities
+/// Stores OSV results per package version with a TTL.
 ///
-/// This is a "seen set" with TTL - it prevents redundant API calls to OSV.dev
-/// by tracking which package@version combinations have already been queried.
-/// The OSV results themselves are kept by the backend, keyed by [`VulnCacheKey`].
+/// Prevents redundant API calls to OSV.dev and lets every reader look up the
+/// advisories of its own dependency version. Expired entries are neither
+/// served nor counted as queried.
 #[derive(Clone)]
 pub struct VulnerabilityCache {
-    /// Cache entries (package key -> query timestamp)
+    /// Cache entries (package key -> OSV result and insertion time)
     entries: Arc<DashMap<VulnCacheKey, VulnCacheEntry>>,
     /// Cache TTL
     ttl: Duration,
@@ -100,14 +115,23 @@ impl VulnerabilityCache {
         }
     }
 
-    /// Mark a package as having been queried for vulnerabilities
-    pub fn insert(&self, key: VulnCacheKey) {
+    /// Stores the OSV result of a package version
+    pub fn insert(&self, key: VulnCacheKey, result: QueryResult) {
         self.entries.insert(
             key,
             VulnCacheEntry {
                 inserted_at: Instant::now(),
+                result,
             },
         );
+    }
+
+    /// Returns the OSV result of a package version, unless missing or expired
+    pub fn get(&self, key: &VulnCacheKey) -> Option<QueryResult> {
+        self.entries
+            .get(key)
+            .filter(|entry| entry.inserted_at.elapsed() < self.ttl)
+            .map(|entry| entry.result.clone())
     }
 
     /// Check if a package has been queried (and the query hasn't expired)
@@ -198,8 +222,25 @@ mod tests {
         let key = VulnCacheKey::new(Ecosystem::Npm, "lodash", "4.17.0");
 
         assert!(!cache.contains(&key));
-        cache.insert(key.clone());
+        cache.insert(key.clone(), QueryResult::default());
         assert!(cache.contains(&key));
+    }
+
+    #[test]
+    fn expired_result_is_not_served() {
+        let cache = VulnerabilityCache::with_ttl(0);
+        let key = VulnCacheKey::new(Ecosystem::Npm, "minimist", "1.2.5");
+        cache.insert(
+            key.clone(),
+            QueryResult {
+                deprecated: true,
+                ..QueryResult::default()
+            },
+        );
+
+        std::thread::sleep(Duration::from_millis(10));
+
+        assert!(cache.get(&key).is_none());
     }
 
     #[test]
@@ -207,7 +248,7 @@ mod tests {
         let cache = VulnerabilityCache::with_ttl(3600);
         let key = VulnCacheKey::new(Ecosystem::PyPI, "requests", "2.28.0");
 
-        cache.insert(key.clone());
+        cache.insert(key.clone(), QueryResult::default());
         assert_eq!(cache.len(), 1);
 
         cache.clear();
@@ -227,8 +268,8 @@ mod tests {
         let key1 = VulnCacheKey::new(Ecosystem::Npm, "pkg1", "1.0.0");
         let key2 = VulnCacheKey::new(Ecosystem::Npm, "pkg2", "1.0.0");
 
-        cache.insert(key1);
-        cache.insert(key2);
+        cache.insert(key1, QueryResult::default());
+        cache.insert(key2, QueryResult::default());
 
         assert_eq!(cache.len(), 2);
 
@@ -246,8 +287,8 @@ mod tests {
         let key1 = VulnCacheKey::new(Ecosystem::Npm, "pkg1", "1.0.0");
         let key2 = VulnCacheKey::new(Ecosystem::Npm, "pkg2", "1.0.0");
 
-        cache.insert(key1);
-        cache.insert(key2);
+        cache.insert(key1, QueryResult::default());
+        cache.insert(key2, QueryResult::default());
 
         // Wait for expiration
         std::thread::sleep(Duration::from_millis(10));

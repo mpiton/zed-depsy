@@ -72,7 +72,7 @@ The LSP is organised as five layers, each occupying a single subdirectory of `de
 | **Handlers** | `backend.rs` | Implements `tower_lsp::LanguageServer`; owns shared state (`DepsyBackend`); routes LSP requests to providers. |
 | **Providers** | `depsy-lsp/src/providers/` | Five plain functions producing LSP responses: inlay hints, diagnostics, code actions, completions, document links. |
 | **Domain** | `depsy-lsp/src/parsers/`, `depsy-lsp/src/registries/`, `depsy-lsp/src/auth/`, `depsy-lsp/src/vulnerabilities/` | Manifest parsing, registry HTTP clients, credential resolution, OSV vulnerability queries. |
-| **Cache** | `depsy-lsp/src/cache/` | Two-tier hybrid cache (memory + SQLite) for version info; separate caches for vulnerability seen-set and OSV advisories. |
+| **Cache** | `depsy-lsp/src/cache/` | Two-tier hybrid cache (memory + SQLite) for version info; separate caches for OSV results and OSV advisories. |
 
 ### Module map
 
@@ -91,7 +91,7 @@ The LSP is organised as five layers, each occupying a single subdirectory of `de
 | `depsy-lsp/src/parsers/` | Per-ecosystem parsers (cargo, npm, python, go, php, dart, csharp, ruby, maven) + lockfile resolvers (`lockfile_resolver.rs`, `lockfile_graph.rs`). |
 | `depsy-lsp/src/providers/` | Five LSP feature implementations. |
 | `depsy-lsp/src/registries/` | Registry HTTP clients (incl. `maven_central.rs`) + shared `reqwest::Client`. |
-| `depsy-lsp/src/vulnerabilities/` | OSV client + vulnerability seen-set cache. |
+| `depsy-lsp/src/vulnerabilities/` | OSV client + per-version OSV result cache. |
 | `depsy-lsp/src/cache/` | Hybrid cache, advisory cache. |
 
 The strict directional rule: **handlers call providers, providers call domain modules, domain modules read/write the cache.** Providers do not call each other; domain modules do not call handlers.
@@ -168,8 +168,7 @@ The central handler struct that implements `tower_lsp::LanguageServer`. All shar
 | `cargo_custom_registries: Arc<DashMap<String, Arc<CargoSparseRegistry>>>` | Alternative cargo registries keyed by name. |
 | `http_client: Arc<reqwest::Client>` | Shared HTTP client (one connection pool). |
 | `token_manager: Arc<TokenProviderManager>` | URL → auth-header resolution. |
-| `osv_client`, `vuln_cache`, `advisory_cache`, `negative_advisory_cache` | Vulnerability subsystem. |
-| `osv_results: Arc<DashMap<VulnCacheKey, QueryResult>>` | OSV results (advisories + deprecated flag) per ecosystem, name and version, for direct and transitive packages. |
+| `osv_client`, `vuln_cache`, `advisory_cache`, `negative_advisory_cache` | Vulnerability subsystem. `vuln_cache` holds the OSV result (advisories + deprecated flag) per ecosystem, name and version, for direct and transitive packages. |
 | `debounce_tasks: Arc<DashMap<Url, (u64, JoinHandle<()>)>>`, `debounce_generation: Arc<AtomicU64>`, `pending_changes: Arc<DashMap<Url, String>>` | Debounce coordination. |
 | `version_cache: Arc<HybridCache>` | Two-tier version-info cache. |
 
@@ -200,7 +199,7 @@ Note the offsets are **line-relative byte offsets**, not file-relative. This mak
 
 ### `VersionInfo` (`depsy-lsp/src/registries/mod.rs`)
 
-Returned by every registry client. Contains `latest`, `latest_prerelease`, `versions: Vec<String>`, `description`, `homepage`, `repository`, `license`, `vulnerabilities`, `deprecated`, `yanked_versions`, `release_dates: HashMap<String, DateTime<Utc>>`, `transitive_vulnerabilities`. Vulnerability fields are populated separately (after the OSV pass) — registry clients themselves never query OSV.
+Returned by every registry client. Contains `latest`, `latest_prerelease`, `versions: Vec<String>`, `description`, `homepage`, `repository`, `license`, `vulnerabilities`, `deprecated`, `yanked_versions`, `release_dates: HashMap<String, DateTime<Utc>>`, `transitive_vulnerabilities`. The cached `VersionInfo` never carries OSV data: readers overlay the result for the dependency's resolved version with `apply_osv_result` or `cached_version_info`, which also drops advisories that older releases stored in SQLite. Registry clients themselves never query OSV.
 
 ### `DocumentState` (`depsy-lsp/src/document.rs`)
 
@@ -319,8 +318,8 @@ flowchart TB
         L2 -->|backfill| L1
     end
 
-    subgraph vuln["VulnerabilityCache (seen-set)"]
-        VS[("DashMap<VulnCacheKey, Instant><br/>TTL 6h, no payload")]
+    subgraph vuln["VulnerabilityCache (OSV results)"]
+        VS[("DashMap<VulnCacheKey, VulnCacheEntry><br/>TTL 6h, QueryResult payload")]
     end
 
     subgraph adv["HybridAdvisoryCache (positive + negative)"]
@@ -344,9 +343,9 @@ Two-tier read-through, write-through cache (`depsy-lsp/src/cache/mod.rs`):
 
 Read path: check L1 → on miss, read L2 → on hit, write back to L1. Write path: write to both layers simultaneously.
 
-### `VulnerabilityCache` — seen-set
+### `VulnerabilityCache` — OSV results
 
-A side-cache (`depsy-lsp/src/vulnerabilities/cache.rs`) that does **not** store any payload. Key = `VulnCacheKey { ecosystem, package_name, version }`. Value = `(inserted_at,)` only. TTL 6 hours. Purpose: prevent redundant OSV API calls for packages already queried. The OSV results themselves live in `osv_results` on `DepsyBackend`, under the same key. They are not written into `VersionInfo`: the `HybridCache` is keyed by package name, so it cannot hold two versions of one package (two manifests, or pnpm named catalogs). Readers (diagnostics, inlay hints, hover, report) overlay the result for each dependency's resolved version with `apply_osv_result`.
+A side-cache (`depsy-lsp/src/vulnerabilities/cache.rs`) that holds the OSV `QueryResult` (advisories + deprecated flag) of each queried package version. Key = `VulnCacheKey { ecosystem, package_name, version }`. Value = `(inserted_at, QueryResult)`. TTL 6 hours, swept every 30 min. Purpose: prevent redundant OSV API calls for packages already queried, and serve their results until they expire. Results are not written into `VersionInfo`: the `HybridCache` is keyed by package name, so it cannot hold two versions of one package (two manifests, or pnpm named catalogs). Readers (diagnostics, inlay hints, hover, report) overlay the result for each dependency's resolved version with `apply_osv_result` or `cached_version_info`. A version with no live result shows no advisories.
 
 ### `HybridAdvisoryCache` — RUSTSEC advisories
 
@@ -367,7 +366,7 @@ Vulnerability detection runs on a separate `tokio::spawn` so it never blocks inl
 sequenceDiagram
     participant P as process_document
     participant Spawner as Vuln spawner<br/>(tokio::spawn)
-    participant VC as VulnerabilityCache<br/>(seen-set)
+    participant VC as VulnerabilityCache<br/>(OSV results)
     participant O as OsvClient
     participant API as OSV.dev API
     participant AC as HybridAdvisoryCache
@@ -391,7 +390,7 @@ sequenceDiagram
         end
     end
     O-->>Spawner: Vec<Vulnerability> per dep
-    Spawner->>VC: insert seen keys
+    Spawner->>VC: insert QueryResult per key
     Spawner-->>Z: publish_diagnostics (2nd pass, with vulns)
 ```
 
@@ -414,7 +413,7 @@ Non-numeric CVSS strings default to `Medium` (defensive — do not silently swal
 
 ### Transitive vulnerability attribution
 
-When a transitive dependency is vulnerable, we point the diagnostic at the *direct* dependency that pulled it in. The `LockfileGraph::reverse_index` from §5 produces this attribution. Transitive OSV results are stored in `osv_results` like direct ones. The per-document attribution lands in `DocumentState::transitive_vulns_by_direct`, keyed by direct dependency name, and the diagnostic provider reads it alongside the direct dependency's own result.
+When a transitive dependency is vulnerable, we point the diagnostic at the *direct* dependency that pulled it in. The `LockfileGraph::reverse_index` from §5 produces this attribution. Transitive OSV results are stored in `vuln_cache` like direct ones. The per-document attribution lands in `DocumentState::transitive_vulns_by_direct`, keyed by direct dependency name, and the diagnostic provider reads it alongside the direct dependency's own result.
 
 ## 9. Providers
 
@@ -423,7 +422,7 @@ The five LSP feature providers are **plain functions** living in `depsy-lsp/src/
 | Provider | Module | Signature (abridged) | When invoked |
 |---|---|---|---|
 | **Inlay hints** | `inlay_hints.rs` | `fn create_inlay_hint(dep, version_info, file_type) -> InlayHint` | `inlayHint` request, after `process_document` finishes. |
-| **Diagnostics** | `diagnostics.rs` | `async fn create_diagnostics(deps, cache, …, file_type, transitive_vulns, osv_results, ignored) -> Vec<Diagnostic>` | After `process_document` and again after vulnerability fetch. |
+| **Diagnostics** | `diagnostics.rs` | `async fn create_diagnostics(deps, cache, …, file_type, vulns: VulnSources, ignored) -> Vec<Diagnostic>` | After `process_document` and again after vulnerability fetch. |
 | **Code actions** | `code_actions.rs` | `async fn create_code_actions(deps, cache, uri, range, file_type, …) -> Vec<CodeActionOrCommand>` | `codeAction` request. |
 | **Completions** | `completion.rs` | `async fn get_completions(deps, position, cache, …) -> Option<Vec<CompletionItem>>` | `completion` request when cursor is inside a version field. |
 | **Document links** | `document_links.rs` | `fn create_document_links(deps, file_type) -> Vec<DocumentLink>` | `documentLink` request. |
@@ -435,7 +434,7 @@ Every LSP handler in `backend.rs` follows the same template:
 1. Look up `DocumentState` in `documents` (`DashMap`).
 2. Snapshot the relevant fields into local variables.
 3. Drop the `DashMap` guard before any `await`.
-4. Call the provider function directly with `&self.version_cache` (the `HybridCache`) cast as `&impl ReadCache`.
+4. Call the provider function directly with `&self.version_cache` (the `HybridCache`) cast as `&impl ReadCache`. A handler that reads `vulnerabilities` or `deprecated` itself goes through `cached_version_info` or `apply_osv_result` with `&self.vuln_cache`.
 5. Return the LSP response.
 
 The provider functions are unit-testable in isolation — they accept any `impl ReadCache` so tests pass a `MemoryCache` populated with fixture data. No mocking framework needed.
@@ -547,7 +546,6 @@ This section captures non-obvious choices and their rationale. Each subsection a
 | **Sparse index** | Cargo's HTTP-fetchable alternative to the full registry git index; used by alternative registries. |
 | **Lockfile graph** | DAG produced from a lockfile (`Cargo.lock`, `package-lock.json`, …) and used for transitive vulnerability attribution. |
 | **Debounce** | Coalesce rapid consecutive events into one delayed action; here, 200 ms after the last keystroke. |
-| **Seen-set** | Cache that records "this key was already processed" without storing a payload — used to suppress redundant OSV calls. |
 
 ### Further reading
 

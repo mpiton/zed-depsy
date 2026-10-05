@@ -936,8 +936,12 @@ impl DepsyBackend {
             transitive_query_pkgs.len()
         );
 
+        // Transitive findings to attribute: the cached ones, plus the fresh ones
+        // once OSV answers.
+        let mut transitive_findings = transitive_cached_vulns;
+
         // Batch query OSV.dev
-        match osv_client.query_batch(&all_queries).await {
+        let osv_answered = match osv_client.query_batch(&all_queries).await {
             Ok(results) => {
                 let (direct_results, transitive_results) = results.split_at(direct_count);
 
@@ -963,142 +967,15 @@ impl DepsyBackend {
                     vuln_cache.insert(vuln_key, result.clone());
                 }
 
-                // Attribute transitive vulnerabilities to ALL direct parents that reach them.
-                // Stored per-document (not in global version_cache) to avoid cross-workspace
-                // contamination: transitive attribution depends on this document's lockfile graph.
                 // transitive_query_pkgs is the filtered list (cached ones were skipped above).
-                if let Some(graph) = bg_ctx.lockfile_graph.as_deref() {
-                    use crate::registries::TransitiveVuln;
-
-                    let inverse = graph.reverse_index(&direct_names);
-
-                    // Build per-document transitive attribution map.
-                    let mut transitive_vulns_by_direct: hashbrown::HashMap<
-                        String,
-                        Vec<TransitiveVuln>,
-                    > = hashbrown::HashMap::new();
-
-                    for (tpkg, result) in
-                        transitive_query_pkgs.iter().zip(transitive_results.iter())
-                    {
-                        let normalized_version = normalize_version_for_osv(&tpkg.version);
-                        vuln_cache.insert(
-                            VulnCacheKey::new(ecosystem, &tpkg.name, &normalized_version),
-                            result.clone(),
-                        );
-
-                        if result.vulnerabilities.is_empty() {
-                            continue;
-                        }
-
-                        // Attribute to ALL direct parents that transitively reach this package.
-                        let parents = inverse.get(&tpkg.name).cloned().unwrap_or_default();
-
-                        if parents.is_empty() {
-                            // No known parent — attribute to "(unknown)" so we don't drop the finding.
-                            for v in &result.vulnerabilities {
-                                transitive_vulns_by_direct
-                                    .entry_ref("(unknown)")
-                                    .or_default()
-                                    .push(TransitiveVuln {
-                                        package_name: tpkg.name.clone(),
-                                        package_version: tpkg.version.clone(),
-                                        vulnerability: v.clone(),
-                                    });
-                            }
-                        } else {
-                            for parent in &parents {
-                                // Translate normalized parent name back to the raw manifest name
-                                // so that diagnostics/hover lookups using dep.name succeed.
-                                let raw_parent = normalized_to_raw
-                                    .get(parent.as_str())
-                                    .cloned()
-                                    .unwrap_or_else(|| parent.clone());
-                                for v in &result.vulnerabilities {
-                                    transitive_vulns_by_direct
-                                        .entry_ref(raw_parent.as_str())
-                                        .or_default()
-                                        .push(TransitiveVuln {
-                                            package_name: tpkg.name.clone(),
-                                            package_version: tpkg.version.clone(),
-                                            vulnerability: v.clone(),
-                                        });
-                                }
-                                tracing::debug!(
-                                    "Background: Attributed {} transitive vulns from {}@{} to direct dep {}",
-                                    result.vulnerabilities.len(),
-                                    tpkg.name,
-                                    tpkg.version,
-                                    raw_parent
-                                );
-                            }
-                        }
-                    }
-
-                    // Attribute transitive vulns for packages already in vuln_cache, so
-                    // re-processing a document keeps its transitive findings even though
-                    // the OSV query was skipped on the second run.
-                    for (tpkg, vulns) in &transitive_cached_vulns {
-                        let parents = inverse.get(&tpkg.name).cloned().unwrap_or_default();
-                        if parents.is_empty() {
-                            for v in vulns {
-                                transitive_vulns_by_direct
-                                    .entry_ref("(unknown)")
-                                    .or_default()
-                                    .push(TransitiveVuln {
-                                        package_name: tpkg.name.clone(),
-                                        package_version: tpkg.version.clone(),
-                                        vulnerability: v.clone(),
-                                    });
-                            }
-                        } else {
-                            for parent in &parents {
-                                // Translate normalized parent name back to raw manifest name.
-                                let raw_parent = normalized_to_raw
-                                    .get(parent.as_str())
-                                    .cloned()
-                                    .unwrap_or_else(|| parent.clone());
-                                for v in vulns {
-                                    transitive_vulns_by_direct
-                                        .entry_ref(raw_parent.as_str())
-                                        .or_default()
-                                        .push(TransitiveVuln {
-                                            package_name: tpkg.name.clone(),
-                                            package_version: tpkg.version.clone(),
-                                            vulnerability: v.clone(),
-                                        });
-                                }
-                                tracing::debug!(
-                                    "Background: Re-attributed (cached) {} transitive vulns from {}@{} to direct dep {}",
-                                    vulns.len(),
-                                    tpkg.name,
-                                    tpkg.version,
-                                    raw_parent
-                                );
-                            }
-                        }
-                    }
-
-                    // Dedup within each parent bucket.
-                    for bucket in transitive_vulns_by_direct.values_mut() {
-                        bucket.sort_by(|a, b| {
-                            (&a.package_name, &a.package_version, &a.vulnerability.id).cmp(&(
-                                &b.package_name,
-                                &b.package_version,
-                                &b.vulnerability.id,
-                            ))
-                        });
-                        bucket.dedup_by(|a, b| {
-                            a.package_name == b.package_name
-                                && a.package_version == b.package_version
-                                && a.vulnerability.id == b.vulnerability.id
-                        });
-                    }
-
-                    // Write per-document transitive findings into the DocumentState so they are
-                    // isolated from other workspaces that share the same global version_cache.
-                    if let Some(mut doc) = bg_ctx.documents.get_mut(&bg_ctx.uri) {
-                        doc.transitive_vulns_by_direct = transitive_vulns_by_direct;
+                for (tpkg, result) in transitive_query_pkgs.iter().zip(transitive_results.iter()) {
+                    let normalized_version = normalize_version_for_osv(&tpkg.version);
+                    vuln_cache.insert(
+                        VulnCacheKey::new(ecosystem, &tpkg.name, &normalized_version),
+                        result.clone(),
+                    );
+                    if !result.vulnerabilities.is_empty() {
+                        transitive_findings.push((tpkg, result.vulnerabilities.clone()));
                     }
                 }
 
@@ -1106,26 +983,112 @@ impl DepsyBackend {
                     "Background: Cached vulnerability info for {} packages",
                     direct_count
                 );
-
-                // Refresh UI with new vulnerability data
-                tracing::debug!("Background: Refreshing inlay hints after vulnerability check");
-                client
-                    .send_request::<request::InlayHintRefreshRequest>(())
-                    .await
-                    .ok();
-                client
-                    .send_request::<request::WorkspaceDiagnosticRefresh>(())
-                    .await
-                    .ok();
-
-                tracing::info!("Background: Vulnerability check complete, UI updated");
+                true
             }
             Err(e) => {
                 tracing::warn!(
                     "Background: Failed to fetch vulnerabilities from OSV.dev: {}",
                     e
                 );
+                false
             }
+        };
+
+        // Attribute transitive vulnerabilities to ALL direct parents that reach them.
+        // This runs even when OSV fails: process_document cleared the previous
+        // findings, and the cached ones must come back.
+        // Stored per-document (not in global version_cache) to avoid cross-workspace
+        // contamination: transitive attribution depends on this document's lockfile graph.
+        if let Some(graph) = bg_ctx.lockfile_graph.as_deref() {
+            use crate::registries::TransitiveVuln;
+
+            let inverse = graph.reverse_index(&direct_names);
+
+            // Build per-document transitive attribution map.
+            let mut transitive_vulns_by_direct: hashbrown::HashMap<String, Vec<TransitiveVuln>> =
+                hashbrown::HashMap::new();
+
+            for (tpkg, vulns) in &transitive_findings {
+                // Attribute to ALL direct parents that transitively reach this package.
+                let parents = inverse.get(&tpkg.name).cloned().unwrap_or_default();
+
+                if parents.is_empty() {
+                    // No known parent — attribute to "(unknown)" so we don't drop the finding.
+                    for v in vulns {
+                        transitive_vulns_by_direct
+                            .entry_ref("(unknown)")
+                            .or_default()
+                            .push(TransitiveVuln {
+                                package_name: tpkg.name.clone(),
+                                package_version: tpkg.version.clone(),
+                                vulnerability: v.clone(),
+                            });
+                    }
+                } else {
+                    for parent in &parents {
+                        // Translate normalized parent name back to the raw manifest name
+                        // so that diagnostics/hover lookups using dep.name succeed.
+                        let raw_parent = normalized_to_raw
+                            .get(parent.as_str())
+                            .cloned()
+                            .unwrap_or_else(|| parent.clone());
+                        for v in vulns {
+                            transitive_vulns_by_direct
+                                .entry_ref(raw_parent.as_str())
+                                .or_default()
+                                .push(TransitiveVuln {
+                                    package_name: tpkg.name.clone(),
+                                    package_version: tpkg.version.clone(),
+                                    vulnerability: v.clone(),
+                                });
+                        }
+                        tracing::debug!(
+                            "Background: Attributed {} transitive vulns from {}@{} to direct dep {}",
+                            vulns.len(),
+                            tpkg.name,
+                            tpkg.version,
+                            raw_parent
+                        );
+                    }
+                }
+            }
+
+            // Dedup within each parent bucket.
+            for bucket in transitive_vulns_by_direct.values_mut() {
+                bucket.sort_by(|a, b| {
+                    (&a.package_name, &a.package_version, &a.vulnerability.id).cmp(&(
+                        &b.package_name,
+                        &b.package_version,
+                        &b.vulnerability.id,
+                    ))
+                });
+                bucket.dedup_by(|a, b| {
+                    a.package_name == b.package_name
+                        && a.package_version == b.package_version
+                        && a.vulnerability.id == b.vulnerability.id
+                });
+            }
+
+            // Write per-document transitive findings into the DocumentState so they are
+            // isolated from other workspaces that share the same global version_cache.
+            if let Some(mut doc) = bg_ctx.documents.get_mut(&bg_ctx.uri) {
+                doc.transitive_vulns_by_direct = transitive_vulns_by_direct;
+            }
+        }
+
+        if osv_answered {
+            // Refresh UI with new vulnerability data
+            tracing::debug!("Background: Refreshing inlay hints after vulnerability check");
+            client
+                .send_request::<request::InlayHintRefreshRequest>(())
+                .await
+                .ok();
+            client
+                .send_request::<request::WorkspaceDiagnosticRefresh>(())
+                .await
+                .ok();
+
+            tracing::info!("Background: Vulnerability check complete, UI updated");
         }
     }
 
@@ -2413,23 +2376,11 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn cached_transitive_vulnerabilities_are_attributed_again() {
-        // Given direct dependency `a` pulling minimist 1.2.5 through the lockfile
-        // And OSV reports an advisory for minimist 1.2.5
-        // When the document is processed a second time, with OSV results cached
-        // Then the advisory is attributed to `a` again without a new OSV query
+    /// Lockfile graph where direct dependency `a` pulls minimist 1.2.5.
+    fn graph_a_pulling_minimist_1_2_5() -> Arc<crate::parsers::lockfile_graph::LockfileGraph> {
         use crate::parsers::lockfile_graph::{LockfileGraph, LockfilePackage};
 
-        let server = osv_server_flagging_1_2_5().await;
-        let (service, _socket) = tower_lsp::LspService::new(UninitializedServer);
-        let client = service.inner().0.clone();
-        let osv_client = Arc::new(OsvClient::with_endpoint(server.uri()).unwrap());
-        let vuln_cache = Arc::new(VulnerabilityCache::new());
-        let documents = Arc::new(DashMap::new());
-        let uri = Url::parse("file:///app/package.json").unwrap();
-        let direct = make_dep("a", "1.0.0", None);
-        let graph = Arc::new(LockfileGraph {
+        Arc::new(LockfileGraph {
             packages: vec![
                 LockfilePackage {
                     name: "a".to_string(),
@@ -2444,7 +2395,24 @@ mod tests {
                     is_root: false,
                 },
             ],
-        });
+        })
+    }
+
+    #[tokio::test]
+    async fn cached_transitive_vulnerabilities_are_attributed_again() {
+        // Given direct dependency `a` pulling minimist 1.2.5 through the lockfile
+        // And OSV reports an advisory for minimist 1.2.5
+        // When the document is processed a second time, with OSV results cached
+        // Then the advisory is attributed to `a` again without a new OSV query
+        let server = osv_server_flagging_1_2_5().await;
+        let (service, _socket) = tower_lsp::LspService::new(UninitializedServer);
+        let client = service.inner().0.clone();
+        let osv_client = Arc::new(OsvClient::with_endpoint(server.uri()).unwrap());
+        let vuln_cache = Arc::new(VulnerabilityCache::new());
+        let documents = Arc::new(DashMap::new());
+        let uri = Url::parse("file:///app/package.json").unwrap();
+        let direct = make_dep("a", "1.0.0", None);
+        let graph = graph_a_pulling_minimist_1_2_5();
 
         for _ in 0..2 {
             // process_document resets the transitive findings on every run.
@@ -2484,6 +2452,77 @@ mod tests {
             osv_queries, 1,
             "the second run must be served from the cache"
         );
+        assert_eq!(attributed, vec!["GHSA-vh95-rmgr-6w4m".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn cached_transitive_vulnerabilities_survive_an_osv_failure() {
+        // Given direct dependency `a` pulling minimist 1.2.5 through the lockfile
+        // And the minimist 1.2.5 advisory already in the vulnerability cache
+        // When the document is processed again and the OSV query for `a` fails
+        // Then the cached advisory is still attributed to `a`
+        use crate::vulnerabilities::osv::QueryResult;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/querybatch"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        let (service, _socket) = tower_lsp::LspService::new(UninitializedServer);
+        let vuln_cache = Arc::new(VulnerabilityCache::new());
+        vuln_cache.insert(
+            VulnCacheKey::new(FileType::Npm.to_ecosystem(), "minimist", "1.2.5"),
+            QueryResult {
+                vulnerabilities: vec![Vulnerability {
+                    id: "GHSA-vh95-rmgr-6w4m".to_string(),
+                    severity: VulnerabilitySeverity::High,
+                    description: String::new(),
+                    url: None,
+                }],
+                deprecated: false,
+            },
+        );
+        let documents = Arc::new(DashMap::new());
+        let uri = Url::parse("file:///app/package.json").unwrap();
+        let direct = make_dep("a", "1.0.0", None);
+        let graph = graph_a_pulling_minimist_1_2_5();
+        // process_document resets the transitive findings before the check.
+        documents.insert(
+            uri.clone(),
+            DocumentState {
+                dependencies: vec![direct.clone()],
+                file_type: FileType::Npm,
+                lockfile_graph: Some(Arc::clone(&graph)),
+                transitive_vulns_by_direct: hashbrown::HashMap::new(),
+            },
+        );
+
+        DepsyBackend::fetch_vulnerabilities_background(
+            vec![direct],
+            FileType::Npm,
+            Arc::new(OsvClient::with_endpoint(server.uri()).unwrap()),
+            Arc::clone(&vuln_cache),
+            service.inner().0.clone(),
+            VulnBgContext {
+                documents: Arc::clone(&documents),
+                uri: uri.clone(),
+                lockfile_graph: Some(graph),
+            },
+        )
+        .await;
+
+        let osv_queries = server.received_requests().await.unwrap_or_default().len();
+        let attributed: Vec<String> = documents
+            .get(&uri)
+            .and_then(|doc| doc.transitive_vulns_by_direct.get("a").cloned())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|finding| finding.vulnerability.id)
+            .collect();
+        assert_eq!(osv_queries, 1, "the query for `a` must reach OSV and fail");
         assert_eq!(attributed, vec!["GHSA-vh95-rmgr-6w4m".to_string()]);
     }
 }

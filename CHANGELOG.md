@@ -24,6 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Vulnerability diagnostics are published again once the background OSV
   check finishes. Before, vulnerabilities reached the Problems panel only
   after the next edit, and transitive vulnerabilities never did.
+- Transitive vulnerabilities already in the cache stay attributed when the
+  OSV query fails. Before, a failed query cleared them from the document
+  until the next successful check.
 - An OSV result no longer clears a deprecation reported by the registry.
 - Advisories that older releases stored in the version cache are no longer
   shown. Only the OSV check run by the current server counts.

@@ -127,6 +127,35 @@ fn dep_cache_key(dep: &crate::parsers::Dependency, file_type: FileType) -> Strin
     }
 }
 
+#[derive(Default)]
+struct DocPasses {
+    counter: std::sync::atomic::AtomicU64,
+    claims: DashMap<Url, u64>,
+}
+impl DocPasses {
+    fn claim(&self, uri: &Url) -> u64 {
+        let mut claim = self.claims.entry(uri.clone()).or_insert(0);
+        let pass = self
+            .counter
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        *claim = pass;
+        pass
+    }
+
+    fn release(&self, uri: &Url) {
+        self.claims.remove(uri);
+    }
+
+    fn if_current(&self, uri: &Url, pass: u64, write: impl FnOnce()) -> bool {
+        let claim = self.claims.get(uri);
+        let is_current = claim.as_deref().is_some_and(|current| *current == pass);
+        if is_current {
+            write();
+        }
+        is_current
+    }
+}
+
 /// Holds cloneable references to backend state for async document processing.
 /// Used by debounce tasks to process documents after the debounce period.
 #[derive(Clone)]
@@ -156,6 +185,7 @@ struct ProcessingContext {
     maven_central: Arc<tokio::sync::RwLock<MavenCentralRegistry>>,
     osv_client: Arc<OsvClient>,
     vuln_cache: Arc<VulnerabilityCache>,
+    doc_passes: Arc<DocPasses>,
 }
 
 /// Parse an npm-ecosystem manifest: the catalogs of a `pnpm-workspace.yaml`,
@@ -192,6 +222,9 @@ impl ProcessingContext {
         let Some(file_type) = FileType::detect(uri) else {
             return;
         };
+
+        // An older pass may finish after a newer one; only the latest claim may store its parse
+        let pass = self.doc_passes.claim(uri);
 
         let mut dependencies = self.parse_document(uri, content);
         let is_pnpm_workspace = is_pnpm_workspace(uri);
@@ -262,7 +295,7 @@ impl ProcessingContext {
                 let cache = Arc::clone(&cache);
                 async move {
                     // Check cache first
-                    if cache.get(&cache_key).await.is_some() {
+                    if cache.contains(&cache_key).await {
                         tracing::debug!("Cache hit for '{name}' (key: {cache_key})");
                         return;
                     }
@@ -326,16 +359,21 @@ impl ProcessingContext {
             let _ = handle.await;
         }
 
-        // Store document state IMMEDIATELY (before vulnerability check)
-        self.documents.insert(
-            uri.clone(),
-            DocumentState {
-                dependencies: dependencies.clone(),
-                file_type,
-                lockfile_graph: lockfile_graph.clone(),
-                transitive_vulns_by_direct: hashbrown::HashMap::new(),
-            },
-        );
+        // Store document state IMMEDIATELY (before vulnerability check), unless a newer pass (or `did_close`)
+        // took the document over while this one was fetching: its parse is stale and must not replace the newer one
+        // The registry data this pass cached is new either way, so the publish and hint refresh below still run
+        // against whatever state is current
+        let is_current = self.doc_passes.if_current(uri, pass, || {
+            self.documents.insert(
+                uri.clone(),
+                DocumentState {
+                    dependencies: dependencies.clone(),
+                    file_type,
+                    lockfile_graph: lockfile_graph.clone(),
+                    transitive_vulns_by_direct: hashbrown::HashMap::new(),
+                },
+            );
+        });
 
         // Publish diagnostics IMMEDIATELY (versions are available, vulnerabilities will update later)
         self.publish_diagnostics(uri).await;
@@ -354,7 +392,8 @@ impl ProcessingContext {
 
         // Fetch vulnerabilities from OSV.dev in BACKGROUND (non-blocking), then
         // republish so the findings reach the Problems panel without an edit.
-        if security_enabled && !dependencies.is_empty() {
+        // A superseded pass leaves the scan to the pass that replaced it
+        if is_current && security_enabled && !dependencies.is_empty() {
             let ctx = self.clone();
             let uri = uri.clone();
 
@@ -369,6 +408,8 @@ impl ProcessingContext {
                         documents: Arc::clone(&ctx.documents),
                         uri: uri.clone(),
                         lockfile_graph,
+                        doc_passes: Arc::clone(&ctx.doc_passes),
+                        pass,
                     },
                 )
                 .await;
@@ -496,6 +537,10 @@ struct VulnBgContext {
     documents: Arc<DashMap<Url, DocumentState>>,
     uri: Url,
     lockfile_graph: Option<std::sync::Arc<crate::parsers::lockfile_graph::LockfileGraph>>,
+    /// Claimes of the passes that own each document
+    doc_passes: Arc<DocPasses>,
+    /// The pass that stored the document state this scan was started for
+    pass: u64,
 }
 
 /// The main LSP backend for Depsy.
@@ -596,6 +641,8 @@ pub struct DepsyBackend {
     debounce_generation: Arc<std::sync::atomic::AtomicU64>,
     /// Pending content changes awaiting debounce completion
     pending_changes: Arc<DashMap<Url, String>>,
+    /// Which processing pass owns each open document
+    doc_passes: Arc<DocPasses>,
 }
 
 impl DepsyBackend {
@@ -650,11 +697,27 @@ impl DepsyBackend {
     /// `reqwest::Client` fails (e.g. TLS initialisation error on the current
     /// platform).
     pub fn with_http_client(client: Client, http_client: Option<Arc<HttpClient>>) -> Self {
+        Self::with_parts(client, http_client, HybridCache::new(), Config::default())
+    }
+
+    #[cfg(test)]
+    fn in_memory(client: Client) -> Self {
+        let mut config = Config::default();
+        config.advisory_cache.enabled = false;
+        config.security.enabled = false;
+        Self::with_parts(client, None, HybridCache::in_memory(), config)
+    }
+
+    fn with_parts(
+        client: Client,
+        http_client: Option<Arc<HttpClient>>,
+        version_cache: HybridCache,
+        config: Config,
+    ) -> Self {
         let http_client = http_client.unwrap_or_else(|| {
             create_shared_client().expect("Failed to create shared HTTP client")
         });
 
-        let config = Config::default();
         let npm_registry = Arc::new(tokio::sync::RwLock::new(
             NpmRegistry::with_client_and_config(Arc::clone(&http_client), &config.registries.npm),
         ));
@@ -684,7 +747,7 @@ impl DepsyBackend {
             client,
             config: Arc::new(RwLock::new(config)),
             documents: Arc::new(DashMap::new()),
-            version_cache: Arc::new(HybridCache::new()),
+            version_cache: Arc::new(version_cache),
             cargo_parser: Arc::new(CargoParser::new()),
             npm_parser: Arc::new(NpmParser::new()),
             python_parser: Arc::new(PythonParser::new()),
@@ -714,6 +777,7 @@ impl DepsyBackend {
             debounce_tasks: Arc::new(DashMap::new()),
             debounce_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             pending_changes: Arc::new(DashMap::new()),
+            doc_passes: Arc::new(DocPasses::default()),
         }
     }
 
@@ -772,6 +836,7 @@ impl DepsyBackend {
             maven_central: Arc::clone(&self.maven_central),
             osv_client: Arc::clone(&*self.osv_client.read().await),
             vuln_cache: Arc::clone(&self.vuln_cache),
+            doc_passes: Arc::clone(&self.doc_passes),
         }
     }
 
@@ -1071,9 +1136,13 @@ impl DepsyBackend {
 
             // Write per-document transitive findings into the DocumentState so they are
             // isolated from other workspaces that share the same global version_cache.
-            if let Some(mut doc) = bg_ctx.documents.get_mut(&bg_ctx.uri) {
-                doc.transitive_vulns_by_direct = transitive_vulns_by_direct;
-            }
+            // The scan can outlive its pass: once a newer pass has claimed the document, these
+            // findings describe an older lockfile graph and must not replace the newer ones
+            bg_ctx.doc_passes.if_current(&bg_ctx.uri, bg_ctx.pass, || {
+                if let Some(mut doc) = bg_ctx.documents.get_mut(&bg_ctx.uri) {
+                    doc.transitive_vulns_by_direct = transitive_vulns_by_direct;
+                }
+            });
         }
 
         if osv_answered {
@@ -1559,8 +1628,15 @@ impl LanguageServer for DepsyBackend {
 
         let uri = params.text_document.uri;
 
-        // With FULL sync, we get the entire document content
-        if let Some(change) = params.content_changes.into_iter().next() {
+        // The server is attached to every TOML/JSON/YAML/XML/Ruby/plain-text buffer;
+        // skip the copy and the debounce task for non-manifests
+        if FileType::detect(&uri).is_none() {
+            return;
+        }
+
+        // With FULL sync every change carries the entire document, so the last one is the current content
+        let mut content_changes = params.content_changes;
+        if let Some(change) = content_changes.pop() {
             tracing::debug!("Document changed: {}", uri);
 
             // Store pending content
@@ -1603,7 +1679,8 @@ impl LanguageServer for DepsyBackend {
                 if should_process {
                     tracing::debug!("Processing document after debounce: {}", uri_clone);
                     ctx.process_document(&uri_clone, &content).await;
-                    pending_changes.remove(&uri_clone);
+                    // Only clear our own entry: a newer `did_change` may have stored its content while this pass was still running
+                    pending_changes.remove_if(&uri_clone, |_, pending| *pending == content);
                 }
 
                 // Clean up task handle only if generation matches (no newer task spawned)
@@ -1644,6 +1721,8 @@ impl LanguageServer for DepsyBackend {
         }
         self.pending_changes.remove(&uri);
 
+        // Unclaim first so a pass still in flight cannot re-insert the document
+        self.doc_passes.release(&uri);
         self.documents.remove(&uri);
 
         // Clear diagnostics for this document
@@ -2326,11 +2405,11 @@ mod tests {
                 Arc::clone(&osv_client),
                 Arc::clone(&vuln_cache),
                 client.clone(),
-                VulnBgContext {
-                    documents: Arc::clone(&documents),
-                    uri: Url::parse(&format!("file:///{manifest}/package.json")).unwrap(),
-                    lockfile_graph: None,
-                },
+                VulnBgContext::owning(
+                    Arc::clone(&documents),
+                    Url::parse(&format!("file:///{manifest}/package.json")).unwrap(),
+                    None,
+                ),
             )
             .await;
         }
@@ -2362,11 +2441,11 @@ mod tests {
             Arc::new(OsvClient::with_endpoint(server.uri()).unwrap()),
             Arc::clone(&vuln_cache),
             service.inner().0.clone(),
-            VulnBgContext {
-                documents: Arc::new(DashMap::new()),
-                uri: Url::parse("file:///pnpm-workspace.yaml").unwrap(),
-                lockfile_graph: None,
-            },
+            VulnBgContext::owning(
+                Arc::new(DashMap::new()),
+                Url::parse("file:///pnpm-workspace.yaml").unwrap(),
+                None,
+            ),
         )
         .await;
 
@@ -2431,11 +2510,11 @@ mod tests {
                 Arc::clone(&osv_client),
                 Arc::clone(&vuln_cache),
                 client.clone(),
-                VulnBgContext {
-                    documents: Arc::clone(&documents),
-                    uri: uri.clone(),
-                    lockfile_graph: Some(Arc::clone(&graph)),
-                },
+                VulnBgContext::owning(
+                    Arc::clone(&documents),
+                    uri.clone(),
+                    Some(Arc::clone(&graph)),
+                ),
             )
             .await;
         }
@@ -2506,11 +2585,7 @@ mod tests {
             Arc::new(OsvClient::with_endpoint(server.uri()).unwrap()),
             Arc::clone(&vuln_cache),
             service.inner().0.clone(),
-            VulnBgContext {
-                documents: Arc::clone(&documents),
-                uri: uri.clone(),
-                lockfile_graph: Some(graph),
-            },
+            VulnBgContext::owning(Arc::clone(&documents), uri.clone(), Some(graph)),
         )
         .await;
 
@@ -2524,5 +2599,276 @@ mod tests {
             .collect();
         assert_eq!(osv_queries, 1, "the query for `a` must reach OSV and fail");
         assert_eq!(attributed, vec!["GHSA-vh95-rmgr-6w4m".to_string()]);
+    }
+
+    impl VulnBgContext {
+        /// Context of a scan whose pass owns `uri`, as it does when `process_document` starts one
+        fn owning(
+            documents: Arc<DashMap<Url, DocumentState>>,
+            uri: Url,
+            lockfile_graph: Option<Arc<crate::parsers::lockfile_graph::LockfileGraph>>,
+        ) -> Self {
+            let doc_passes = Arc::new(DocPasses::default());
+            let pass = doc_passes.claim(&uri);
+            Self {
+                documents,
+                uri,
+                lockfile_graph,
+                doc_passes,
+                pass,
+            }
+        }
+    }
+
+    #[test]
+    fn only_the_latest_claim_on_a_document_is_current() {
+        let passes = DocPasses::default();
+        let uri = Url::parse("file:///w/package.json").unwrap();
+        let other = Url::parse("file:///w/Cargo.toml").unwrap();
+        let ran = |pass| {
+            let mut ran = false;
+            assert_eq!(passes.if_current(&uri, pass, || ran = true), ran);
+            ran
+        };
+
+        let first = passes.claim(&uri);
+        assert!(ran(first));
+
+        // A pass on another document does not supersede it; a newer pass on the same one does
+        passes.claim(&other);
+        assert!(ran(first));
+        let second = passes.claim(&uri);
+        assert!(!ran(first));
+        assert!(ran(second));
+
+        // After `did_close`, nothing owns the document, and a reopen gets a fresh id
+        passes.release(&uri);
+        assert!(!ran(second));
+        assert!(passes.claim(&uri) > second);
+    }
+
+    #[tokio::test]
+    async fn superseded_scan_does_not_replace_the_newer_transitive_findings() {
+        // Given a document whose state was stored by a newer pass
+        // And the vulnerability scan of the pass it replaced is still running
+        // When that scan gets its OSV answer (minimist 1.2.5, reached through `a`, is vulnerable)
+        // Then the newer state's transitive findings are left alone
+        let server = osv_server_flagging_1_2_5().await;
+        let (service, _socket) = tower_lsp::LspService::new(UninitializedServer);
+        let uri = Url::parse("file:///superseded-scan/package.json").unwrap();
+        let graph = graph_a_pulling_minimist_1_2_5();
+        let direct = make_dep("a", "1.0.0", None);
+        let documents = Arc::new(DashMap::new());
+        documents.insert(
+            uri.clone(),
+            DocumentState {
+                dependencies: vec![direct.clone()],
+                file_type: FileType::Npm,
+                lockfile_graph: Some(Arc::clone(&graph)),
+                transitive_vulns_by_direct: hashbrown::HashMap::new(),
+            },
+        );
+        let doc_passes = Arc::new(DocPasses::default());
+        let superseded = doc_passes.claim(&uri);
+        doc_passes.claim(&uri);
+
+        DepsyBackend::fetch_vulnerabilities_background(
+            vec![direct],
+            FileType::Npm,
+            Arc::new(OsvClient::with_endpoint(server.uri()).unwrap()),
+            Arc::new(VulnerabilityCache::new()),
+            service.inner().0.clone(),
+            VulnBgContext {
+                documents: Arc::clone(&documents),
+                uri: uri.clone(),
+                lockfile_graph: Some(graph),
+                doc_passes,
+                pass: superseded,
+            },
+        )
+        .await;
+
+        let osv_queries = server.received_requests().await.unwrap_or_default().len();
+        assert_eq!(osv_queries, 1, "the scan must have run to its write");
+        assert!(
+            documents
+                .get(&uri)
+                .unwrap()
+                .transitive_vulns_by_direct
+                .is_empty()
+        );
+    }
+
+    const SLOW: &str = "depsy-test-slow";
+    const FAST: &str = "depsy-test-fast";
+
+    /// npm registry where `SLOW` answers after 500 ms and `FAST` at once
+    async fn registry_with_a_slow_package() -> wiremock::MockServer {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let packument = serde_json::json!({
+            "dist-tags": { "latest": "1.0.0" },
+            "versions": { "1.0.0": {} }
+        });
+        let registry = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/{SLOW}")))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(Duration::from_millis(500))
+                    .set_body_json(&packument),
+            )
+            .mount(&registry)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("/{FAST}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&packument))
+            .mount(&registry)
+            .await;
+        registry
+    }
+
+    async fn use_npm_registry(backend: &DepsyBackend, registry: &wiremock::MockServer) {
+        use crate::config::NpmRegistryConfig;
+
+        *backend.npm_registry.write().await = NpmRegistry::with_client_and_config(
+            Arc::clone(&backend.http_client),
+            &NpmRegistryConfig {
+                url: registry.uri(),
+                ..Default::default()
+            },
+        );
+    }
+
+    /// Starts a pass over a manifest depending on `SLOW` and `FAST`, and returns once it is
+    /// waiting on the slow package
+    async fn pass_waiting_on_the_slow_package(
+        backend: &DepsyBackend,
+        registry: &wiremock::MockServer,
+        uri: &Url,
+    ) -> tokio::task::JoinHandle<()> {
+        let manifest = format!(r#"{{"dependencies": {{"{SLOW}": "1.0.0", "{FAST}": "1.0.0"}}}}"#);
+        let pass = tokio::spawn({
+            let (ctx, uri) = (backend.create_processing_context().await, uri.clone());
+            async move { ctx.process_document(&uri, &manifest).await }
+        });
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let requests = registry.received_requests().await.unwrap_or_default();
+                if requests.iter().any(|r| r.url.path().ends_with(SLOW)) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the slow package was never requested from the mock registry");
+        pass
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn superseded_pass_does_not_replace_the_newer_document_state() {
+        // Given a pass still waiting on a slow package
+        let registry = registry_with_a_slow_package().await;
+        let (service, _socket) = tower_lsp::LspService::new(DepsyBackend::in_memory);
+        let backend = service.inner();
+        use_npm_registry(backend, &registry).await;
+        let dir = tempfile::tempdir().unwrap();
+        let uri = Url::from_file_path(dir.path().join("package.json")).unwrap();
+        let slow_pass = pass_waiting_on_the_slow_package(backend, &registry, &uri).await;
+
+        // When an edit removes that package and is processed to completion first
+        let after_edit = format!(r#"{{"dependencies": {{"{FAST}": "1.0.0"}}}}"#);
+        backend
+            .create_processing_context()
+            .await
+            .process_document(&uri, &after_edit)
+            .await;
+        slow_pass.await.unwrap();
+
+        // Then the document state is the one parsed from the edit
+        let names: Vec<String> = backend
+            .documents
+            .get(&uri)
+            .map(|doc| doc.dependencies.iter().map(|d| d.name.clone()).collect())
+            .unwrap_or_default();
+        assert_eq!(names, vec![FAST.to_string()]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pass_in_flight_does_not_store_a_document_closed_meanwhile() {
+        // Given a pass still waiting on a slow package
+        let registry = registry_with_a_slow_package().await;
+        let (service, _socket) = tower_lsp::LspService::new(DepsyBackend::in_memory);
+        let backend = service.inner();
+        use_npm_registry(backend, &registry).await;
+        let dir = tempfile::tempdir().unwrap();
+        let uri = Url::from_file_path(dir.path().join("package.json")).unwrap();
+        let slow_pass = pass_waiting_on_the_slow_package(backend, &registry, &uri).await;
+
+        // When the document is closed before the pass finishes
+        backend
+            .did_close(DidCloseTextDocumentParams {
+                text_document: TextDocumentIdentifier { uri: uri.clone() },
+            })
+            .await;
+        slow_pass.await.unwrap();
+
+        // Then the pass does not bring the document back
+        assert!(backend.documents.get(&uri).is_none());
+    }
+
+    fn full_text_change(text: &str) -> TextDocumentContentChangeEvent {
+        TextDocumentContentChangeEvent {
+            range: None,
+            range_length: None,
+            text: text.to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn did_change_keeps_the_last_of_several_full_text_changes() {
+        let (service, _socket) = tower_lsp::LspService::new(DepsyBackend::in_memory);
+        let backend = service.inner();
+        let uri = Url::parse("file:///did-change/package.json").unwrap();
+
+        backend
+            .did_change(DidChangeTextDocumentParams {
+                text_document: VersionedTextDocumentIdentifier {
+                    uri: uri.clone(),
+                    version: 2,
+                },
+                content_changes: vec![full_text_change("{}"), full_text_change(r#"{"name": "x"}"#)],
+            })
+            .await;
+
+        let pending = backend.pending_changes.get(&uri).map(|text| text.clone());
+        // Closing aborts the debounce task before it can reach the real npm registry
+        backend
+            .did_close(DidCloseTextDocumentParams {
+                text_document: TextDocumentIdentifier { uri },
+            })
+            .await;
+        assert_eq!(pending.as_deref(), Some(r#"{"name": "x"}"#));
+    }
+
+    #[tokio::test]
+    async fn did_change_ignores_buffers_that_are_not_manifests() {
+        let (service, _socket) = tower_lsp::LspService::new(DepsyBackend::in_memory);
+        let backend = service.inner();
+
+        backend
+            .did_change(DidChangeTextDocumentParams {
+                text_document: VersionedTextDocumentIdentifier {
+                    uri: Url::parse("file:///did-change/tsconfig.json").unwrap(),
+                    version: 2,
+                },
+                content_changes: vec![full_text_change("{}")],
+            })
+            .await;
+
+        assert!(backend.pending_changes.is_empty());
+        assert!(backend.debounce_tasks.is_empty());
     }
 }

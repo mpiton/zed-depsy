@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- Bumped `rustls` from 0.23.45 to 0.23.46 in the language server lockfile
+  to fix RUSTSEC-2026-0346, RUSTSEC-2026-0347, RUSTSEC-2026-0348 and
+  RUSTSEC-2026-0349.
+
 ### Fixed
 
 - A manifest parse that finishes after a newer parse has started no longer

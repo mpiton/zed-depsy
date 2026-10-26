@@ -12,6 +12,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bumped `rustls` from 0.23.45 to 0.23.46 in the language server lockfile
   to fix RUSTSEC-2026-0346, RUSTSEC-2026-0347, RUSTSEC-2026-0348 and
   RUSTSEC-2026-0349.
+- Bumped `rustls-webpki` from 0.103.15 to 0.103.16 and `webpki-root-certs`
+  from 1.0.9 to 1.0.11 in the language server lockfile to fix
+  RUSTSEC-2026-0382 and RUSTSEC-2026-0383 (distrusted intermediates could
+  pass certificate verification).
+- Bumped `tokio` from 1.53.2 to 1.54.1 to clear the RUSTSEC-2026-0386
+  unsoundness warning.
 
 ### Fixed
 

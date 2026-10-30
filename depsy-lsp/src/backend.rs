@@ -94,6 +94,45 @@ use crate::{
     reports::fmt_markdown_report,
 };
 
+/// How often open documents are checked for dependencies without fresh registry data
+const REFRESH_INTERVAL: Duration = Duration::from_secs(10);
+/// Default before retrying a package whose refresh failed
+/// doubles per failure up to [`MAX_RETRY_DELAY`]
+const FIRST_RETRY_DELAY: Duration = Duration::from_secs(10);
+/// Longest delay between two retries of a package that keeps failing
+const MAX_RETRY_DELAY: Duration = Duration::from_mins(30);
+
+/// Registry fetches that failed in [`ProcessingCOntext::refresh_open_documents`], by cache key:
+/// when the next attempt is due and the delay applied if the one fails too
+#[derive(Default)]
+struct RetryBackoff(HashMap<String, (tokio::time::Instant, Duration)>);
+
+impl RetryBackoff {
+    fn is_waiting(&self, key: &str, now: tokio::time::Instant) -> bool {
+        self.0.get(key).is_some_and(|(due, _)| *due > now)
+    }
+
+    fn failed(&mut self, key: &str, now: tokio::time::Instant) -> Duration {
+        let delay = self
+            .0
+            .get(key)
+            .map_or(FIRST_RETRY_DELAY, |(_, delay)| *delay);
+        self.0.insert(
+            key.to_string(),
+            (now + delay, (delay * 2).min(MAX_RETRY_DELAY)),
+        );
+        delay
+    }
+
+    fn succeeded(&mut self, key: &str) {
+        self.0.remove(key);
+    }
+
+    fn retain(&mut self, mut keep: impl FnMut(&str) -> bool) {
+        self.0.retain(|key, _| keep(key));
+    }
+}
+
 /// Walk parents of `file_path` looking for a `.zed/` directory.
 /// Returns the first ancestor that contains it, or `None` if no ancestor has `.zed/`.
 ///
@@ -263,78 +302,27 @@ impl ProcessingContext {
             uri.path()
         );
 
-        // Clone Arc references for async tasks
-        let crates_io = Arc::clone(&self.crates_io);
-        let cargo_custom_registries = Arc::clone(&self.cargo_custom_registries);
-        let npm_registry = Arc::clone(&self.npm_registry);
-        let pypi = Arc::clone(&self.pypi);
-        let go_proxy = Arc::clone(&self.go_proxy);
-        let packagist = Arc::clone(&self.packagist);
-        let pub_dev = Arc::clone(&self.pub_dev);
-        let nuget = Arc::clone(&self.nuget);
-        let rubygems = Arc::clone(&self.rubygems);
-        let maven_central = Arc::clone(&self.maven_central);
-        let cache = Arc::clone(&self.version_cache);
-
         let fetch_tasks: Vec<_> = dependencies
             .iter()
             .map(|dep| {
+                let ctx = self.clone();
                 let name = dep.name.clone();
                 let registry = dep.registry.clone();
                 let cache_key = dep_cache_key(dep, file_type);
-                let crates_io = Arc::clone(&crates_io);
-                let cargo_custom_registries = Arc::clone(&cargo_custom_registries);
-                let npm_registry = Arc::clone(&npm_registry);
-                let pypi = Arc::clone(&pypi);
-                let go_proxy = Arc::clone(&go_proxy);
-                let packagist = Arc::clone(&packagist);
-                let pub_dev = Arc::clone(&pub_dev);
-                let nuget = Arc::clone(&nuget);
-                let rubygems = Arc::clone(&rubygems);
-                let maven_central = Arc::clone(&maven_central);
-                let cache = Arc::clone(&cache);
                 async move {
                     // Check cache first
-                    if cache.contains(&cache_key).await {
+                    if ctx.version_cache.contains(&cache_key).await {
                         tracing::debug!("Cache hit for '{name}' (key: {cache_key})");
-                        return;
+                        return None;
                     }
                     tracing::debug!("Cache miss for '{name}' (key: {cache_key}), fetching from registry {registry:?}");
-                    // Fetch from appropriate registry
-                    let result = match file_type {
-                        FileType::Cargo => {
-                            if let Some(ref reg_name) = registry {
-                                if let Some(reg) = cargo_custom_registries.get(reg_name) {
-                                    reg.get_version_info(&name).await
-                                } else {
-                                    tracing::warn!(
-                                        "Unknown Cargo registry '{reg_name}' for package '{name}', falling back to crates.io",
-                                    );
-                                    crates_io.get_version_info(&name).await
-                                }
-                            } else {
-                                crates_io.get_version_info(&name).await
-                            }
-                        }
-                        FileType::Npm => npm_registry.read().await.get_version_info(&name).await,
-                        FileType::Python => pypi.get_version_info(&name).await,
-                        FileType::Go => go_proxy.get_version_info(&name).await,
-                        FileType::Php => packagist.get_version_info(&name).await,
-                        FileType::Dart => pub_dev.get_version_info(&name).await,
-                        FileType::Csharp => nuget.get_version_info(&name).await,
-                        FileType::Ruby => rubygems.get_version_info(&name).await,
-                        FileType::Maven => {
-                            maven_central.read().await.get_version_info(&name).await
-                        }
-                    };
-                    match result {
-                        Ok(info) => {
-                            cache.insert(cache_key, info).await;
-                        }
+                    match ctx.fetch_version_info(file_type, &name, registry.as_deref()).await {
+                        Ok(info) => Some((cache_key, info)),
                         Err(e) => {
                             tracing::error!(
                                 "Failed to fetch version info for '{name}' (registry: {registry:?}): {e}",
                             );
+                            None
                         }
                     }
                 }
@@ -354,10 +342,15 @@ impl ProcessingContext {
             })
             .collect();
 
-        // Wait for all tasks to complete
+        // Wait for all tasks to complete, then cache what they fetched:
+        // one SQLite transaction for the whole manifest instead of one per package
+        let mut fetched = Vec::new();
         for handle in handles {
-            let _ = handle.await;
+            if let Ok(Some(entry)) = handle.await {
+                fetched.push(entry);
+            }
         }
+        self.version_cache.insert_many(fetched).await;
 
         // Store document state IMMEDIATELY (before vulnerability check), unless a newer pass (or `did_close`)
         // took the document over while this one was fetching: its parse is stale and must not replace the newer one
@@ -416,6 +409,135 @@ impl ProcessingContext {
                 ctx.publish_diagnostics(&uri).await;
             });
         }
+    }
+
+    /// Fetches `name` from the registry of `file_type`, or from the alternative Cargo `registry` the manifest names
+    async fn fetch_version_info(
+        &self,
+        file_type: FileType,
+        name: &str,
+        registry: Option<&str>,
+    ) -> anyhow::Result<VersionInfo> {
+        match file_type {
+            FileType::Cargo => {
+                let custom = registry.map(|reg_name| {
+                    // Cloned out so no DashMap guard is held across the fetch
+                    let reg = self.cargo_custom_registries.get(reg_name).map(|reg| Arc::clone(&reg));
+                    if reg.is_none() {
+                        tracing::warn!("Unknown Cargo registry '{reg_name}' for package '{name}', falling back to crates.io");
+                    }
+                    reg
+                });
+                match custom.flatten() {
+                    Some(reg) => reg.get_version_info(name).await,
+                    None => self.crates_io.get_version_info(name).await,
+                }
+            }
+            FileType::Npm => self.npm_registry.read().await.get_version_info(name).await,
+            FileType::Python => self.pypi.get_version_info(name).await,
+            FileType::Go => self.go_proxy.get_version_info(name).await,
+            FileType::Php => self.packagist.get_version_info(name).await,
+            FileType::Dart => self.pub_dev.get_version_info(name).await,
+            FileType::Csharp => self.nuget.get_version_info(name).await,
+            FileType::Ruby => self.rubygems.get_version_info(name).await,
+            FileType::Maven => self.maven_central.read().await.get_version_info(name).await,
+        }
+    }
+
+    async fn refresh_open_documents(&self, backoff: &mut RetryBackoff) -> usize {
+        use crate::providers::inlay_hints::is_local_dependency;
+        use futures::stream::{self, StreamExt};
+
+        let ignored = self
+            .config
+            .read()
+            .map(|c| c.ignore.clone())
+            .unwrap_or_default();
+
+        let mut wanted: HashMap<String, (FileType, String, Option<String>)> = HashMap::new();
+        let mut users: HashMap<String, Vec<Url>> = HashMap::new();
+        for doc in self.documents.iter() {
+            for dep in &doc.dependencies {
+                if is_local_dependency(&dep.version)
+                    || crate::config::is_package_ignored(&dep.name, &ignored)
+                {
+                    continue;
+                }
+                let key = dep_cache_key(dep, doc.file_type);
+                users
+                    .entry_ref(key.as_str())
+                    .or_default()
+                    .push(doc.key().clone());
+                wanted
+                    .entry_ref(key.as_str())
+                    .or_insert_with(|| (doc.file_type, dep.name.clone(), dep.registry.clone()));
+            }
+        }
+        backoff.retain(|key| wanted.contains_key(key));
+
+        let now = tokio::time::Instant::now();
+        let mut due = Vec::new();
+        for (key, target) in wanted {
+            if backoff.is_waiting(&key, now) || self.version_cache.contains(&key).await {
+                continue;
+            }
+            due.push((key, target));
+        }
+        if due.is_empty() {
+            return 0;
+        }
+
+        let results: Vec<_> = stream::iter(due)
+            .map(|(key, (file_type, name, registry))| async move {
+                let result = self
+                    .fetch_version_info(file_type, &name, registry.as_deref())
+                    .await;
+                (key, name, result)
+            })
+            .buffer_unordered(5)
+            .collect()
+            .await;
+
+        let mut refreshed = HashSet::new();
+        let mut fetched = Vec::new();
+        for (key, name, result) in results {
+            match result {
+                Ok(info) => {
+                    backoff.succeeded(&key);
+                    refreshed.insert(key.clone());
+                    fetched.push((key, info));
+                }
+                Err(e) => {
+                    let retry_in = backoff.failed(&key, now);
+                    tracing::warn!("Refresh of '{name}' failed, retrying in {retry_in:?}: {e}");
+                }
+            }
+        }
+        if refreshed.is_empty() {
+            return 0;
+        }
+        self.version_cache.insert_many(fetched).await;
+        let mut uris: Vec<Url> = refreshed
+            .iter()
+            .filter_map(|key| users.get(key))
+            .flatten()
+            .cloned()
+            .collect();
+        uris.sort_unstable();
+        uris.dedup();
+        for uri in &uris {
+            self.publish_diagnostics(uri).await;
+        }
+        self.client
+            .send_request::<request::InlayHintRefreshRequest>(())
+            .await
+            .ok();
+        tracing::info!(
+            "Refreshed {} packages for {} open documents",
+            refreshed.len(),
+            uris.len()
+        );
+        refreshed.len()
     }
 
     /// Publishes diagnostics for `uri` from its current document state.
@@ -1606,6 +1728,17 @@ impl LanguageServer for DepsyBackend {
         debug_assert!(Arc::ptr_eq(&base_client, &self.pub_dev.http_client()));
         debug_assert!(Arc::ptr_eq(&base_client, &self.nuget.http_client()));
         debug_assert!(Arc::ptr_eq(&base_client, &self.rubygems.http_client()));
+
+        let ctx = self.create_processing_context().await;
+        tokio::spawn(async move {
+            let mut backoff = RetryBackoff::default();
+            let mut tick = tokio::time::interval(REFRESH_INTERVAL);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tick.tick().await;
+                ctx.refresh_open_documents(&mut backoff).await;
+            }
+        });
 
         tracing::info!("Depsy LSP initialized");
     }
@@ -2870,5 +3003,83 @@ mod tests {
 
         assert!(backend.pending_changes.is_empty());
         assert!(backend.debounce_tasks.is_empty());
+    }
+
+    #[test]
+    fn retry_backoff_doubles_up_to_its_cap() {
+        let mut backoff = RetryBackoff::default();
+        let now = tokio::time::Instant::now();
+
+        let delays: Vec<Duration> = (0..10).map(|_| backoff.failed("npm:x", now)).collect();
+        assert_eq!(delays[0], FIRST_RETRY_DELAY);
+        assert_eq!(delays[1], FIRST_RETRY_DELAY * 2);
+        assert_eq!(delays[9], MAX_RETRY_DELAY);
+
+        assert!(backoff.is_waiting("npm:x", now));
+        assert!(!backoff.is_waiting("npm:x", now + MAX_RETRY_DELAY));
+        assert!(!backoff.is_waiting("npm:other", now));
+        backoff.succeeded("npm:x");
+        assert!(!backoff.is_waiting("npm:x", now));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failed_fetch_is_retried_without_reopening_the_document() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        // Given a registry that fails the first request for `flaky` (a network blip)
+        // and one that always fails for `gone`
+        let packument = serde_json::json!({
+            "dist-tags": { "latest": "2.0.0" },
+            "versions": { "1.0.0": {}, "2.0.0": {} }
+        });
+        let registry = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/flaky"))
+            .respond_with(ResponseTemplate::new(503))
+            .up_to_n_times(1)
+            .with_priority(1)
+            .mount(&registry)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/flaky"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&packument))
+            .mount(&registry)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/gone"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&registry)
+            .await;
+        let (service, _socket) = tower_lsp::LspService::new(DepsyBackend::in_memory);
+        let backend = service.inner();
+        use_npm_registry(backend, &registry).await;
+        let ctx = backend.create_processing_context().await;
+        let dir = tempfile::tempdir().unwrap();
+        let uri = Url::from_file_path(dir.path().join("package.json")).unwrap();
+        ctx.process_document(
+            &uri,
+            r#"{"dependencies": {"flaky": "1.0.0", "gone": "1.0.0"}}"#,
+        )
+        .await;
+        let flaky = FileType::Npm.cache_key("flaky");
+        assert!(!backend.version_cache.contains(&flaky).await);
+
+        // When the open documents are refreshed
+        let mut backoff = RetryBackoff::default();
+        let refreshed = ctx.refresh_open_documents(&mut backoff).await;
+
+        // Then `flaky` is fetched again and cached, with no reopen or edit
+        assert_eq!(refreshed, 1);
+        assert!(backend.version_cache.contains(&flaky).await);
+
+        // And `gone`, which failed again, waits for its backoff instead of being retried at once
+        let gone_requests = |requests: Vec<wiremock::Request>| {
+            requests.iter().filter(|r| r.url.path() == "/gone").count()
+        };
+        let before = gone_requests(registry.received_requests().await.unwrap());
+        assert_eq!(ctx.refresh_open_documents(&mut backoff).await, 0);
+        let after = gone_requests(registry.received_requests().await.unwrap());
+        assert_eq!(before, after);
     }
 }

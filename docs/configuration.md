@@ -287,21 +287,7 @@ Then restart Zed. The cache will rebuild as you open dependency files.
 
 ### Offline Work
 
-For working offline, increase the cache TTL:
-
-```json
-{
-  "lsp": {
-    "depsy": {
-      "initialization_options": {
-        "cache": {
-          "ttl_secs": 86400
-        }
-      }
-    }
-  }
-}
-```
+Cached registry data stays available offline for 7 days after its 1-hour lifetime ends, shown as it was last fetched. That window is not configurable. Update code actions need data less than 1 hour old, so they are not offered on older data.
 
 ### Noisy Projects
 

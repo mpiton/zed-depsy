@@ -43,13 +43,14 @@ use std::{
 };
 
 use dashmap::DashMap;
+use futures::stream::{self, Stream, StreamExt};
 use hashbrown::{HashMap, HashSet};
 use reqwest::Client as HttpClient;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
 
-use crate::cache::{HybridCache, ReadCache, WriteCache};
+use crate::cache::{HybridCache, ReadCache};
 use crate::config::Config;
 use crate::document::DocumentState;
 use crate::file_types::{FileType, is_pnpm_workspace};
@@ -94,48 +95,10 @@ use crate::{
     reports::fmt_markdown_report,
 };
 
-/// How often open documents are checked for dependencies without fresh registry data
-const REFRESH_INTERVAL: Duration = Duration::from_secs(10);
-/// Default before retrying a package whose refresh failed
-/// doubles per failure up to [`MAX_RETRY_DELAY`]
-const FIRST_RETRY_DELAY: Duration = Duration::from_secs(10);
-/// Longest delay between two retries of a package that keeps failing
-const MAX_RETRY_DELAY: Duration = Duration::from_mins(30);
+mod refresh;
 
-/// Registry fetches that failed in [`ProcessingContext::refresh_open_documents`], by cache key:
-/// when the next attempt is due and the delay to apply if that attempt fails too
-#[derive(Default)]
-struct RetryBackoff(HashMap<String, (tokio::time::Instant, Duration)>);
-
-impl RetryBackoff {
-    /// Whether `key` failed recently and its next attempt is not due yet at `now`
-    fn is_waiting(&self, key: &str, now: tokio::time::Instant) -> bool {
-        self.0.get(key).is_some_and(|(due, _)| *due > now)
-    }
-
-    /// Records a failure at `now` and returns the delay until the next attempt
-    fn failed(&mut self, key: &str, now: tokio::time::Instant) -> Duration {
-        let delay = self
-            .0
-            .get(key)
-            .map_or(FIRST_RETRY_DELAY, |(_, delay)| *delay);
-        self.0.insert(
-            key.to_string(),
-            (now + delay, (delay * 2).min(MAX_RETRY_DELAY)),
-        );
-        delay
-    }
-
-    /// Forgets the failures of `key`: its next attempt is due whenever it is needed again
-    fn succeeded(&mut self, key: &str) {
-        self.0.remove(key);
-    }
-
-    /// Forgets the packages no open document uses any more
-    fn retain(&mut self, mut keep: impl FnMut(&str) -> bool) {
-        self.0.retain(|key, _| keep(key));
-    }
-}
+/// Registry requests one document pass or background refresh runs at once.
+const FETCH_CONCURRENCY: usize = 5;
 
 /// Walk parents of `file_path` looking for a `.zed/` directory.
 /// Returns the first ancestor that contains it, or `None` if no ancestor has `.zed/`.
@@ -163,10 +126,14 @@ async fn find_workspace_root(file_path: &std::path::Path) -> Option<std::path::P
 /// For Cargo deps with `registry = "name"`, the key is `crates:{registry}:{name}` to avoid
 /// collisions between crates.io and private registries. All other deps use the standard key.
 fn dep_cache_key(dep: &crate::parsers::Dependency, file_type: FileType) -> String {
-    let dep_name = &*dep.name;
-    match (dep.registry.as_deref(), file_type) {
-        (Some(registry), FileType::Cargo) => format!("crates:{registry}:{dep_name}"),
-        _ => file_type.cache_key(dep_name),
+    cache_key_for(file_type, &dep.name, dep.registry.as_deref())
+}
+
+/// Compute cache key for package `name`, from the alternative Cargo `registry` if it has one.
+fn cache_key_for(file_type: FileType, name: &str, registry: Option<&str>) -> String {
+    match (registry, file_type) {
+        (Some(registry), FileType::Cargo) => format!("crates:{registry}:{name}"),
+        _ => file_type.cache_key(name),
     }
 }
 
@@ -189,6 +156,11 @@ impl DocPasses {
         self.claims.remove(uri);
     }
 
+    /// The pass that owns `uri`, if the document is still claimed.
+    fn current(&self, uri: &Url) -> Option<u64> {
+        self.claims.get(uri).as_deref().copied()
+    }
+
     fn if_current(&self, uri: &Url, pass: u64, write: impl FnOnce()) -> bool {
         let claim = self.claims.get(uri);
         let is_current = claim.as_deref().is_some_and(|current| *current == pass);
@@ -196,6 +168,26 @@ impl DocPasses {
             write();
         }
         is_current
+    }
+}
+
+/// A package to fetch from its registry.
+#[derive(Clone)]
+struct FetchTarget {
+    key: String,
+    file_type: FileType,
+    name: String,
+    registry: Option<String>,
+}
+
+impl FetchTarget {
+    fn of(dep: &crate::parsers::Dependency, file_type: FileType) -> Self {
+        Self {
+            key: dep_cache_key(dep, file_type),
+            file_type,
+            name: dep.name.clone(),
+            registry: dep.registry.clone(),
+        }
     }
 }
 
@@ -306,56 +298,16 @@ impl ProcessingContext {
             uri.path()
         );
 
-        let fetch_tasks: Vec<_> = dependencies
+        // Spawned so a newer edit aborting this pass does not lose the responses:
+        // the fetch and its cache write finish on their own
+        let targets = dependencies
             .iter()
-            .map(|dep| {
-                let ctx = self.clone();
-                let name = dep.name.clone();
-                let registry = dep.registry.clone();
-                let cache_key = dep_cache_key(dep, file_type);
-                async move {
-                    // Check cache first
-                    if ctx.version_cache.contains(&cache_key).await {
-                        tracing::debug!("Cache hit for '{name}' (key: {cache_key})");
-                        return None;
-                    }
-                    tracing::debug!("Cache miss for '{name}' (key: {cache_key}), fetching from registry {registry:?}");
-                    let started = std::time::Instant::now();
-                    match ctx.fetch_version_info(file_type, &name, registry.as_deref()).await {
-                        Ok(info) => Some((cache_key, info, started)),
-                        Err(e) => {
-                            tracing::error!(
-                                "Failed to fetch version info for '{name}' (registry: {registry:?}): {e}",
-                            );
-                            None
-                        }
-                    }
-                }
-            })
+            .map(|dep| FetchTarget::of(dep, file_type))
             .collect();
-
-        // Run up to 5 concurrent requests
-        let semaphore = Arc::new(tokio::sync::Semaphore::new(5));
-        let handles: Vec<_> = fetch_tasks
-            .into_iter()
-            .map(|task| {
-                let permit = Arc::clone(&semaphore);
-                tokio::spawn(async move {
-                    let _permit = permit.acquire().await;
-                    task.await
-                })
-            })
-            .collect();
-
-        // Wait for all tasks to complete, then cache what they fetched:
-        // one SQLite transaction for the whole manifest instead of one per package
-        let mut fetched = Vec::new();
-        for handle in handles {
-            if let Ok(Some(entry)) = handle.await {
-                fetched.push(entry);
-            }
+        let ctx = self.clone();
+        if let Err(e) = tokio::spawn(async move { ctx.fetch_missing(targets).await }).await {
+            tracing::error!("Version fetch failed for {}: {e}", uri.path());
         }
-        self.version_cache.insert_many(fetched).await;
 
         // Store document state IMMEDIATELY (before vulnerability check), unless a newer pass (or `did_close`)
         // took the document over while this one was fetching: its parse is stale and must not replace the newer one
@@ -449,106 +401,60 @@ impl ProcessingContext {
         }
     }
 
-    /// Refetches the dependencies of open documents that have no fresh registry data and republish the documents that use them
-    async fn refresh_open_documents(&self, backoff: &mut RetryBackoff) -> usize {
-        use crate::providers::inlay_hints::is_local_dependency;
-        use futures::stream::{self, StreamExt};
-
-        let ignored = self
-            .config
-            .read()
-            .map(|c| c.ignore.clone())
-            .unwrap_or_default();
-
-        let mut wanted: HashMap<String, (FileType, String, Option<String>)> = HashMap::new();
-        let mut users: HashMap<String, Vec<Url>> = HashMap::new();
-        for doc in self.documents.iter() {
-            for dep in &doc.dependencies {
-                if is_local_dependency(&dep.version)
-                    || crate::config::is_package_ignored(&dep.name, &ignored)
-                {
-                    continue;
-                }
-                let key = dep_cache_key(dep, doc.file_type);
-                users
-                    .entry_ref(key.as_str())
-                    .or_default()
-                    .push(doc.key().clone());
-                wanted
-                    .entry_ref(key.as_str())
-                    .or_insert_with(|| (doc.file_type, dep.name.clone(), dep.registry.clone()));
-            }
-        }
-        backoff.retain(|key| wanted.contains_key(key));
-
-        let now = tokio::time::Instant::now();
-        let mut due = Vec::new();
-        for (key, target) in wanted {
-            if self.version_cache.contains(&key).await {
-                backoff.succeeded(&key);
-                continue;
-            }
-            if backoff.is_waiting(&key, now) {
-                continue;
-            }
-            due.push((key, target));
-        }
-        if due.is_empty() {
-            return 0;
-        }
-
-        let results: Vec<_> = stream::iter(due)
-            .map(|(key, (file_type, name, registry))| async move {
+    /// Fetches `targets` at bounded concurrency, yielding each response with its fetch start.
+    fn fetch_versions(
+        &self,
+        targets: Vec<FetchTarget>,
+    ) -> impl Stream<Item = (FetchTarget, anyhow::Result<VersionInfo>, std::time::Instant)> + '_
+    {
+        stream::iter(targets)
+            .map(move |target| async move {
                 let started = std::time::Instant::now();
                 let result = self
-                    .fetch_version_info(file_type, &name, registry.as_deref())
+                    .fetch_version_info(target.file_type, &target.name, target.registry.as_deref())
                     .await;
-                (key, name, result, started)
+                (target, result, started)
             })
-            .buffer_unordered(5)
-            .collect()
-            .await;
+            .buffer_unordered(FETCH_CONCURRENCY)
+    }
 
-        let mut refreshed = HashSet::new();
-        let mut fetched = Vec::new();
-        for (key, name, result, started) in results {
-            match result {
-                Ok(info) => {
-                    backoff.succeeded(&key);
-                    refreshed.insert(key.clone());
-                    fetched.push((key, info, started));
-                }
-                Err(e) => {
-                    let retry_in = backoff.failed(&key, tokio::time::Instant::now());
-                    tracing::warn!("Refresh of '{name}' failed, retrying in {retry_in:?}: {e}");
-                }
+    /// Fetches the `targets` without fresh cached data and caches the responses.
+    ///
+    /// One SQLite transaction for the whole manifest instead of one per package.
+    async fn fetch_missing(&self, targets: Vec<FetchTarget>) {
+        let mut due = Vec::with_capacity(targets.len());
+        for target in targets {
+            if self.version_cache.contains(&target.key).await {
+                tracing::debug!("Cache hit for '{}' (key: {})", target.name, target.key);
+            } else {
+                tracing::debug!(
+                    "Cache miss for '{}' (key: {}), fetching from registry {:?}",
+                    target.name,
+                    target.key,
+                    target.registry
+                );
+                due.push(target);
             }
         }
-        if refreshed.is_empty() {
-            return 0;
-        }
+
+        let fetched = self
+            .fetch_versions(due)
+            .filter_map(|(target, result, started)| {
+                futures::future::ready(match result {
+                    Ok(info) => Some((target.key, info, started)),
+                    Err(e) => {
+                        tracing::error!(
+                            "Failed to fetch version info for '{}' (registry: {:?}): {e}",
+                            target.name,
+                            target.registry,
+                        );
+                        None
+                    }
+                })
+            })
+            .collect()
+            .await;
         self.version_cache.insert_many(fetched).await;
-        let mut uris: Vec<Url> = refreshed
-            .iter()
-            .filter_map(|key| users.get(key))
-            .flatten()
-            .cloned()
-            .collect();
-        uris.sort_unstable();
-        uris.dedup();
-        for uri in &uris {
-            self.publish_diagnostics(uri).await;
-        }
-        self.client
-            .send_request::<request::InlayHintRefreshRequest>(())
-            .await
-            .ok();
-        tracing::info!(
-            "Refreshed {} packages for {} open documents",
-            refreshed.len(),
-            uris.len()
-        );
-        refreshed.len()
     }
 
     /// Publishes diagnostics for `uri` from its current document state.
@@ -670,7 +576,7 @@ struct VulnBgContext {
     documents: Arc<DashMap<Url, DocumentState>>,
     uri: Url,
     lockfile_graph: Option<std::sync::Arc<crate::parsers::lockfile_graph::LockfileGraph>>,
-    /// Claimes of the passes that own each document
+    /// Claims of the passes that own each document
     doc_passes: Arc<DocPasses>,
     /// The pass that stored the document state this scan was started for
     pass: u64,
@@ -776,7 +682,7 @@ pub struct DepsyBackend {
     pending_changes: Arc<DashMap<Url, String>>,
     /// Which processing pass owns each open document
     doc_passes: Arc<DocPasses>,
-    /// Background task refreshing open documents (see `ProcessingContext::refresh_open_documents`);
+    /// Background task refreshing open documents (see [`refresh`])
     refresh_task: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
@@ -982,12 +888,7 @@ impl DepsyBackend {
         package_name: &str,
         cargo_registry: Option<&str>,
     ) -> Option<VersionInfo> {
-        let cache_key = match (cargo_registry, file_type) {
-            (Some(registry), FileType::Cargo) => {
-                format!("crates:{registry}:{package_name}")
-            }
-            _ => file_type.cache_key(package_name),
-        };
+        let cache_key = cache_key_for(file_type, package_name, cargo_registry);
 
         // Check cache first
         if let Some(cached) = self.version_cache.get(&cache_key).await {
@@ -996,39 +897,11 @@ impl DepsyBackend {
 
         // Fetch from appropriate registry
         let started = std::time::Instant::now();
-        let result = match file_type {
-            FileType::Cargo => {
-                if let Some(reg_name) = cargo_registry {
-                    if let Some(reg) = self.cargo_custom_registries.get(reg_name) {
-                        reg.get_version_info(package_name).await
-                    } else {
-                        self.crates_io.get_version_info(package_name).await
-                    }
-                } else {
-                    self.crates_io.get_version_info(package_name).await
-                }
-            }
-            FileType::Npm => {
-                self.npm_registry
-                    .read()
-                    .await
-                    .get_version_info(package_name)
-                    .await
-            }
-            FileType::Python => self.pypi.get_version_info(package_name).await,
-            FileType::Go => self.go_proxy.get_version_info(package_name).await,
-            FileType::Php => self.packagist.get_version_info(package_name).await,
-            FileType::Dart => self.pub_dev.get_version_info(package_name).await,
-            FileType::Csharp => self.nuget.get_version_info(package_name).await,
-            FileType::Ruby => self.rubygems.get_version_info(package_name).await,
-            FileType::Maven => {
-                self.maven_central
-                    .read()
-                    .await
-                    .get_version_info(package_name)
-                    .await
-            }
-        };
+        let result = self
+            .create_processing_context()
+            .await
+            .fetch_version_info(file_type, package_name, cargo_registry)
+            .await;
 
         match result {
             Ok(info) => {
@@ -1041,7 +914,8 @@ impl DepsyBackend {
             }
             Err(e) => {
                 tracing::warn!("Failed to fetch version info for {}: {}", package_name, e);
-                None
+                // Outdated data beats an empty hover when the registry is unreachable
+                self.version_cache.get_stale(&cache_key).await
             }
         }
     }
@@ -1749,15 +1623,7 @@ impl LanguageServer for DepsyBackend {
         debug_assert!(Arc::ptr_eq(&base_client, &self.rubygems.http_client()));
 
         let ctx = self.create_processing_context().await;
-        let refresh = tokio::spawn(async move {
-            let mut backoff = RetryBackoff::default();
-            let mut tick = tokio::time::interval(REFRESH_INTERVAL);
-            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            loop {
-                tick.tick().await;
-                ctx.refresh_open_documents(&mut backoff).await;
-            }
-        });
+        let refresh = refresh::spawn_refresh_task(ctx, refresh::REFRESH_INTERVAL);
         // A client that sends `initialized` twice must not leave two refreshers running
         if let Ok(mut task) = self.refresh_task.lock()
             && let Some(previous) = task.replace(refresh)
@@ -2189,6 +2055,7 @@ impl LanguageServer for DepsyBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cache::WriteCache;
     use crate::parsers::{Dependency, Span};
 
     #[test]
@@ -2219,7 +2086,7 @@ mod tests {
         assert_eq!(package_names, vec!["express"]);
     }
 
-    fn make_dep(name: &str, version: &str, resolved: Option<&str>) -> Dependency {
+    pub(super) fn make_dep(name: &str, version: &str, resolved: Option<&str>) -> Dependency {
         Dependency {
             name: name.to_string(),
             version: version.to_string(),
@@ -2895,7 +2762,7 @@ mod tests {
         registry
     }
 
-    async fn use_npm_registry(backend: &DepsyBackend, registry: &wiremock::MockServer) {
+    pub(super) async fn use_npm_registry(backend: &DepsyBackend, registry: &wiremock::MockServer) {
         use crate::config::NpmRegistryConfig;
 
         *backend.npm_registry.write().await = NpmRegistry::with_client_and_config(
@@ -3038,117 +2905,6 @@ mod tests {
         assert!(backend.debounce_tasks.is_empty());
     }
 
-    #[test]
-    fn retry_backoff_doubles_up_to_its_cap() {
-        let mut backoff = RetryBackoff::default();
-        let now = tokio::time::Instant::now();
-
-        let delays: Vec<Duration> = (0..10).map(|_| backoff.failed("npm:x", now)).collect();
-        assert_eq!(delays[0], FIRST_RETRY_DELAY);
-        assert_eq!(delays[1], FIRST_RETRY_DELAY * 2);
-        assert_eq!(delays[9], MAX_RETRY_DELAY);
-
-        assert!(backoff.is_waiting("npm:x", now));
-        assert!(!backoff.is_waiting("npm:x", now + MAX_RETRY_DELAY));
-        assert!(!backoff.is_waiting("npm:other", now));
-        backoff.succeeded("npm:x");
-        assert!(!backoff.is_waiting("npm:x", now));
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn failed_fetch_is_retried_without_reopening_the_document() {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
-        // Given a registry that fails the first request for `flaky` (a network blip)
-        // and one that always fails for `gone`
-        let packument = serde_json::json!({
-            "dist-tags": { "latest": "2.0.0" },
-            "versions": { "1.0.0": {}, "2.0.0": {} }
-        });
-        let registry = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/flaky"))
-            .respond_with(ResponseTemplate::new(503))
-            .up_to_n_times(1)
-            .with_priority(1)
-            .mount(&registry)
-            .await;
-        Mock::given(method("GET"))
-            .and(path("/flaky"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(&packument))
-            .mount(&registry)
-            .await;
-        Mock::given(method("GET"))
-            .and(path("/gone"))
-            .respond_with(ResponseTemplate::new(503))
-            .mount(&registry)
-            .await;
-        let (service, _socket) = tower_lsp::LspService::new(DepsyBackend::in_memory);
-        let backend = service.inner();
-        use_npm_registry(backend, &registry).await;
-        let ctx = backend.create_processing_context().await;
-        let dir = tempfile::tempdir().unwrap();
-        let uri = Url::from_file_path(dir.path().join("package.json")).unwrap();
-        ctx.process_document(
-            &uri,
-            r#"{"dependencies": {"flaky": "1.0.0", "gone": "1.0.0"}}"#,
-        )
-        .await;
-        let flaky = FileType::Npm.cache_key("flaky");
-        assert!(!backend.version_cache.contains(&flaky).await);
-
-        // When the open documents are refreshed
-        let mut backoff = RetryBackoff::default();
-        let refreshed = ctx.refresh_open_documents(&mut backoff).await;
-
-        // Then `flaky` is fetched again and cached, with no reopen or edit
-        assert_eq!(refreshed, 1);
-        assert!(backend.version_cache.contains(&flaky).await);
-
-        // And `gone`, which failed again, waits for its backoff instead of being retried at once
-        let gone_requests = |requests: Vec<wiremock::Request>| {
-            requests.iter().filter(|r| r.url.path() == "/gone").count()
-        };
-        let before = gone_requests(registry.received_requests().await.unwrap());
-        assert_eq!(ctx.refresh_open_documents(&mut backoff).await, 0);
-        let after = gone_requests(registry.received_requests().await.unwrap());
-        assert_eq!(before, after);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn package_fetched_elsewhere_leaves_the_retry_backoff() {
-        // Given an open document whose package failed its last refresh
-        let (service, _socket) = tower_lsp::LspService::new(DepsyBackend::in_memory);
-        let backend = service.inner();
-        let ctx = backend.create_processing_context().await;
-        let uri = Url::parse("file:///backoff/package.json").unwrap();
-        let dep = make_dep("lodash", "1.0.0", None);
-        let key = FileType::Npm.cache_key("lodash");
-        backend.documents.insert(
-            uri,
-            DocumentState {
-                dependencies: vec![dep],
-                file_type: FileType::Npm,
-                lockfile_graph: None,
-                transitive_vulns_by_direct: hashbrown::HashMap::new(),
-            },
-        );
-        let mut backoff = RetryBackoff::default();
-        let now = tokio::time::Instant::now();
-        backoff.failed(&key, now);
-
-        // When an edit fetched it meanwhile and the refresher runs
-        backend
-            .version_cache
-            .insert(key.clone(), VersionInfo::default())
-            .await;
-        assert_eq!(ctx.refresh_open_documents(&mut backoff).await, 0);
-
-        // Then its backoff is gone, so a later expiry is refetched at once
-        assert!(!backoff.is_waiting(&key, now));
-    }
-
     #[tokio::test]
     async fn shutdown_stops_the_refresh_task() {
         let (service, _socket) = tower_lsp::LspService::new(DepsyBackend::in_memory);
@@ -3176,25 +2932,59 @@ mod tests {
         assert!(backend.refresh_task.lock().unwrap().is_none());
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn slow_hover_lookup_does_not_replace_newer_data() {
+    /// Mock answer that signals its request, then waits for the test to release it.
+    ///
+    /// wiremock serves one request at a time on its own thread, so nothing else
+    /// reaches this mock server until the release.
+    struct Gated {
+        received: Arc<tokio::sync::Notify>,
+        release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+        response: wiremock::ResponseTemplate,
+    }
+
+    impl wiremock::Respond for Gated {
+        fn respond(&self, _: &wiremock::Request) -> wiremock::ResponseTemplate {
+            self.received.notify_one();
+            // Also returns once the test dropped the sender
+            self.release.lock().unwrap().recv().ok();
+            self.response.clone()
+        }
+    }
+
+    /// npm registry serving `name` through a [`Gated`] answer with `latest` as its latest version.
+    async fn gated_registry(
+        name: &str,
+        latest: &str,
+    ) -> (
+        wiremock::MockServer,
+        Arc<tokio::sync::Notify>,
+        std::sync::mpsc::Sender<()>,
+    ) {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        // Given a hover lookup waiting on a registry that answers slowly with 1.0.0
+        let received = Arc::new(tokio::sync::Notify::new());
+        let (release, gate) = std::sync::mpsc::channel();
         let registry = MockServer::start().await;
         Mock::given(method("GET"))
-            .and(path("/lodash"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_delay(Duration::from_millis(300))
-                    .set_body_json(serde_json::json!({
-                        "dist-tags": { "latest": "1.0.0" },
-                        "versions": { "1.0.0": {} }
-                    })),
-            )
+            .and(path(format!("/{name}")))
+            .respond_with(Gated {
+                received: Arc::clone(&received),
+                release: std::sync::Mutex::new(gate),
+                response: ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "dist-tags": { "latest": latest },
+                    "versions": { latest: {} }
+                })),
+            })
             .mount(&registry)
             .await;
+        (registry, received, release)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn slow_hover_lookup_does_not_replace_newer_data() {
+        // Given a hover lookup whose request reached a registry that holds its answer of 1.0.0
+        let (registry, received, release) = gated_registry("lodash", "1.0.0").await;
         let (service, _socket) = tower_lsp::LspService::new(DepsyBackend::in_memory);
         let backend = service.inner();
         use_npm_registry(backend, &registry).await;
@@ -3203,7 +2993,7 @@ mod tests {
 
         // When a fetch started after it stores 2.0.0 first
         let newer = async {
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            received.notified().await;
             let info = VersionInfo {
                 latest: Some("2.0.0".to_string()),
                 ..Default::default()
@@ -3212,6 +3002,7 @@ mod tests {
                 .version_cache
                 .insert_many(vec![(key.clone(), info, std::time::Instant::now())])
                 .await;
+            release.send(()).unwrap();
         };
         let (hovered, ()) = tokio::join!(hover, newer);
 
@@ -3219,5 +3010,75 @@ mod tests {
         assert_eq!(hovered.unwrap().latest.as_deref(), Some("1.0.0"));
         let cached = backend.version_cache.get(&key).await.unwrap();
         assert_eq!(cached.latest.as_deref(), Some("2.0.0"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn hover_falls_back_to_stale_data_when_the_registry_fails() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        // Given a package cached past the TTL and a registry that is down
+        let registry = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/lodash"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&registry)
+            .await;
+        let (service, _socket) = tower_lsp::LspService::new(DepsyBackend::in_memory);
+        let backend = service.inner();
+        use_npm_registry(backend, &registry).await;
+        let old = VersionInfo {
+            latest: Some("1.0.0".to_string()),
+            ..Default::default()
+        };
+        backend
+            .version_cache
+            .insert_many(vec![(
+                FileType::Npm.cache_key("lodash"),
+                old,
+                std::time::Instant::now() - Duration::from_secs(2 * 60 * 60),
+            )])
+            .await;
+
+        // When the hover looks it up
+        let hovered = backend
+            .get_version_info(FileType::Npm, "lodash", None)
+            .await;
+
+        // Then it shows the expired data rather than nothing
+        assert_eq!(hovered.unwrap().latest.as_deref(), Some("1.0.0"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn aborted_pass_still_caches_what_it_fetched() {
+        // Given a pass whose request reached a registry that holds its answer
+        let (registry, received, release) = gated_registry("lodash", "2.0.0").await;
+        let (service, _socket) = tower_lsp::LspService::new(DepsyBackend::in_memory);
+        let backend = service.inner();
+        use_npm_registry(backend, &registry).await;
+        let ctx = backend.create_processing_context().await;
+        let dir = tempfile::tempdir().unwrap();
+        let uri = Url::from_file_path(dir.path().join("package.json")).unwrap();
+        let pass = tokio::spawn(async move {
+            ctx.process_document(&uri, r#"{"dependencies": {"lodash": "1.0.0"}}"#)
+                .await;
+        });
+        tokio::time::timeout(Duration::from_secs(10), received.notified())
+            .await
+            .expect("the package was never requested");
+
+        // When the next edit aborts the pass before the answer arrives
+        pass.abort();
+        release.send(()).unwrap();
+
+        // Then the response still reaches the cache
+        let key = FileType::Npm.cache_key("lodash");
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !backend.version_cache.contains(&key).await {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the aborted pass lost its response");
     }
 }

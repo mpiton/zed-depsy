@@ -596,6 +596,7 @@ dependencies = [
  "tokio",
  "toml",
  "tower-lsp",
+ "tower-service",
  "tracing",
  "tracing-subscriber",
  "url",

@@ -16,7 +16,7 @@ use crate::registries::VersionInfo;
 /// Default TTL for cache entries (1 hour)
 const DEFAULT_TTL_SECS: i64 = 3600;
 
-/// THe upsert's SQL text shared by `UPSERT_SQL` and `UPSERT_RETURNING_SQL`
+/// The upsert's SQL text shared by `UPSERT_SQL` and `UPSERT_RETURNING_SQL`
 macro_rules! upsert_sql {
     () => {
         "INSERT INTO packages (key, data, inserted_at, ttl_secs) VALUES (?, ?, ?, ?) \
@@ -37,6 +37,11 @@ const UPSERT_SQL: &str = upsert_sql!();
 /// [`UPSERT_SQL`] returning a row only when it wrote one
 const UPSERT_RETURNING_SQL: &str = concat!(upsert_sql!(), " RETURNING 1");
 
+/// Deletes the rows past their TTL and past the stale window
+///
+/// Bound to the stale window in seconds, [`NANOS_PER_SEC`] and the current time
+const EVICT_SQL: &str = "DELETE FROM packages WHERE inserted_at + (ttl_secs + ?) * ? < ?";
+
 #[cfg(test)]
 static TEST_DB_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -55,7 +60,7 @@ pub struct SqliteCacheConfig {
     pub cache_size_kb: i64,
     /// Time-to-live for cache entries in seconds
     pub ttl_secs: i64,
-    /// Seconds an entry is kept after its TTL, served by [`ReadCache::get_stale`] util refetched
+    /// Seconds an entry is kept after its TTL, served by [`ReadCache::get_stale`] until refetched
     pub stale_secs: i64,
 }
 
@@ -122,10 +127,7 @@ impl SqliteCache {
         {
             let conn = cache.pool.get()?;
             let now = current_timestamp();
-            conn.execute(
-                "DELETE FROM packages WHERE inserted_at + (ttl_secs + ?) * ? < ?",
-                params![cache.stale_secs, NANOS_PER_SEC, now],
-            )?;
+            conn.execute(EVICT_SQL, params![cache.stale_secs, NANOS_PER_SEC, now])?;
         }
 
         let state = cache.pool_state();
@@ -224,12 +226,12 @@ impl SqliteCache {
 
 impl ReadCache for SqliteCache {
     async fn get(&self, key: &str) -> Option<VersionInfo> {
-        self.get_with_age(key).await.map(|(value, _)| value)
+        self.read(key, false).await.map(|row| row.value)
     }
 
     /// Value for `key` until its stale window ends, fresh or not
     async fn get_stale(&self, key: &str) -> Option<VersionInfo> {
-        self.get_stale_with_age(key).await.map(|(value, _)| value)
+        self.read(key, true).await.map(|row| row.value)
     }
 
     async fn contains(&self, key: &str) -> bool {
@@ -307,19 +309,10 @@ impl WriteCache for SqliteCache {
 }
 
 impl SqliteCache {
-    /// Fresh value for `key` and how long ago it was fetched
-    pub(crate) async fn get_with_age(&self, key: &str) -> Option<(VersionInfo, Duration)> {
-        self.read(key, false).await
-    }
-
-    /// Value for `key` fresh or within the stale window and how long ago it was fetched
-    pub(crate) async fn get_stale_with_age(&self, key: &str) -> Option<(VersionInfo, Duration)> {
-        self.read(key, true).await
-    }
-
-    /// Row for `key` with its age: fresh only or also stale with `allow_stale`
-    /// A row past its stale window is deleted on the way
-    async fn read(&self, key: &str, allow_stale: bool) -> Option<(VersionInfo, Duration)> {
+    /// Row for `key`: fresh only or also stale with `allow_stale`
+    ///
+    /// A row past its stale window is left for [`Self::cleanup_expired`]
+    pub(crate) async fn read(&self, key: &str, allow_stale: bool) -> Option<StoredRow> {
         let pool = Arc::clone(&self.pool);
         let key = key.to_string();
         let stale_secs = self.stale_secs;
@@ -327,7 +320,7 @@ impl SqliteCache {
         // keeping the tokio event loop responsive
         // Note: spawn_blocking tasks are not cancelable if the future is dropped
         // the closure still runs to completion
-        // Acceptable here: DB ops are short and worst-case is a stale entry being deleted
+        // Acceptable here: this is a short read and nothing is written
         tokio::task::spawn_blocking(move || {
             let conn = pool.get().ok()?;
             let now = current_timestamp();
@@ -338,20 +331,15 @@ impl SqliteCache {
                     |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                 )
                 .ok()?;
-            if now > inserted_at + (ttl_secs + stale_secs) * NANOS_PER_SEC {
-                // Past stale window
-                // Only the row that was read: another window may have refreshed it since
-                let _ = conn.execute(
-                    "DELETE FROM packages WHERE key = ? AND inserted_at = ?",
-                    params![key, inserted_at],
-                );
-                return None;
-            }
-            if !allow_stale && now > inserted_at + ttl_secs * NANOS_PER_SEC {
+            let fresh = now <= inserted_at + ttl_secs * NANOS_PER_SEC;
+            let in_stale_window = now <= inserted_at + (ttl_secs + stale_secs) * NANOS_PER_SEC;
+            if !(fresh || allow_stale && in_stale_window) {
                 return None;
             }
             let age = Duration::from_nanos(u64::try_from(now - inserted_at).unwrap_or(0));
-            serde_json::from_str(&data).ok().map(|value| (value, age))
+            serde_json::from_str(&data)
+                .ok()
+                .map(|value| StoredRow { value, age, fresh })
         })
         .await
         .ok()
@@ -387,7 +375,7 @@ impl SqliteCache {
             let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             let mut superseded = Vec::new();
             {
-                // RETURNING yield a row only when the upsert wrote one
+                // RETURNING yields a row only when the upsert wrote one
                 let mut upsert = tx.prepare_cached(UPSERT_RETURNING_SQL)?;
                 for (key, data, fetched_at) in rows {
                     let written = upsert
@@ -424,6 +412,14 @@ impl SqliteCache {
         .unwrap_or(false)
     }
 
+    /// Makes every later write fail
+    #[cfg(test)]
+    pub(crate) fn drop_table_for_test(&self) {
+        let conn = self.pool.get().expect("test connection");
+        conn.execute("DROP TABLE packages", [])
+            .expect("drop test table");
+    }
+
     /// Clear all entries from the cache, returning the count
     #[cfg(test)]
     pub async fn clear_with_count(&self) -> anyhow::Result<usize> {
@@ -444,10 +440,7 @@ impl SqliteCache {
         tokio::task::spawn_blocking(move || -> anyhow::Result<usize> {
             let conn = pool.get()?;
             let now = current_timestamp();
-            let rows = conn.execute(
-                "DELETE FROM packages WHERE inserted_at + (ttl_secs + ?) * ? < ?",
-                params![stale_secs, NANOS_PER_SEC, now],
-            )?;
+            let rows = conn.execute(EVICT_SQL, params![stale_secs, NANOS_PER_SEC, now])?;
             Ok(rows)
         })
         .await
@@ -462,6 +455,16 @@ impl SqliteCache {
             idle_connections: state.idle_connections,
         }
     }
+}
+
+/// Row read from the cache
+pub(crate) struct StoredRow {
+    /// The cached value
+    pub(crate) value: VersionInfo,
+    /// How long ago the value was fetched
+    pub(crate) age: Duration,
+    /// Whether the row is still within its TTL
+    pub(crate) fresh: bool,
 }
 
 /// Pool statistics for monitoring
@@ -666,6 +669,68 @@ mod tests {
         };
         assert_eq!(latest("newer"), "1.0.0");
         assert_eq!(latest("fresh"), "0.0.1");
+    }
+
+    #[tokio::test]
+    async fn a_read_past_the_stale_window_leaves_the_row_for_cleanup() {
+        // Given a row past its TTL and its stale window
+        let cache = SqliteCache::in_memory_with_config(SqliteCacheConfig {
+            ttl_secs: 60,
+            stale_secs: 60,
+            ..Default::default()
+        })
+        .unwrap();
+        let fetched_at = SystemTime::now() - Duration::from_secs(180);
+        cache
+            .insert_batch(vec![(
+                "key".to_string(),
+                create_test_version_info(),
+                fetched_at,
+            )])
+            .await
+            .unwrap();
+
+        // When it is read, it is not served
+        assert!(cache.get("key").await.is_none());
+        assert!(cache.get_stale("key").await.is_none());
+
+        // Then reads wrote nothing, and cleanup is what removes it
+        assert_eq!(cache.cleanup_expired().await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn opening_the_database_purges_only_rows_past_the_stale_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cache.db");
+        let open = |stale_secs| {
+            SqliteCache::with_path_and_config(
+                path.clone(),
+                SqliteCacheConfig {
+                    ttl_secs: 60,
+                    stale_secs,
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+        };
+
+        // Given a row fetched 90 s ago with a 60 s TTL
+        let fetched_at = SystemTime::now() - Duration::from_secs(90);
+        open(3600)
+            .insert_batch(vec![(
+                "key".to_string(),
+                create_test_version_info(),
+                fetched_at,
+            )])
+            .await
+            .unwrap();
+
+        // Then a restart within the stale window keeps it
+        assert!(open(3600).get_stale("key").await.is_some());
+
+        // And a restart past the window deletes the row, even for a later reader with a longer window
+        drop(open(0));
+        assert!(open(3600).get_stale("key").await.is_none());
     }
 
     #[test]

@@ -378,4 +378,37 @@ mod tests {
         use super::Ecosystem;
         assert_eq!(Ecosystem::Maven.as_osv_str(), "Maven");
     }
+
+    #[tokio::test]
+    async fn cached_version_info_serves_expired_data_with_the_overlay() {
+        // Given version data past its TTL and a live OSV result
+        let vulnerable = dep("minimist", "1.2.5");
+        let osv_results = osv_results_with(
+            &vulnerable,
+            QueryResult {
+                vulnerabilities: vec![advisory("GHSA-xvch-5gv4-984h")],
+                deprecated: false,
+            },
+        );
+        let cache = MemoryCache::with_ttl_and_stale(
+            std::time::Duration::ZERO,
+            std::time::Duration::from_secs(3600),
+        );
+        cache
+            .insert("npm:minimist".to_string(), VersionInfo::default())
+            .await;
+
+        // When it is read
+        let info = cached_version_info(
+            &cache,
+            "npm:minimist",
+            &osv_results,
+            Ecosystem::Npm,
+            &vulnerable,
+        )
+        .await;
+
+        // Then the expired entry is served, with its advisory
+        assert_eq!(info.map(|info| info.vulnerabilities.len()), Some(1));
+    }
 }

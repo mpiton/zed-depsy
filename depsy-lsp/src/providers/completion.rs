@@ -508,4 +508,33 @@ mod tests {
         let items = completions.unwrap();
         assert_eq!(items.len(), 10);
     }
+
+    #[tokio::test]
+    async fn expired_versions_are_still_offered() {
+        // Given versions cached past their TTL, inside the stale window
+        let cache = MemoryCache::with_ttl_and_stale(
+            std::time::Duration::ZERO,
+            std::time::Duration::from_secs(3600),
+        );
+        cache
+            .insert(
+                "test:serde".to_string(),
+                VersionInfo {
+                    versions: vec!["2.0.0".to_string()],
+                    ..Default::default()
+                },
+            )
+            .await;
+        let deps = vec![create_test_dependency("serde", "1.0.0", 5)];
+        let position = Position {
+            line: 5,
+            character: deps[0].version_span.line_start,
+        };
+
+        // When completion runs in the version field
+        let items = get_completions(&deps, position, &cache, |name| format!("test:{name}")).await;
+
+        // Then the outdated list beats no completion at all
+        assert_eq!(items.map(|items| items.len()), Some(1));
+    }
 }

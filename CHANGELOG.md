@@ -38,6 +38,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for up to 7 days, while the language server fetches it again
 - Clearing an expired row from the disk cache no longer deletes the fresh row
   another Zed window wrote for the same package in the meantime
+- A registry response that arrives after a newer one for the same package, from
+  this window or another, no longer replaces the newer data in the cache
 
 ### Changed
 

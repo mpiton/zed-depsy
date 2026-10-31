@@ -102,16 +102,18 @@ const FIRST_RETRY_DELAY: Duration = Duration::from_secs(10);
 /// Longest delay between two retries of a package that keeps failing
 const MAX_RETRY_DELAY: Duration = Duration::from_mins(30);
 
-/// Registry fetches that failed in [`ProcessingCOntext::refresh_open_documents`], by cache key:
-/// when the next attempt is due and the delay applied if the one fails too
+/// Registry fetches that failed in [`ProcessingContext::refresh_open_documents`], by cache key:
+/// when the next attempt is due and the delay to apply if that attempt fails too
 #[derive(Default)]
 struct RetryBackoff(HashMap<String, (tokio::time::Instant, Duration)>);
 
 impl RetryBackoff {
+    /// Whether `key` failed recently and its next attempt is not due yet at `now`
     fn is_waiting(&self, key: &str, now: tokio::time::Instant) -> bool {
         self.0.get(key).is_some_and(|(due, _)| *due > now)
     }
 
+    /// Records a failure at `now` and returns the delay until the next attempt
     fn failed(&mut self, key: &str, now: tokio::time::Instant) -> Duration {
         let delay = self
             .0
@@ -124,10 +126,12 @@ impl RetryBackoff {
         delay
     }
 
+    /// Forgets the failures of `key`: its next attempt is due whenever it is needed again
     fn succeeded(&mut self, key: &str) {
         self.0.remove(key);
     }
 
+    /// Fogets the packages no open document uses any more
     fn retain(&mut self, mut keep: impl FnMut(&str) -> bool) {
         self.0.retain(|key, _| keep(key));
     }
@@ -316,8 +320,9 @@ impl ProcessingContext {
                         return None;
                     }
                     tracing::debug!("Cache miss for '{name}' (key: {cache_key}), fetching from registry {registry:?}");
+                    let started = std::time::Instant::now();
                     match ctx.fetch_version_info(file_type, &name, registry.as_deref()).await {
-                        Ok(info) => Some((cache_key, info)),
+                        Ok(info) => Some((cache_key, info, started)),
                         Err(e) => {
                             tracing::error!(
                                 "Failed to fetch version info for '{name}' (registry: {registry:?}): {e}",
@@ -444,6 +449,7 @@ impl ProcessingContext {
         }
     }
 
+    /// Refetches the dependencies of open documents that have no fresh registry data and republish the documents that use them
     async fn refresh_open_documents(&self, backoff: &mut RetryBackoff) -> usize {
         use crate::providers::inlay_hints::is_local_dependency;
         use futures::stream::{self, StreamExt};
@@ -478,7 +484,11 @@ impl ProcessingContext {
         let now = tokio::time::Instant::now();
         let mut due = Vec::new();
         for (key, target) in wanted {
-            if backoff.is_waiting(&key, now) || self.version_cache.contains(&key).await {
+            if self.version_cache.contains(&key).await {
+                backoff.succeeded(&key);
+                continue;
+            }
+            if backoff.is_waiting(&key, now) {
                 continue;
             }
             due.push((key, target));
@@ -489,10 +499,11 @@ impl ProcessingContext {
 
         let results: Vec<_> = stream::iter(due)
             .map(|(key, (file_type, name, registry))| async move {
+                let started = std::time::Instant::now();
                 let result = self
                     .fetch_version_info(file_type, &name, registry.as_deref())
                     .await;
-                (key, name, result)
+                (key, name, result, started)
             })
             .buffer_unordered(5)
             .collect()
@@ -500,15 +511,15 @@ impl ProcessingContext {
 
         let mut refreshed = HashSet::new();
         let mut fetched = Vec::new();
-        for (key, name, result) in results {
+        for (key, name, result, started) in results {
             match result {
                 Ok(info) => {
                     backoff.succeeded(&key);
                     refreshed.insert(key.clone());
-                    fetched.push((key, info));
+                    fetched.push((key, info, started));
                 }
                 Err(e) => {
-                    let retry_in = backoff.failed(&key, now);
+                    let retry_in = backoff.failed(&key, tokio::time::Instant::now());
                     tracing::warn!("Refresh of '{name}' failed, retrying in {retry_in:?}: {e}");
                 }
             }
@@ -765,6 +776,8 @@ pub struct DepsyBackend {
     pending_changes: Arc<DashMap<Url, String>>,
     /// Which processing pass owns each open document
     doc_passes: Arc<DocPasses>,
+    /// Background task refreshing open documents (see `ProcessingContext::refresh_open_documents`);
+    refresh_task: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl DepsyBackend {
@@ -900,6 +913,7 @@ impl DepsyBackend {
             debounce_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             pending_changes: Arc::new(DashMap::new()),
             doc_passes: Arc::new(DocPasses::default()),
+            refresh_task: std::sync::Mutex::new(None),
         }
     }
 
@@ -1730,7 +1744,7 @@ impl LanguageServer for DepsyBackend {
         debug_assert!(Arc::ptr_eq(&base_client, &self.rubygems.http_client()));
 
         let ctx = self.create_processing_context().await;
-        tokio::spawn(async move {
+        let refresh = tokio::spawn(async move {
             let mut backoff = RetryBackoff::default();
             let mut tick = tokio::time::interval(REFRESH_INTERVAL);
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -1739,12 +1753,26 @@ impl LanguageServer for DepsyBackend {
                 ctx.refresh_open_documents(&mut backoff).await;
             }
         });
+        // A client that sends `initialized` twice must not leave two refreshers running
+        if let Ok(mut task) = self.refresh_task.lock()
+            && let Some(previous) = task.replace(refresh)
+        {
+            previous.abort();
+        }
 
         tracing::info!("Depsy LSP initialized");
     }
 
     async fn shutdown(&self) -> Result<()> {
         tracing::info!("Depsy LSP shutting down");
+        if let Some(task) = self
+            .refresh_task
+            .lock()
+            .ok()
+            .and_then(|mut task| task.take())
+        {
+            task.abort();
+        }
         Ok(())
     }
 
@@ -3081,5 +3109,65 @@ mod tests {
         assert_eq!(ctx.refresh_open_documents(&mut backoff).await, 0);
         let after = gone_requests(registry.received_requests().await.unwrap());
         assert_eq!(before, after);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn package_fetched_elsewhere_leaves_the_retry_backoff() {
+        // Given an open document whose package failed its last refresh
+        let (service, _socket) = tower_lsp::LspService::new(DepsyBackend::in_memory);
+        let backend = service.inner();
+        let ctx = backend.create_processing_context().await;
+        let uri = Url::parse("file:///backoff/package.json").unwrap();
+        let dep = make_dep("lodash", "1.0.0", None);
+        let key = FileType::Npm.cache_key("lodash");
+        backend.documents.insert(
+            uri,
+            DocumentState {
+                dependencies: vec![dep],
+                file_type: FileType::Npm,
+                lockfile_graph: None,
+                transitive_vulns_by_direct: hashbrown::HashMap::new(),
+            },
+        );
+        let mut backoff = RetryBackoff::default();
+        let now = tokio::time::Instant::now();
+        backoff.failed(&key, now);
+
+        // When an edit fetched it meanwhile and the refresher runs
+        backend
+            .version_cache
+            .insert(key.clone(), VersionInfo::default())
+            .await;
+        assert_eq!(ctx.refresh_open_documents(&mut backoff).await, 0);
+
+        // Then its backoff is gone, so a later expiry is refetched at once
+        assert!(!backoff.is_waiting(&key, now));
+    }
+
+    #[tokio::test]
+    async fn shutdown_stops_the_refresh_task() {
+        let (service, _socket) = tower_lsp::LspService::new(DepsyBackend::in_memory);
+        let backend = service.inner();
+
+        backend.initialized(InitializedParams {}).await;
+        let task = backend
+            .refresh_task
+            .lock()
+            .unwrap()
+            .as_ref()
+            .expect("refresh task started")
+            .abort_handle();
+        assert!(!task.is_finished());
+
+        backend.shutdown().await.unwrap();
+        // Aborting takes effect at the task's next poll
+        for _ in 0..100 {
+            if task.is_finished() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(task.is_finished());
+        assert!(backend.refresh_task.lock().unwrap().is_none());
     }
 }

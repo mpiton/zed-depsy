@@ -244,7 +244,7 @@ async fn create_update_action(
 ) -> Option<CodeActionOrCommand> {
     let dep_name = &*dep.name;
     let cache_key = cache_key_fn(dep_name);
-    let version_info = cache.get(&cache_key).await?;
+    let version_info = cache.get_stale(&cache_key).await?;
 
     match compare_versions(dep.effective_version(), &version_info) {
         VersionStatus::UpdateAvailable(new_version) => {
@@ -347,7 +347,7 @@ async fn create_update_all_action(
     let lookups = cache_keys
         .into_iter()
         .enumerate()
-        .map(|(idx, key)| async move { (idx, cache.get(&key).await) });
+        .map(|(idx, key)| async move { (idx, cache.get_stale(&key).await) });
     let mut tagged = stream::iter(lookups).buffer_unordered(PREFETCH_CONCURRENCY);
     while let Some((idx, value)) = tagged.next().await {
         cache_results[idx] = value;

@@ -108,7 +108,7 @@ pub async fn get_completions(
         .find(|d| d.version_span.contains_lsp_position(&position))?;
 
     let cache_key = cache_key_fn(&dep.name);
-    let version_info = cache.get(&cache_key).await?;
+    let version_info = cache.get_stale(&cache_key).await?;
 
     // Return the last 10 versions as completions
     let items: Vec<CompletionItem> = version_info

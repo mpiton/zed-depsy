@@ -157,7 +157,7 @@ pub async fn cached_version_info(
     ecosystem: Ecosystem,
     dep: &Dependency,
 ) -> Option<VersionInfo> {
-    let mut info = cache.get(cache_key).await?;
+    let mut info = cache.get_stale(cache_key).await?;
     apply_osv_result(&mut info, osv_results, ecosystem, dep);
     Some(info)
 }

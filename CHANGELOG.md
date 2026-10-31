@@ -28,6 +28,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ([#412](https://github.com/mpiton/zed-depsy/pull/412)).
 - Closing a manifest while its dependencies are still being fetched no
   longer lets that fetch put the document back into the server state.
+- A dependency whose registry fetch failed no longer stays `? Unknown` until
+  the manifest is closed and reopened. The language server retries every
+  failed fetch in the background: network errors, timeouts and rate limits,
+  and also packages the registry reports as missing, since a package that was
+  just published or a private registry that was just configured can answer
+  later. Retries start after 10 seconds and back off to once every 30 minutes
+  for a package that keeps failing, while a manifest that uses it is open
+- Hints and diagnostics no longer turn `? Unknown` an hour after a manifest
+  was opened. Registry data past its one-hour cache lifetime is still shown,
+  for up to 7 days, while the language server fetches it again
+- Clearing an expired row from the disk cache no longer deletes the fresh row
+  another Zed window wrote for the same package in the meantime
+- A registry response that arrives after a newer one for the same package, from
+  this window or another, no longer replaces the newer data in the cache
+
+### Changed
+
+- The registry data fetched for a manifest is written to the disk cache in one
+  SQLite transaction instead of one per package, which takes about a quarter
+  less CPU per pass
 
 ## [2.1.1] - 2026-10-05
 
@@ -138,7 +158,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   been queried against Maven Central verbatim), a value interrupted by a comment
   (`<version>1.<!-- why -->7.30</version>`, which has no contiguous range for
   the update quick-fix to overwrite), a value written across two lines, and a
-  `<version>` holding only whitespace. A comment placed *after* the value, as in
+  `<version>` holding only whitespace. A comment placed _after_ the value, as in
   `<version>1.7.30<!-- pinned --></version>`, is unaffected.
 - A `<properties>` entry holding an entity the parser cannot resolve is dropped
   instead of being substituted into a coordinate. `<ver>&custom;</ver>` paired

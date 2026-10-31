@@ -49,6 +49,11 @@ pub trait ReadCache: Send + Sync {
     async fn contains(&self, key: &str) -> bool {
         self.get(key).await.is_some()
     }
+
+    /// Get a value even if it is past its TTL, as long as the cache still keeps it
+    async fn get_stale(&self, key: &str) -> Option<VersionInfo> {
+        self.get(key).await
+    }
 }
 
 /// Trait for writeable cache operations
@@ -61,7 +66,20 @@ pub trait WriteCache: ReadCache {
     /// Insert a value into the cache.
     ///
     /// If a value with the same key already exists, it will be overwritten.
+    /// The value counts as fetched now, so it replaces any value already there.
+    /// A registry response goes through [`Self::insert_many`] with its fetch start instead, so a slow response cannot replace a newer one
     async fn insert(&self, key: String, value: VersionInfo);
+
+    /// Insert several values, each with the time its fetch started
+    ///
+    /// A value does not replace one whose fetch started later, so a slow response cannot put
+    /// older registry data back. The default ignores the times and inserts the values one by
+    /// one; [`HybridCache`] writes them on disk in one transaction
+    async fn insert_many(&self, entries: Vec<(String, VersionInfo, Instant)>) {
+        for (key, value, _) in entries {
+            self.insert(key, value).await;
+        }
+    }
 
     /// Remove a value from the cache.
     async fn remove(&self, key: &str);
@@ -78,11 +96,19 @@ impl<T: ReadCache> ReadCache for Arc<T> {
     async fn contains(&self, key: &str) -> bool {
         (**self).contains(key).await
     }
+
+    async fn get_stale(&self, key: &str) -> Option<VersionInfo> {
+        (**self).get_stale(key).await
+    }
 }
 
 impl<T: WriteCache> WriteCache for Arc<T> {
     async fn insert(&self, key: String, value: VersionInfo) {
         (**self).insert(key, value).await
+    }
+
+    async fn insert_many(&self, entries: Vec<(String, VersionInfo, Instant)>) {
+        (**self).insert_many(entries).await
     }
 
     async fn remove(&self, key: &str) {
@@ -96,6 +122,8 @@ impl<T: WriteCache> WriteCache for Arc<T> {
 
 /// Default TTL for cache entries (1 hour)
 const DEFAULT_TTL: Duration = Duration::from_secs(3600);
+/// How long an entry is kept after its TTL, served as stale untile it is refetched (7 days)
+pub(crate) const STALE_FOR: Duration = Duration::from_hours(7 * 24);
 
 /// Cache entry with expiration
 #[derive(Debug, Clone)]
@@ -109,6 +137,10 @@ impl CacheEntry {
     fn is_expired(&self) -> bool {
         self.inserted_at.elapsed() > self.ttl
     }
+    /// Past its TTL and past the window in which it is still served as stale
+    fn is_evictable(&self, stale_for: Duration) -> bool {
+        self.inserted_at.elapsed() > self.ttl + stale_for
+    }
 }
 
 /// In-memory cache using DashMap for thread-safety
@@ -116,6 +148,8 @@ impl CacheEntry {
 pub struct MemoryCache {
     entries: Arc<DashMap<String, CacheEntry>>,
     ttl: Duration,
+    /// How long an expired entry is still kept for [`ReadCache::get_stale`]
+    stale_for: Duration,
 }
 
 impl Default for MemoryCache {
@@ -130,6 +164,7 @@ impl MemoryCache {
         Self {
             entries: Arc::new(DashMap::new()),
             ttl: DEFAULT_TTL,
+            stale_for: STALE_FOR,
         }
     }
 }
@@ -151,18 +186,24 @@ impl ReadCache for MemoryCache {
             .get(key)
             .is_some_and(|entry| !entry.is_expired())
     }
+
+    async fn get_stale(&self, key: &str) -> Option<VersionInfo> {
+        self.entries
+            .get(key)
+            .filter(|entry| !entry.is_evictable(self.stale_for))
+            .map(|entry| entry.data.clone())
+    }
 }
 
 impl WriteCache for MemoryCache {
     async fn insert(&self, key: String, value: VersionInfo) {
-        self.entries.insert(
-            key,
-            CacheEntry {
-                data: value,
-                inserted_at: Instant::now(),
-                ttl: self.ttl,
-            },
-        );
+        self.insert_at(key, value, Instant::now());
+    }
+
+    async fn insert_many(&self, entries: Vec<(String, VersionInfo, Instant)>) {
+        for (key, value, fetched_at) in entries {
+            self.insert_at(key, value, fetched_at);
+        }
     }
 
     async fn remove(&self, key: &str) {
@@ -175,12 +216,44 @@ impl WriteCache for MemoryCache {
 }
 
 impl MemoryCache {
-    /// Remove all expired entries from the cache
+    /// Stores `value` as fetched at `fetched_at`, unless the entry holds data fetched later
+    ///
+    /// The TTL runs from `fetched_at`
+    fn insert_at(&self, key: String, value: VersionInfo, fetched_at: Instant) {
+        use dashmap::mapref::entry::Entry;
+
+        let entry = CacheEntry {
+            data: value,
+            inserted_at: fetched_at,
+            ttl: self.ttl,
+        };
+        match self.entries.entry(key) {
+            Entry::Occupied(mut current) => {
+                if current.get().inserted_at <= fetched_at {
+                    current.insert(entry);
+                }
+            }
+            Entry::Vacant(slot) => {
+                slot.insert(entry);
+            }
+        }
+    }
+
+    /// Value for `key`, fresh or within the stale window, and how long ago it was fetched
+    fn get_stale_with_age(&self, key: &str) -> Option<(VersionInfo, Duration)> {
+        self.entries
+            .get(key)
+            .filter(|entry| !entry.is_evictable(self.stale_for))
+            .map(|entry| (entry.data.clone(), entry.inserted_at.elapsed()))
+    }
+
+    /// Remove the entries that are past their TTL and past the stale window
     ///
     /// Returns the number of entries removed.
     pub fn cleanup_expired(&self) -> usize {
         let before = self.entries.len();
-        self.entries.retain(|_, entry| !entry.is_expired());
+        self.entries
+            .retain(|_, entry| !entry.is_evictable(self.stale_for));
         let removed = before - self.entries.len();
         if removed > 0 {
             tracing::debug!(
@@ -217,12 +290,18 @@ impl MemoryCache {
         self.entries.is_empty()
     }
 
-    /// Create a new cache with custom TTL
+    /// Create a new cache with custom TTL that drops entries at expiry (no stale window)
     #[cfg(test)]
     pub fn with_ttl(ttl: Duration) -> Self {
+        Self::with_ttl_and_stale(ttl, Duration::ZERO)
+    }
+
+    #[cfg(test)]
+    pub fn with_ttl_and_stale(ttl: Duration, stale_for: Duration) -> Self {
         Self {
             entries: Arc::new(DashMap::new()),
             ttl,
+            stale_for,
         }
     }
 }
@@ -348,10 +427,15 @@ impl ReadCache for HybridCache {
 
         // Slow path: check SQLite cache
         if let Some(ref sqlite) = self.sqlite
-            && let Some(value) = sqlite.get(key).await
+            && let Some((value, age)) = sqlite.get_with_age(key).await
         {
-            // Populate memory cache for future fast access
-            self.memory.insert(key.to_string(), value.clone()).await;
+            // Populate memory cache for future fast access, with the row's age so its TTL still
+            // runs from when it was fetched. A row older than this process's monotonic clock can
+            // reach is served from disk instead
+            if let Some(fetched_at) = Instant::now().checked_sub(age) {
+                self.memory
+                    .insert_at(key.to_string(), value.clone(), fetched_at);
+            }
             return Some(value);
         }
 
@@ -363,6 +447,24 @@ impl ReadCache for HybridCache {
         // and promoted for the lookups that follow
         self.memory.contains(key).await || self.get(key).await.is_some()
     }
+
+    async fn get_stale(&self, key: &str) -> Option<VersionInfo> {
+        // A fresh entry wins, from memory or from disk, where another window may have refreshed it
+        if let Some(value) = self.get(key).await {
+            return Some(value);
+        }
+        // Both stale: the more recently fetched one, since another window may have refreshed the disk row
+        // Not promoted: a stale value must not come back looking fresh
+        let memory = self.memory.get_stale_with_age(key);
+        let disk = match self.sqlite {
+            Some(ref sqlite) => sqlite.get_stale_with_age(key).await,
+            None => None,
+        };
+        match (memory, disk) {
+            (Some(memory), Some(disk)) => Some(if disk.1 < memory.1 { disk.0 } else { memory.0 }),
+            (memory, disk) => memory.or(disk).map(|(value, _)| value),
+        }
+    }
 }
 
 impl WriteCache for HybridCache {
@@ -370,6 +472,38 @@ impl WriteCache for HybridCache {
         self.memory.insert(key.clone(), value.clone()).await;
         if let Some(ref sqlite) = self.sqlite {
             sqlite.insert(key, value).await;
+        }
+    }
+
+    async fn insert_many(&self, entries: Vec<(String, VersionInfo, Instant)>) {
+        let Some(ref sqlite) = self.sqlite else {
+            return self.memory.insert_many(entries).await;
+        };
+        let (now, wall_now) = (Instant::now(), std::time::SystemTime::now());
+        let rows = entries
+            .iter()
+            .map(|(key, value, fetched_at)| {
+                let fetched_at = wall_now
+                    .checked_sub(now.saturating_duration_since(*fetched_at))
+                    .unwrap_or(wall_now);
+                (key.clone(), value.clone(), fetched_at)
+            })
+            .collect();
+
+        let superseded = match sqlite.insert_batch(rows).await {
+            Ok(superseded) => superseded,
+            Err(err) => {
+                tracing::warn!("SQLite cache batch insert failed: {err}");
+                Vec::new()
+            }
+        };
+        for (key, value, fetched_at) in entries {
+            if superseded.contains(&key) {
+                // Dropped so the next read loads the newer row with its age
+                self.memory.remove(&key).await;
+            } else {
+                self.memory.insert_at(key, value, fetched_at);
+            }
         }
     }
 
@@ -541,6 +675,220 @@ mod tests {
 
         assert!(!cache.contains("key").await);
         assert!(!cache.memory.contains("key").await);
+    }
+
+    #[tokio::test]
+    async fn expired_memory_entry_is_served_stale_until_the_window_ends() {
+        let cache =
+            MemoryCache::with_ttl_and_stale(Duration::from_millis(20), Duration::from_millis(200));
+        cache
+            .insert("key".to_string(), create_test_version_info())
+            .await;
+
+        // Past the TTL: not fresh, so it gets refetched, but still shown
+        std::thread::sleep(Duration::from_millis(40));
+        assert!(cache.get("key").await.is_none());
+        assert!(!cache.contains("key").await);
+        assert!(cache.get_stale("key").await.is_some());
+        assert_eq!(cache.cleanup_expired(), 0);
+
+        // Past the stale window: gone
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(cache.get_stale("key").await.is_none());
+        assert_eq!(cache.cleanup_expired(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn expired_sqlite_row_is_served_stale_until_the_window_ends() {
+        let insert_and_wait = |stale_secs| async move {
+            let cache = SqliteCache::in_memory_with_config(sqlite::SqliteCacheConfig {
+                ttl_secs: 0,
+                stale_secs,
+                ..Default::default()
+            })
+            .unwrap();
+            cache
+                .insert("key".to_string(), create_test_version_info())
+                .await;
+            std::thread::sleep(Duration::from_millis(5));
+            cache
+        };
+
+        // Within the stale window: not fresh, still served, kept by cleanup and by `get`
+        let cache = insert_and_wait(3600).await;
+        assert!(cache.get("key").await.is_none());
+        assert!(!cache.contains("key").await);
+        assert!(cache.get_stale("key").await.is_some());
+        assert_eq!(cache.cleanup_expired().await.unwrap(), 0);
+
+        // Past it: gone and the read that found it so already deleted the row
+        let cache = insert_and_wait(0).await;
+        assert!(cache.get_stale("key").await.is_none());
+        assert_eq!(cache.cleanup_expired().await.unwrap(), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn hybrid_serves_a_stale_entry_without_promoting_it_as_fresh() {
+        let cache = HybridCache {
+            memory: MemoryCache::with_ttl_and_stale(
+                Duration::from_millis(20),
+                Duration::from_secs(60),
+            ),
+            sqlite: Some(Arc::new(
+                SqliteCache::in_memory_with_config(sqlite::SqliteCacheConfig {
+                    ttl_secs: 0,
+                    ..Default::default()
+                })
+                .unwrap(),
+            )),
+        };
+        cache
+            .insert("key".to_string(), create_test_version_info())
+            .await;
+        std::thread::sleep(Duration::from_millis(40));
+
+        assert!(cache.get_stale("key").await.is_some());
+        // Still due for a refetch afterwards
+        assert!(!cache.contains("key").await);
+        assert!(!cache.memory.contains("key").await);
+    }
+
+    fn info_with_latest(latest: &str) -> VersionInfo {
+        VersionInfo {
+            latest: Some(latest.to_string()),
+            ..create_test_version_info()
+        }
+    }
+
+    #[tokio::test]
+    async fn memory_keeps_the_value_whose_fetch_started_last() {
+        // Given a value fetched now, and a response to an earlier request that arrives after it
+        let cache = MemoryCache::new();
+        let earlier = Instant::now();
+        cache
+            .insert("key".to_string(), info_with_latest("2.0.0"))
+            .await;
+        cache
+            .insert_many(vec![(
+                "key".to_string(),
+                info_with_latest("1.0.0"),
+                earlier,
+            )])
+            .await;
+
+        // Then the later fetch wins
+        assert_eq!(
+            cache.get("key").await.unwrap().latest.as_deref(),
+            Some("2.0.0")
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn hybrid_insert_many_does_not_shadow_a_newer_disk_row() {
+        // Given a disk row from another window, fetched after this process's batch started
+        let cache = HybridCache::in_memory();
+        let started = Instant::now();
+        std::thread::sleep(Duration::from_millis(5));
+        let sqlite = cache.sqlite.as_ref().unwrap();
+        sqlite
+            .insert("key".to_string(), info_with_latest("2.0.0"))
+            .await;
+
+        // When the batch lands with older data
+        cache
+            .insert_many(vec![(
+                "key".to_string(),
+                info_with_latest("1.0.0"),
+                started,
+            )])
+            .await;
+
+        // Then memory holds nothing older than disk, and reads return the newer row
+        assert!(!cache.memory.contains("key").await);
+        assert_eq!(
+            cache.get("key").await.unwrap().latest.as_deref(),
+            Some("2.0.0")
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn promoted_disk_row_keeps_its_age() {
+        // Given a disk row fetched 1.5 s ago, and a 2 s TTL
+        let cache = HybridCache {
+            memory: MemoryCache::with_ttl(Duration::from_secs(2)),
+            sqlite: Some(Arc::new(
+                SqliteCache::in_memory_with_config(sqlite::SqliteCacheConfig {
+                    ttl_secs: 2,
+                    ..Default::default()
+                })
+                .unwrap(),
+            )),
+        };
+        let fetched_at = Instant::now() - Duration::from_millis(1500);
+        cache
+            .insert_many(vec![(
+                "key".to_string(),
+                create_test_version_info(),
+                fetched_at,
+            )])
+            .await;
+        cache.memory.clear().await;
+
+        // When a read promotes it to memory
+        assert!(cache.get("key").await.is_some());
+        assert!(cache.memory.contains("key").await);
+
+        // Then it expires 2 s after its fetch, not 2 s after the promotion
+        std::thread::sleep(Duration::from_millis(700));
+        assert!(!cache.memory.contains("key").await);
+        assert!(!cache.contains("key").await);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn hybrid_get_stale_returns_the_more_recently_fetched_value() {
+        // Given both layers past their TTL, the disk row refreshed by another window after memory
+        let cache = HybridCache {
+            memory: MemoryCache::with_ttl_and_stale(Duration::ZERO, Duration::from_secs(60)),
+            sqlite: Some(Arc::new(
+                SqliteCache::in_memory_with_config(sqlite::SqliteCacheConfig {
+                    ttl_secs: 0,
+                    ..Default::default()
+                })
+                .unwrap(),
+            )),
+        };
+        cache
+            .memory
+            .insert("key".to_string(), info_with_latest("1.0.0"))
+            .await;
+        std::thread::sleep(Duration::from_millis(5));
+        let sqlite = cache.sqlite.as_ref().unwrap();
+        sqlite
+            .insert("key".to_string(), info_with_latest("2.0.0"))
+            .await;
+        std::thread::sleep(Duration::from_millis(5));
+
+        assert_eq!(
+            cache.get_stale("key").await.unwrap().latest.as_deref(),
+            Some("2.0.0")
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn hybrid_insert_many_fills_both_layers() {
+        let cache = HybridCache::in_memory();
+        cache
+            .insert_many(vec![
+                ("a".to_string(), create_test_version_info(), Instant::now()),
+                ("b".to_string(), create_test_version_info(), Instant::now()),
+            ])
+            .await;
+
+        let sqlite = cache.sqlite.as_ref().unwrap();
+        for key in ["a", "b"] {
+            assert!(cache.memory.contains(key).await);
+            assert!(sqlite.get(key).await.is_some());
+        }
     }
 
     #[tokio::test]

@@ -131,7 +131,7 @@ impl RetryBackoff {
         self.0.remove(key);
     }
 
-    /// Fogets the packages no open document uses any more
+    /// Forgets the packages no open document uses any more
     fn retain(&mut self, mut keep: impl FnMut(&str) -> bool) {
         self.0.retain(|key, _| keep(key));
     }
@@ -995,6 +995,7 @@ impl DepsyBackend {
         }
 
         // Fetch from appropriate registry
+        let started = std::time::Instant::now();
         let result = match file_type {
             FileType::Cargo => {
                 if let Some(reg_name) = cargo_registry {
@@ -1031,7 +1032,11 @@ impl DepsyBackend {
 
         match result {
             Ok(info) => {
-                self.version_cache.insert(cache_key, info.clone()).await;
+                // With its fetch start like every registry response:
+                // a hover that waited on a slow registry must not replace data a later fetch already stored
+                self.version_cache
+                    .insert_many(vec![(cache_key, info.clone(), started)])
+                    .await;
                 Some(info)
             }
             Err(e) => {
@@ -3169,5 +3174,50 @@ mod tests {
         }
         assert!(task.is_finished());
         assert!(backend.refresh_task.lock().unwrap().is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn slow_hover_lookup_does_not_replace_newer_data() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        // Given a hover lookup waiting on a registry that answers slowly with 1.0.0
+        let registry = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/lodash"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(Duration::from_millis(300))
+                    .set_body_json(serde_json::json!({
+                        "dist-tags": { "latest": "1.0.0" },
+                        "versions": { "1.0.0": {} }
+                    })),
+            )
+            .mount(&registry)
+            .await;
+        let (service, _socket) = tower_lsp::LspService::new(DepsyBackend::in_memory);
+        let backend = service.inner();
+        use_npm_registry(backend, &registry).await;
+        let hover = backend.get_version_info(FileType::Npm, "lodash", None);
+        let key = FileType::Npm.cache_key("lodash");
+
+        // When a fetch started after it stores 2.0.0 first
+        let newer = async {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let info = VersionInfo {
+                latest: Some("2.0.0".to_string()),
+                ..Default::default()
+            };
+            backend
+                .version_cache
+                .insert_many(vec![(key.clone(), info, std::time::Instant::now())])
+                .await;
+        };
+        let (hovered, ()) = tokio::join!(hover, newer);
+
+        // Then the hover shows what it fetched, and the cache keeps the newer data
+        assert_eq!(hovered.unwrap().latest.as_deref(), Some("1.0.0"));
+        let cached = backend.version_cache.get(&key).await.unwrap();
+        assert_eq!(cached.latest.as_deref(), Some("2.0.0"));
     }
 }

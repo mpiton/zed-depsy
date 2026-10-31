@@ -66,6 +66,8 @@ pub trait WriteCache: ReadCache {
     /// Insert a value into the cache.
     ///
     /// If a value with the same key already exists, it will be overwritten.
+    /// The value counts as fetched now, so it replaces any value already there.
+    /// A registry response goes through [`Self::insert_many`] with its fetch start instead, so a slow response cannot replace a newer one
     async fn insert(&self, key: String, value: VersionInfo);
 
     /// Insert several values, each with the time its fetch started

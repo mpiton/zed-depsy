@@ -45,17 +45,17 @@ Dependency management extension for the [Zed](https://zed.dev) editor.
 
 ## Supported Languages
 
-| Language | File | Registry | Status |
-|----------|------|----------|--------|
-| Rust | `Cargo.toml` | crates.io + alternative registries | ✅ |
-| JavaScript/TypeScript | `package.json`, `pnpm-workspace.yaml` | npm (+ pnpm workspace catalogs) | ✅ |
-| Python | `requirements.txt`, `constraints.txt`, `pyproject.toml`, `hatch.toml` | PyPI | ✅ |
-| Go | `go.mod` | proxy.golang.org | ✅ |
-| PHP | `composer.json` | Packagist | ✅ |
-| Dart/Flutter | `pubspec.yaml` | pub.dev | ✅ |
-| C#/.NET | `*.csproj`, `Directory.Build.props`, `Directory.Packages.props` | NuGet | ✅ |
-| Ruby | `Gemfile` | RubyGems.org | ✅ |
-| Java | `pom.xml` | Maven Central | ✅ |
+| Language              | File                                                                  | Registry                           | Status |
+| --------------------- | --------------------------------------------------------------------- | ---------------------------------- | ------ |
+| Rust                  | `Cargo.toml`                                                          | crates.io + alternative registries | ✅     |
+| JavaScript/TypeScript | `package.json`, `pnpm-workspace.yaml`                                 | npm (+ pnpm workspace catalogs)    | ✅     |
+| Python                | `requirements.txt`, `constraints.txt`, `pyproject.toml`, `hatch.toml` | PyPI                               | ✅     |
+| Go                    | `go.mod`                                                              | proxy.golang.org                   | ✅     |
+| PHP                   | `composer.json`                                                       | Packagist                          | ✅     |
+| Dart/Flutter          | `pubspec.yaml`                                                        | pub.dev                            | ✅     |
+| C#/.NET               | `*.csproj`, `Directory.Build.props`, `Directory.Packages.props`       | NuGet                              | ✅     |
+| Ruby                  | `Gemfile`                                                             | RubyGems.org                       | ✅     |
+| Java                  | `pom.xml`                                                             | Maven Central                      | ✅     |
 
 ## Installation
 
@@ -263,19 +263,19 @@ Configure Depsy in your Zed `settings.json`:
 
 ### Configuration Options
 
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `inlay_hints.enabled` | bool | `true` | Enable/disable inlay hints |
-| `inlay_hints.show_up_to_date` | bool | `true` | Show hints for up-to-date packages |
-| `diagnostics.enabled` | bool | `true` | Enable/disable diagnostics |
-| `cache.ttl_secs` | number | `3600` | Cache TTL in seconds (1 hour) |
-| `cache.debounce_ms` | number | `200` | Debounce delay for file change notifications (ms) |
-| `ignore` | string[] | `[]` | Package names/patterns to ignore |
-| `security.enabled` | bool | `true` | Enable/disable vulnerability scanning |
-| `security.show_in_hints` | bool | `true` | Show vulnerability count in inlay hints |
-| `security.show_diagnostics` | bool | `true` | Show vulnerability diagnostics |
-| `security.min_severity` | string | `"low"` | Minimum severity to report (low/medium/high/critical) |
-| `security.cache_ttl_secs` | number | `21600` | Vulnerability cache TTL in seconds (6 hours) |
+| Option                        | Type     | Default | Description                                           |
+| ----------------------------- | -------- | ------- | ----------------------------------------------------- |
+| `inlay_hints.enabled`         | bool     | `true`  | Enable/disable inlay hints                            |
+| `inlay_hints.show_up_to_date` | bool     | `true`  | Show hints for up-to-date packages                    |
+| `diagnostics.enabled`         | bool     | `true`  | Enable/disable diagnostics                            |
+| `cache.ttl_secs`              | number   | `3600`  | Cache TTL in seconds (1 hour)                         |
+| `cache.debounce_ms`           | number   | `200`   | Debounce delay for file change notifications (ms)     |
+| `ignore`                      | string[] | `[]`    | Package names/patterns to ignore                      |
+| `security.enabled`            | bool     | `true`  | Enable/disable vulnerability scanning                 |
+| `security.show_in_hints`      | bool     | `true`  | Show vulnerability count in inlay hints               |
+| `security.show_diagnostics`   | bool     | `true`  | Show vulnerability diagnostics                        |
+| `security.min_severity`       | string   | `"low"` | Minimum severity to report (low/medium/high/critical) |
+| `security.cache_ttl_secs`     | number   | `21600` | Vulnerability cache TTL in seconds (6 hours)          |
 
 ### Private Registries
 
@@ -318,6 +318,7 @@ serde = "1.0"  # still fetched from crates.io
 ```
 
 **Key points:**
+
 - The `index_url` is the sparse index URL (without the `sparse+` prefix)
 - Authentication can be configured via LSP settings or falls back to `~/.cargo/credentials.toml`
 - Dependencies without a `registry` field are fetched from crates.io as usual
@@ -352,6 +353,7 @@ Configure scoped registries to use private npm packages alongside public ones:
 ```
 
 **Key points:**
+
 - Scope names don't include the `@` prefix (use `"company"` not `"@company"`)
 - Authentication tokens are read from environment variables (never hardcoded)
 - Auth headers are only sent over HTTPS
@@ -370,13 +372,13 @@ depsy-lsp scan --file <path> [options]
 
 #### Options
 
-| Option | Short | Default | Description |
-|--------|-------|---------|-------------|
-| `--file <path>` | `-f` | required | Path to dependency file to scan |
-| `--output <format>` | `-o` | `summary` | Output format: `summary`, `json`, `markdown`, `html` |
-| `--min-severity <level>` | `-m` | `low` | Minimum severity to report: `low`, `medium`, `high`, `critical` |
-| `--fail-on-vulns` | | `true` | Exit with code 1 if vulnerabilities are found |
-| `--no-use-lockfile` | | (off) | Disable lockfile-based scanning. By default, when a sibling lockfile from one of the wired ecosystems is present, the scanner walks the full dependency graph; this flag restricts it to direct dependencies only. Lockfiles with full graph support today: `Cargo.lock`, `package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, `poetry.lock`, `uv.lock`, `Pipfile.lock`, `composer.lock`, `Gemfile.lock`. Lockfiles detected but currently treated as empty graphs: `bun.lock`, `pdm.lock`. Go (`go.sum`), Dart (`pubspec.lock`), .NET (`packages.lock.json`), and Maven have no lockfile graph parser yet. |
+| Option                   | Short | Default   | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| ------------------------ | ----- | --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--file <path>`          | `-f`  | required  | Path to dependency file to scan                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `--output <format>`      | `-o`  | `summary` | Output format: `summary`, `json`, `markdown`, `html`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `--min-severity <level>` | `-m`  | `low`     | Minimum severity to report: `low`, `medium`, `high`, `critical`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `--fail-on-vulns`        |       | `true`    | Exit with code 1 if vulnerabilities are found                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `--no-use-lockfile`      |       | (off)     | Disable lockfile-based scanning. By default, when a sibling lockfile from one of the wired ecosystems is present, the scanner walks the full dependency graph; this flag restricts it to direct dependencies only. Lockfiles with full graph support today: `Cargo.lock`, `package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, `poetry.lock`, `uv.lock`, `Pipfile.lock`, `composer.lock`, `Gemfile.lock`. Lockfiles detected but currently treated as empty graphs: `bun.lock`, `pdm.lock`. Go (`go.sum`), Dart (`pubspec.lock`), .NET (`packages.lock.json`), and Maven have no lockfile graph parser yet. |
 
 #### Supported Files
 
@@ -397,10 +399,10 @@ depsy-lsp scan --file <path> [options]
 
 #### Exit Codes
 
-| Code | Meaning |
-|------|---------|
-| `0` | Success - no vulnerabilities found (or `--fail-on-vulns=false`) |
-| `1` | Failure - vulnerabilities found, file error, or network error |
+| Code | Meaning                                                         |
+| ---- | --------------------------------------------------------------- |
+| `0`  | Success - no vulnerabilities found (or `--fail-on-vulns=false`) |
+| `1`  | Failure - vulnerabilities found, file error, or network error   |
 
 ### Output Examples
 
@@ -584,11 +586,13 @@ security-scan:
 ### LSP Server Not Starting
 
 **Symptoms:**
+
 - No inlay hints or diagnostics appear
 - No completions for dependency versions
 - Extension seems inactive
 
 **Solutions:**
+
 1. Check Zed's extension panel to verify Depsy is installed and enabled
 2. View Zed logs for errors: run `zed --foreground` from terminal
 3. Reinstall the extension from Zed Extensions marketplace
@@ -598,11 +602,13 @@ security-scan:
 ### LSP Server Crashes or Freezes
 
 **Symptoms:**
+
 - Editor becomes unresponsive when opening dependency files
 - LSP process repeatedly restarts
 - High memory usage
 
 **Solutions:**
+
 1. Clear the cache directory and restart Zed:
    ```bash
    # Linux
@@ -621,11 +627,13 @@ security-scan:
 ### Outdated Cache Data
 
 **Symptoms:**
+
 - Recently published packages not showing as latest
 - Old version information displayed
 - Known updates not appearing
 
 **Solutions:**
+
 1. Cache automatically refreshes after 1 hour (default TTL)
 2. Clear cache manually to force refresh:
    ```bash
@@ -637,11 +645,13 @@ security-scan:
 ### Registry Rate Limiting
 
 **Symptoms:**
+
 - Intermittent failures fetching package info
 - `? Unknown` hints appearing temporarily
 - Slow responses when opening files
 
 **Solutions:**
+
 1. Wait a few minutes for rate limits to reset
 2. The cache reduces API calls - avoid clearing cache unnecessarily
 3. For npm, consider setting up authentication (see registry documentation)
@@ -650,11 +660,13 @@ security-scan:
 ### Network/Proxy Issues
 
 **Symptoms:**
+
 - All package lookups failing
 - Timeout errors in logs
 - Works on some networks but not others
 
 **Solutions:**
+
 1. Configure system proxy settings (Depsy uses system proxy)
 2. Ensure registry URLs are allowed through corporate firewall:
    - `https://crates.io`
@@ -673,10 +685,12 @@ security-scan:
 ### Configuration Not Applying
 
 **Symptoms:**
+
 - Custom settings in `settings.json` are ignored
 - Default behavior despite configuration changes
 
 **Solutions:**
+
 1. Verify JSON syntax is valid in `settings.json`
 2. Ensure settings are under the correct path:
    ```json
@@ -698,6 +712,7 @@ security-scan:
 ### How does the cache work?
 
 Depsy uses a hybrid caching system:
+
 - **Memory cache**: Fast access during the current session
 - **SQLite cache**: Persistent storage in the system cache directory:
   - Linux: `~/.cache/depsy/cache.db`
@@ -709,6 +724,7 @@ Cache entries expire after 1 hour by default (configurable via `cache.ttl_secs`)
 ### How do I clear the cache?
 
 Delete the cache directory:
+
 ```bash
 # Linux
 rm -rf ~/.cache/depsy/
@@ -719,11 +735,13 @@ rm -rf ~/Library/Caches/depsy/
 # Windows
 rmdir /s %LOCALAPPDATA%\depsy
 ```
+
 Then restart Zed. The cache will rebuild as you open dependency files.
 
 ### Can I use this offline?
 
 Yes, with limitations. If packages were previously cached, their information remains available offline until the cache expires. New packages or those not in cache won't have version information. For fully offline work, consider increasing the cache TTL:
+
 ```json
 {
   "lsp": {
@@ -740,21 +758,22 @@ Yes, with limitations. If packages were previously cached, their information rem
 
 ### Which package registries are supported?
 
-| Language | Registry | URL |
-|----------|----------|-----|
-| Rust | crates.io (+ alternative registries) | https://crates.io |
-| JavaScript/TypeScript | npm | https://registry.npmjs.org |
-| Python | PyPI | https://pypi.org |
-| Go | Go Proxy | https://proxy.golang.org |
-| PHP | Packagist | https://packagist.org |
-| Dart/Flutter | pub.dev | https://pub.dev |
-| C#/.NET | NuGet | https://api.nuget.org |
-| Ruby | RubyGems | https://rubygems.org |
-| Java | Maven Central | https://repo.maven.apache.org/maven2 |
+| Language              | Registry                             | URL                                  |
+| --------------------- | ------------------------------------ | ------------------------------------ |
+| Rust                  | crates.io (+ alternative registries) | https://crates.io                    |
+| JavaScript/TypeScript | npm                                  | https://registry.npmjs.org           |
+| Python                | PyPI                                 | https://pypi.org                     |
+| Go                    | Go Proxy                             | https://proxy.golang.org             |
+| PHP                   | Packagist                            | https://packagist.org                |
+| Dart/Flutter          | pub.dev                              | https://pub.dev                      |
+| C#/.NET               | NuGet                                | https://api.nuget.org                |
+| Ruby                  | RubyGems                             | https://rubygems.org                 |
+| Java                  | Maven Central                        | https://repo.maven.apache.org/maven2 |
 
 ### What data does the extension collect?
 
 Depsy:
+
 - Fetches package metadata from public registries
 - Queries OSV.dev API for vulnerability information
 - Caches all data locally on your machine
@@ -764,11 +783,13 @@ Depsy:
 ### How does vulnerability scanning work?
 
 Depsy queries the [OSV.dev](https://osv.dev) API (Google's Open Source Vulnerability database) for each of your dependencies. The results show:
+
 - **Severity levels**: Critical, High, Medium, Low
 - **CVE/Advisory IDs** in hover tooltips
 - **Diagnostic markers** in the editor
 
 Configure minimum severity level with `security.min_severity`:
+
 ```json
 {
   "lsp": {
@@ -786,6 +807,7 @@ Configure minimum severity level with `security.min_severity`:
 ### How do I disable specific features?
 
 Use `initialization_options` in your Zed settings:
+
 ```json
 {
   "lsp": {
@@ -803,6 +825,7 @@ Use `initialization_options` in your Zed settings:
 ### How do I ignore certain packages?
 
 Use the `ignore` setting with glob patterns:
+
 ```json
 {
   "lsp": {
@@ -818,6 +841,7 @@ Use the `ignore` setting with glob patterns:
 ### Why do some packages show "? Unknown"?
 
 This can happen when:
+
 - The package doesn't exist on the registry
 - Network request failed or timed out
 - Registry is temporarily unavailable
@@ -825,9 +849,12 @@ This can happen when:
 
 Check your network connection and verify the package exists on its registry.
 
+While a manifest is open, the language server retries every failed lookup in the background, including packages the registry reports as missing: first after 10 seconds, then less and less often, down to once every 30 minutes. The hint updates by itself once a lookup succeeds; closing and reopening the file is not needed. To stop the background retries for a package that will never resolve, such as a private one, add it to `ignore`
+
 ### Can I see outdated packages without inlay hints?
 
 Yes! Even with inlay hints disabled, diagnostics will highlight outdated dependencies. Enable diagnostics in settings:
+
 ```json
 {
   "lsp": {
@@ -854,6 +881,7 @@ Yes! Even with inlay hints disabled, diagnostics will highlight outdated depende
 ### How do I contribute?
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines. Briefly:
+
 1. Fork the repository
 2. Create a feature branch
 3. Make changes and add tests
@@ -870,6 +898,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines. Briefly:
 ## Contributing
 
 Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed guidelines on:
+
 - Setting up your development environment
 - Code style and standards
 - Adding support for new languages

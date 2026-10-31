@@ -27,7 +27,7 @@ semver = "1.0.27"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 anyhow = "1.0.104"
-rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
 r2d2 = "0.8"
 dirs = "7"
 chrono = { version = "0.4.45", features = ["serde"] }

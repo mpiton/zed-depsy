@@ -28,10 +28,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Alternative Cargo registries are now cached by a digest of their `index_url`
   instead of by registry name, so two projects giving the same name to different
   registries no longer read each other's rows in `cache.db`. A registry name the
-  project does not configure, or configures with an empty `index_url`, is fetched
-  from crates.io and now uses the crates.io key, where it used to write public
-  data under the name a private registry may use. Old `crates:{registry}:{name}`
-  rows are no longer read and are removed by the usual expiry cleanup.
+  project does not configure is fetched from crates.io and now uses the crates.io
+  key, where it used to write public data under the name a private registry may
+  use. A registry declared with an empty `index_url` is ignored and its crates are
+  not looked up, so their names never reach crates.io. Old
+  `crates:{registry}:{name}` rows are no longer read and are removed by the usual
+  expiry cleanup.
 
 ### Fixed
 

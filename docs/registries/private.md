@@ -123,7 +123,9 @@ token = "Bearer my-token-here"
 
 Packages fetched from an alternative Cargo registry, or from a non-default npm or Maven registry, use a key prefixed with a digest of the registry URL (e.g., `{digest}@crates:my-crate`), because the disk cache is shared by all your projects. Two different registries never share rows, even under the same Cargo registry name (trailing slashes and surrounding whitespace in the URL are ignored), and neither the URL nor the registry name is stored in the cache.
 
-A dependency naming a Cargo registry that the project does not configure, or configures with an empty `index_url`, is fetched from crates.io with a warning in the logs. Its data is cached under the crates.io key `crates:my-crate`, so it never reaches a project that configures that registry.
+A dependency naming a Cargo registry that the project does not configure is fetched from crates.io. Its data is cached under the crates.io key `crates:my-crate`, so it never reaches a project that configures that registry. A warning is logged only when that fetch happens: a fresh `crates:my-crate` row, possibly written by another project, is reused without one.
+
+A Cargo registry declared with an empty `index_url` is ignored, with a warning in the logs at startup. Depsy does not look up its crates at all: they may be private, so their names are not sent to crates.io and no crates.io data is shown for them.
 
 ## npm Configuration
 

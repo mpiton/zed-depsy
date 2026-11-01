@@ -183,7 +183,7 @@ impl FileType {
 }
 ```
 
-`fmt_cache_key` is the key of the default registry. If your registry URL can be configured, also add a case to `cache_key_for` in `depsy-lsp/src/backend.rs`. Build its key with `custom_registry_digest(url, default_url)`, which normalizes the URL and returns `None` for a blank or default registry, so the result is `{digest}@crates:my-crate` for an alternative Cargo registry. This keeps projects using different registries from sharing rows in the user-wide cache.
+`fmt_cache_key` is the key of the default registry. If your registry URL can be configured, also add a case to `cache_key_for` in `depsy-lsp/src/backend.rs`. Build its key with `custom_registry_digest(url, default_url)`, which normalizes the URL and returns `None` for the default registry (a blank URL stands for it, unless `default_url` is `None`), so the result is `{digest}@crates:my-crate` for an alternative Cargo registry. This keeps projects using different registries from sharing rows in the user-wide cache.
 
 ### 3.5 Verify
 

@@ -376,7 +376,7 @@ depsy-lsp scan --file <path> [options]
 | `--output <format>` | `-o` | `summary` | Output format: `summary`, `json`, `markdown`, `html` |
 | `--min-severity <level>` | `-m` | `low` | Minimum severity to report: `low`, `medium`, `high`, `critical` |
 | `--fail-on-vulns` | | `true` | Exit with code 1 if vulnerabilities are found |
-| `--no-use-lockfile` | | (off) | Disable lockfile-based scanning. By default, when a sibling lockfile from one of the wired ecosystems is present, the scanner walks the full dependency graph; this flag restricts it to direct dependencies only. Lockfiles with full graph support today: `Cargo.lock`, `package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, `poetry.lock`, `uv.lock`, `Pipfile.lock`, `composer.lock`, `Gemfile.lock`. Lockfiles detected but currently treated as empty graphs: `bun.lock`, `pdm.lock`. Go (`go.sum`), Dart (`pubspec.lock`), .NET (`packages.lock.json`), and Maven have no lockfile graph parser yet. |
+| `--no-use-lockfile` | | (off) | Disable lockfile-based scanning. By default, when a sibling lockfile from one of the wired ecosystems is present, the scanner walks the full dependency graph; this flag restricts it to direct dependencies only. Lockfiles with full graph support today: `Cargo.lock`, `package-lock.json`, `yarn.lock` (Yarn Classic only, not Yarn Berry), `pnpm-lock.yaml`, `poetry.lock`, `uv.lock`, `composer.lock`, `Gemfile.lock`. A typical `Pipfile.lock` records no edges between its packages, so transitive dependencies are not scanned from it. Lockfiles detected but currently treated as empty graphs: `bun.lock`, `pdm.lock`. Go (`go.sum`), Dart (`pubspec.lock`), .NET (`packages.lock.json`), and Maven have no lockfile graph parser yet. |
 
 #### Supported Files
 
@@ -626,7 +626,7 @@ security-scan:
 - Known updates not appearing
 
 **Solutions:**
-1. Cache automatically refreshes after 1 hour (default TTL)
+1. While a manifest is open, data past its 1-hour lifetime is fetched again in the background, and the hints update by themselves. Refresh checks run every 10 seconds
 2. Clear cache manually to force refresh:
    ```bash
    rm -rf ~/.cache/depsy/
@@ -704,7 +704,7 @@ Depsy uses a hybrid caching system:
   - macOS: `~/Library/Caches/depsy/cache.db`
   - Windows: `%LOCALAPPDATA%\depsy\cache.db`
 
-Cache entries expire after 1 hour by default (configurable via `cache.ttl_secs`). Vulnerability data is cached for 6 hours. When you open a dependency file, cached data is used immediately while fresh data is fetched in the background.
+Cache entries expire after 1 hour by default (configurable via `cache.ttl_secs`), then stay available for 7 days as a fallback. Vulnerability data is cached for 6 hours. While a dependency file is open, cached data is shown immediately and expired data is fetched again in the background.
 
 ### How do I clear the cache?
 
@@ -723,20 +723,7 @@ Then restart Zed. The cache will rebuild as you open dependency files.
 
 ### Can I use this offline?
 
-Yes, with limitations. If packages were previously cached, their information remains available offline until the cache expires. New packages or those not in cache won't have version information. For fully offline work, consider increasing the cache TTL:
-```json
-{
-  "lsp": {
-    "depsy": {
-      "initialization_options": {
-        "cache": {
-          "ttl_secs": 86400
-        }
-      }
-    }
-  }
-}
-```
+Yes, with limitations. Cached packages stay available offline for 7 days after their cache lifetime ends (`cache.ttl_secs`, 1 hour by default), shown as they were last fetched. That window is not configurable. New packages or those not in cache won't have version information, and update code actions need data within that lifetime.
 
 ### Which package registries are supported?
 
@@ -824,6 +811,8 @@ This can happen when:
 - Package name has a typo
 
 Check your network connection and verify the package exists on its registry.
+
+While a manifest is open, the language server periodically retries every failed lookup in the background, including packages the registry reports as missing. Refresh checks run every 10 seconds; repeated failures then back off from 10 seconds up to 30 minutes. The hint updates by itself once a lookup succeeds; closing and reopening the file is not needed. To stop the background retries for a package that will never resolve, such as a private one, add it to `ignore`.
 
 ### Can I see outdated packages without inlay hints?
 

@@ -17,6 +17,32 @@ use crate::registries::VersionInfo;
 /// Default TTL for cache entries (1 hour)
 const DEFAULT_TTL_SECS: i64 = 3600;
 
+/// The upsert's SQL text shared by `UPSERT_SQL` and `UPSERT_RETURNING_SQL`
+macro_rules! upsert_sql {
+    () => {
+        "INSERT INTO packages (key, data, inserted_at, ttl_secs) VALUES (?, ?, ?, ?) \
+         ON CONFLICT(key) DO UPDATE SET \
+            data = excluded.data, \
+            inserted_at = excluded.inserted_at, \
+            ttl_secs = excluded.ttl_secs \
+         WHERE excluded.inserted_at >= packages.inserted_at"
+    };
+}
+
+/// Writes one entry
+/// A row only replaces one written at the same time or earlier
+/// so a write that was submitted first but committed last (another task, or another editor window sharing the file)
+/// cannot put older registry data back
+const UPSERT_SQL: &str = upsert_sql!();
+
+/// [`UPSERT_SQL`] returning a row only when it wrote one
+const UPSERT_RETURNING_SQL: &str = concat!(upsert_sql!(), " RETURNING 1");
+
+/// Deletes the rows past their TTL and past the stale window
+///
+/// Bound to the stale window in seconds, [`NANOS_PER_SEC`] and the current time
+const EVICT_SQL: &str = "DELETE FROM packages WHERE inserted_at + (ttl_secs + ?) * ? < ?";
+
 #[cfg(test)]
 static TEST_DB_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -35,6 +61,8 @@ pub struct SqliteCacheConfig {
     pub cache_size_kb: i64,
     /// Time-to-live for cache entries in seconds
     pub ttl_secs: i64,
+    /// Seconds an entry is kept after its TTL, served by [`ReadCache::get_stale`] until refetched
+    pub stale_secs: i64,
 }
 
 impl Default for SqliteCacheConfig {
@@ -46,6 +74,7 @@ impl Default for SqliteCacheConfig {
             busy_timeout_ms: 5000,
             cache_size_kb: 64000,
             ttl_secs: DEFAULT_TTL_SECS,
+            stale_secs: super::STALE_FOR.as_secs() as i64,
         }
     }
 }
@@ -55,6 +84,7 @@ pub struct SqliteCache {
     pool: Arc<Pool<SqliteConnectionManager>>,
     /// TTL stored with the rows written from now on, see [`Self::set_ttl`]
     ttl_secs: AtomicI64,
+    stale_secs: i64,
 }
 
 impl SqliteCache {
@@ -98,6 +128,7 @@ impl SqliteCache {
         let cache = Self {
             pool: Arc::new(pool),
             ttl_secs: AtomicI64::new(config.ttl_secs),
+            stale_secs: config.stale_secs,
         };
 
         cache.init_schema()?;
@@ -106,10 +137,7 @@ impl SqliteCache {
         {
             let conn = cache.pool.get()?;
             let now = current_timestamp();
-            conn.execute(
-                "DELETE FROM packages WHERE inserted_at + ttl_secs * ? < ?",
-                params![NANOS_PER_SEC, now],
-            )?;
+            conn.execute(EVICT_SQL, params![cache.stale_secs, NANOS_PER_SEC, now])?;
         }
 
         let state = cache.pool_state();
@@ -129,9 +157,13 @@ impl SqliteCache {
     /// conflicts between tests.
     #[cfg(test)]
     pub fn in_memory() -> anyhow::Result<Self> {
+        Self::in_memory_with_config(SqliteCacheConfig::default())
+    }
+
+    #[cfg(test)]
+    pub fn in_memory_with_config(config: SqliteCacheConfig) -> anyhow::Result<Self> {
         let db_id = TEST_DB_COUNTER.fetch_add(1, Ordering::SeqCst);
         let uri = format!("file:memdb{db_id}?mode=memory&cache=shared");
-        let config = SqliteCacheConfig::default();
 
         let manager = SqliteConnectionManager::in_memory(&uri);
 
@@ -140,6 +172,7 @@ impl SqliteCache {
         let cache = Self {
             pool: Arc::new(pool),
             ttl_secs: AtomicI64::new(config.ttl_secs),
+            stale_secs: config.stale_secs,
         };
 
         cache.init_schema_memory()?;
@@ -203,36 +236,12 @@ impl SqliteCache {
 
 impl ReadCache for SqliteCache {
     async fn get(&self, key: &str) -> Option<VersionInfo> {
-        let pool = Arc::clone(&self.pool);
-        let key = key.to_string();
-        // spawn_blocking offloads the blocking rusqlite work to the dedicated
-        // blocking thread pool, keeping the tokio event loop responsive.
-        // Note: spawn_blocking tasks are not cancelable; if the future is
-        // dropped, the closure still runs to completion. Acceptable here:
-        // DB ops are short and worst-case is a stale entry being deleted.
-        tokio::task::spawn_blocking(move || {
-            let conn = pool.get().ok()?;
-            let now = current_timestamp();
-            let result: Result<(String, i64, i64), _> = conn.query_row(
-                "SELECT data, inserted_at, ttl_secs FROM packages WHERE key = ?",
-                [key.as_str()],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            );
-            match result {
-                Ok((data, inserted_at, ttl_secs)) => {
-                    if now > inserted_at + ttl_secs * NANOS_PER_SEC {
-                        let _ = conn.execute("DELETE FROM packages WHERE key = ?", [key.as_str()]);
-                        None
-                    } else {
-                        serde_json::from_str(&data).ok()
-                    }
-                }
-                Err(_) => None,
-            }
-        })
-        .await
-        .ok()
-        .flatten()
+        self.read(key, false).await.map(|row| row.value)
+    }
+
+    /// Value for `key` until its stale window ends, fresh or not
+    async fn get_stale(&self, key: &str) -> Option<VersionInfo> {
+        self.read(key, true).await.map(|row| row.value)
     }
 
     async fn contains(&self, key: &str) -> bool {
@@ -280,15 +289,7 @@ impl WriteCache for SqliteCache {
                 Ok(d) => d,
                 Err(_) => return,
             };
-            let _ = conn.execute(
-                "INSERT INTO packages (key, data, inserted_at, ttl_secs) VALUES (?, ?, ?, ?) \
-                 ON CONFLICT(key) DO UPDATE SET \
-                   data = excluded.data, \
-                   inserted_at = excluded.inserted_at, \
-                   ttl_secs = excluded.ttl_secs \
-                 WHERE excluded.inserted_at >= packages.inserted_at",
-                params![key, data, now, ttl_secs],
-            );
+            let _ = conn.execute(UPSERT_SQL, params![key, data, now, ttl_secs]);
         })
         .await;
     }
@@ -318,32 +319,87 @@ impl WriteCache for SqliteCache {
 }
 
 impl SqliteCache {
+    /// Row for `key`: fresh only or also stale with `allow_stale`
+    ///
+    /// A row past its stale window is left for [`Self::cleanup_expired`]
+    pub(crate) async fn read(&self, key: &str, allow_stale: bool) -> Option<StoredRow> {
+        let pool = Arc::clone(&self.pool);
+        let key = key.to_string();
+        let stale_secs = self.stale_secs;
+        // spawn_blocking offloads the blocking rusqlite work to the dedicated blocking thread pool
+        // keeping the tokio event loop responsive
+        // Note: spawn_blocking tasks are not cancelable if the future is dropped
+        // the closure still runs to completion
+        // Acceptable here: this is a short read and nothing is written
+        tokio::task::spawn_blocking(move || {
+            let conn = pool.get().ok()?;
+            let now = current_timestamp();
+            let (data, inserted_at, ttl_secs): (String, i64, i64) = conn
+                .query_row(
+                    "SELECT data, inserted_at, ttl_secs FROM packages WHERE key = ?",
+                    [key.as_str()],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .ok()?;
+            let fresh = now <= inserted_at + ttl_secs * NANOS_PER_SEC;
+            let in_stale_window = now <= inserted_at + (ttl_secs + stale_secs) * NANOS_PER_SEC;
+            if !(fresh || allow_stale && in_stale_window) {
+                return None;
+            }
+            let age = Duration::from_nanos(u64::try_from(now - inserted_at).unwrap_or(0));
+            serde_json::from_str(&data)
+                .ok()
+                .map(|value| StoredRow { value, age, fresh })
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+
     /// Insert multiple values in a single transaction
-    #[cfg(test)]
-    pub async fn insert_batch(&self, entries: Vec<(String, VersionInfo)>) -> anyhow::Result<usize> {
+    ///
+    /// Each value is stored as fetched at its own time
+    /// A row fetched later by another task or another editor window is kept
+    /// the keys of those rows are returned so the caller can drop the older value it holds in memory
+    pub async fn insert_batch(
+        &self,
+        entries: Vec<(String, VersionInfo, SystemTime)>,
+    ) -> anyhow::Result<Vec<String>> {
         if entries.is_empty() {
-            return Ok(0);
+            return Ok(Vec::new());
         }
 
         let pool = Arc::clone(&self.pool);
         let ttl_secs = self.ttl_secs.load(Ordering::Relaxed);
-        tokio::task::spawn_blocking(move || -> anyhow::Result<usize> {
+        tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<String>> {
+            // Serialized before the transaction starts, so the write lock is held for the writes only
+            let rows = entries
+                .into_iter()
+                .map(|(key, value, fetched_at)| {
+                    Ok((key, serde_json::to_string(&value)?, timestamp(fetched_at)))
+                })
+                .collect::<anyhow::Result<Vec<_>>>()?;
             let mut conn = pool.get()?;
-            let tx = conn.transaction()?;
-            let now = current_timestamp();
-            let mut count = 0;
-
-            for (key, value) in entries {
-                let data = serde_json::to_string(&value)?;
-                tx.execute(
-                    "INSERT OR REPLACE INTO packages (key, data, inserted_at, ttl_secs) VALUES (?, ?, ?, ?)",
-                    params![key, data, now, ttl_secs],
-                )?;
-                count += 1;
+            // IMMEDIATE takes the write lock up front, waiting out `busy_timeout` if another window holds it
+            // instead of failing on the first write
+            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let mut superseded = Vec::new();
+            {
+                // RETURNING yields a row only when the upsert wrote one
+                let mut upsert = tx.prepare_cached(UPSERT_RETURNING_SQL)?;
+                for (key, data, fetched_at) in rows {
+                    let written = upsert
+                        .query(params![key, data, fetched_at, ttl_secs])?
+                        .next()?
+                        .is_some();
+                    if !written {
+                        superseded.push(key);
+                    }
+                }
             }
 
             tx.commit()?;
-            Ok(count)
+            Ok(superseded)
         })
         .await
         .map_err(|e| anyhow::anyhow!("spawn_blocking join error: {e}"))?
@@ -366,6 +422,14 @@ impl SqliteCache {
         .unwrap_or(false)
     }
 
+    /// Makes every later write fail
+    #[cfg(test)]
+    pub(crate) fn drop_table_for_test(&self) {
+        let conn = self.pool.get().expect("test connection");
+        conn.execute("DROP TABLE packages", [])
+            .expect("drop test table");
+    }
+
     /// Clear all entries from the cache, returning the count
     #[cfg(test)]
     pub async fn clear_with_count(&self) -> anyhow::Result<usize> {
@@ -379,16 +443,14 @@ impl SqliteCache {
         .map_err(|e| anyhow::anyhow!("spawn_blocking join error: {e}"))?
     }
 
-    /// Remove expired entries from the cache
+    /// Remove the entries that are past their TTL and past the stale window
     pub async fn cleanup_expired(&self) -> anyhow::Result<usize> {
         let pool = Arc::clone(&self.pool);
+        let stale_secs = self.stale_secs;
         tokio::task::spawn_blocking(move || -> anyhow::Result<usize> {
             let conn = pool.get()?;
             let now = current_timestamp();
-            let rows = conn.execute(
-                "DELETE FROM packages WHERE inserted_at + ttl_secs * ? < ?",
-                params![NANOS_PER_SEC, now],
-            )?;
+            let rows = conn.execute(EVICT_SQL, params![stale_secs, NANOS_PER_SEC, now])?;
             Ok(rows)
         })
         .await
@@ -403,6 +465,16 @@ impl SqliteCache {
             idle_connections: state.idle_connections,
         }
     }
+}
+
+/// Row read from the cache
+pub(crate) struct StoredRow {
+    /// The cached value
+    pub(crate) value: VersionInfo,
+    /// How long ago the value was fetched
+    pub(crate) age: Duration,
+    /// Whether the row is still within its TTL
+    pub(crate) fresh: bool,
 }
 
 /// Pool statistics for monitoring
@@ -422,7 +494,11 @@ pub struct PoolState {
 /// allowing a late-finishing older write to clobber a newer value that landed
 /// first. i64 nanoseconds since UNIX_EPOCH overflow at year 2262.
 fn current_timestamp() -> i64 {
-    let nanos = SystemTime::now()
+    timestamp(SystemTime::now())
+}
+
+fn timestamp(time: SystemTime) -> i64 {
+    let nanos = time
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
@@ -536,16 +612,16 @@ mod tests {
     async fn test_insert_batch() {
         let cache = SqliteCache::in_memory().unwrap();
 
-        let entries: Vec<(String, VersionInfo)> = (0..10)
+        let entries: Vec<(String, VersionInfo, SystemTime)> = (0..10)
             .map(|i| {
                 let mut info = create_test_version_info();
                 info.latest = Some(format!("{i}.0.0"));
-                (format!("pkg{i}"), info)
+                (format!("pkg{i}"), info, SystemTime::now())
             })
             .collect();
 
-        let count = cache.insert_batch(entries).await.unwrap();
-        assert_eq!(count, 10);
+        let superseded = cache.insert_batch(entries).await.unwrap();
+        assert!(superseded.is_empty());
 
         for i in 0..10 {
             let retrieved = cache.get(&format!("pkg{i}")).await.unwrap();
@@ -556,8 +632,115 @@ mod tests {
     #[tokio::test]
     async fn test_insert_batch_empty() {
         let cache = SqliteCache::in_memory().unwrap();
-        let count = cache.insert_batch(vec![]).await.unwrap();
-        assert_eq!(count, 0);
+        let superseded = cache.insert_batch(vec![]).await.unwrap();
+        assert!(superseded.is_empty());
+    }
+
+    #[tokio::test]
+    async fn insert_batch_does_not_replace_a_newer_row() {
+        // Given a row written later than the batch (another window committed first)
+        let cache = SqliteCache::in_memory().unwrap();
+        {
+            let conn = cache.pool.get().unwrap();
+            conn.execute(
+                    "INSERT INTO packages (key, data, inserted_at, ttl_secs) VALUES ('newer', ?, ?, 3600)",
+                    params![
+                        serde_json::to_string(&create_test_version_info()).unwrap(),
+                        i64::MAX / 2
+                    ],
+                )
+                .unwrap();
+        }
+        let mut stale = create_test_version_info();
+        stale.latest = Some("0.0.1".to_string());
+
+        // When the batch writes both keys
+        let superseded = cache
+            .insert_batch(vec![
+                ("newer".to_string(), stale.clone(), SystemTime::now()),
+                ("fresh".to_string(), stale, SystemTime::now()),
+            ])
+            .await
+            .unwrap();
+
+        // Then the newer row keeps its data and is reported, and the other one is written
+        assert_eq!(superseded, vec!["newer".to_string()]);
+        let conn = cache.pool.get().unwrap();
+        let latest = |key: &str| -> String {
+            let data: String = conn
+                .query_row("SELECT data FROM packages WHERE key = ?", [key], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            serde_json::from_str::<VersionInfo>(&data)
+                .unwrap()
+                .latest
+                .unwrap()
+        };
+        assert_eq!(latest("newer"), "1.0.0");
+        assert_eq!(latest("fresh"), "0.0.1");
+    }
+
+    #[tokio::test]
+    async fn a_read_past_the_stale_window_leaves_the_row_for_cleanup() {
+        // Given a row past its TTL and its stale window
+        let cache = SqliteCache::in_memory_with_config(SqliteCacheConfig {
+            ttl_secs: 60,
+            stale_secs: 60,
+            ..Default::default()
+        })
+        .unwrap();
+        let fetched_at = SystemTime::now() - Duration::from_secs(180);
+        cache
+            .insert_batch(vec![(
+                "key".to_string(),
+                create_test_version_info(),
+                fetched_at,
+            )])
+            .await
+            .unwrap();
+
+        // When it is read, it is not served
+        assert!(cache.get("key").await.is_none());
+        assert!(cache.get_stale("key").await.is_none());
+
+        // Then reads wrote nothing, and cleanup is what removes it
+        assert_eq!(cache.cleanup_expired().await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn opening_the_database_purges_only_rows_past_the_stale_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cache.db");
+        let open = |stale_secs| {
+            SqliteCache::with_path_and_config(
+                path.clone(),
+                SqliteCacheConfig {
+                    ttl_secs: 60,
+                    stale_secs,
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+        };
+
+        // Given a row fetched 90 s ago with a 60 s TTL
+        let fetched_at = SystemTime::now() - Duration::from_secs(90);
+        open(3600)
+            .insert_batch(vec![(
+                "key".to_string(),
+                create_test_version_info(),
+                fetched_at,
+            )])
+            .await
+            .unwrap();
+
+        // Then a restart within the stale window keeps it
+        assert!(open(3600).get_stale("key").await.is_some());
+
+        // And a restart past the window deletes the row, even for a later reader with a longer window
+        drop(open(0));
+        assert!(open(3600).get_stale("key").await.is_none());
     }
 
     #[test]

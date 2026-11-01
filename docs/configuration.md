@@ -106,7 +106,7 @@ Configure Depsy in your Zed `settings.json`:
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `cache.ttl_secs` | number | `3600` | Version cache time-to-live in seconds (1 hour default). Values outside 60–315360000 (10 years) are clamped, with a warning in the log. Applies to entries fetched from then on: existing entries keep the TTL they were written with, and an expired entry is fetched again the next time its manifest is processed |
+| `cache.ttl_secs` | number | `3600` | Version cache time-to-live in seconds (1 hour default). Values outside 60–315360000 (10 years) are clamped, with a warning in the log. Applies to entries fetched from then on: existing entries keep the TTL they were written with, and an expired entry is fetched again in the background while a manifest that uses it is open |
 | `cache.debounce_ms` | number | `200` | Debounce delay for file change notifications (ms) |
 
 **Example:**
@@ -287,21 +287,7 @@ Then restart Zed. The cache will rebuild as you open dependency files.
 
 ### Offline Work
 
-For working offline, increase the cache TTL:
-
-```json
-{
-  "lsp": {
-    "depsy": {
-      "initialization_options": {
-        "cache": {
-          "ttl_secs": 86400
-        }
-      }
-    }
-  }
-}
-```
+Cached registry data stays available offline for 7 days after its lifetime ends (`cache.ttl_secs`, 1 hour by default), shown as it was last fetched. That window is not configurable. Update code actions need data within that lifetime, so they are not offered on older data.
 
 ### Noisy Projects
 

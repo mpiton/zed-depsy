@@ -144,7 +144,7 @@ sequenceDiagram
 ### Key invariants
 
 - **Debounce** (coalescing rapid keystrokes into one delayed action): every `didChange` writes the new content into `pending_changes`, aborts the previous `JoinHandle`, and spawns a fresh task. After sleeping 200 ms the task verifies *its* content is still the value in `pending_changes` (an equality check on the buffered text) — if a newer keystroke arrived, that buffer was overwritten and this task exits without doing work. An `Arc<AtomicU64>` generation counter is used independently to clean up the per-URI `debounce_tasks` slot via `remove_if(stored_gen == generation)`. Full rationale in [§11 Key Design Decisions](#11-key-design-decisions).
-- **Per-document bounded concurrency:** each `process_document` call constructs its own `tokio::sync::Semaphore::new(5)` inline (`backend.rs`) — it is **not** a field of `ProcessingContext` and does **not** cap *global* registry traffic. The cap is per-document: a single document is limited to 5 concurrent registry fetches; multiple documents being processed in parallel each get their own semaphore.
+- **Per-document bounded concurrency:** each `process_document` call fetches through `fetch_versions` (`backend.rs`), a `buffer_unordered` stream limited to `FETCH_CONCURRENCY` (5) requests. It does **not** cap *global* registry traffic: a single document is limited to 5 concurrent registry fetches, and documents processed in parallel each get their own limit. The fetch runs in its own spawned task, so a newer edit aborting the pass does not lose the responses.
 - **Vulnerabilities never block hints:** the vuln path is a separate `tokio::spawn`. Inlay hints publish first; vulnerability diagnostics arrive in a second pass.
 - **Document state lives in `Arc<DashMap<Url, DocumentState>>`** — `DashMap` shards are independently locked, so two handlers reading different URIs never block each other. Handlers snapshot the fields they need into locals and drop the `Ref` (the `DashMap` shard reference) before any `await`, since shard references are not `Send`.
 
@@ -286,7 +286,7 @@ There is no HTTP-level cache. Caching happens at the application layer (see [§7
 
 ### Bounded concurrency
 
-`process_document` builds a `tokio::sync::Semaphore::new(5)` per request (created inline; not a field of `ProcessingContext`) and acquires a permit before each `get_version_info` call. Five in-flight requests is enough to saturate a slow-path lockfile while staying polite to public registries. For per-registry rate limits and HTTP API details see [Registries]({% link registries/index.md %}).
+`fetch_versions` runs at most `FETCH_CONCURRENCY` (5) registry requests at once, through `buffer_unordered`; each document pass and each background refresh tick has its own limit. Five in-flight requests is enough to saturate a slow-path lockfile while staying polite to public registries. For per-registry rate limits and HTTP API details see [Registries]({% link registries/index.md %}).
 
 ### Per-ecosystem clients
 
@@ -342,6 +342,17 @@ Two-tier read-through, write-through cache (`depsy-lsp/src/cache/mod.rs`):
 - **L2 = `SqliteCache`** — `r2d2::Pool<SqliteConnectionManager>` over `~/.cache/depsy/cache.db`. Schema: `packages(key TEXT PRIMARY KEY, data TEXT, inserted_at INTEGER, ttl_secs INTEGER)`. WAL journal. Index on `(inserted_at, ttl_secs)` for bulk expiry deletes. All DB calls offloaded to `tokio::task::spawn_blocking` — never block the runtime.
 
 Read path: check L1 → on miss, read L2 → on hit, write back to L1. Write path: write to both layers simultaneously.
+
+Past its TTL an entry stays readable for `STALE_FOR` (7 days). `get` and `contains` only accept live entries, `get_stale` also returns expired ones. Hints, diagnostics, completion and a hover whose registry request failed read stale data; update code actions do not, because they write the version to the manifest. Expired rows are only deleted by the cleanup sweep once the 7 days have passed, never on read. Writes carry the time their fetch started, so a slow response cannot replace a row from a later fetch, in this window or another.
+
+### Background refresh
+
+`spawn_refresh_task` (`depsy-lsp/src/backend/refresh.rs`) starts on `initialized`, stops on `shutdown` and ticks every 10 seconds. Each tick:
+
+- refetches the registry packages of open documents with no live entry, skipping local and ignored dependencies. Responses are cached and published as they arrive, so one slow registry does not hold back the others. A package another code path fetched meanwhile republishes the documents using it;
+- queries OSV again for open documents with a dependency whose `VulnerabilityCache` result expired, unless `security.enabled` is off, because readers drop the advisories of a version with no live result.
+
+A failed lookup waits 10 seconds, doubling up to 30 minutes; registry failures back off per package and OSV failures per document. A panic inside a tick is logged and the next tick still runs.
 
 ### `VulnerabilityCache` — OSV results
 
@@ -527,7 +538,7 @@ This section captures non-obvious choices and their rationale. Each subsection a
 
 ### Bounded concurrency at 5
 
-**Choice:** `Semaphore::new(5)` for registry calls and for OSV `/vulns/{id}` fan-out.
+**Choice:** `FETCH_CONCURRENCY` (5, through `buffer_unordered`) for registry calls and `Semaphore::new(5)` for OSV `/vulns/{id}` fan-out.
 
 **Why 5?** Empirically: 1 is too slow for a fresh lockfile, 20 starts to draw rate-limit warnings from public registries (especially npm). Five hits the sweet spot for a "I just opened a project" flood while staying under any sane limit.
 

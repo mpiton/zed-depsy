@@ -1786,4 +1786,56 @@ mod tests {
 
         assert!(actions.is_empty());
     }
+
+    #[tokio::test]
+    async fn expired_data_offers_no_update_action() {
+        // Given two outdated packages whose data is past its TTL
+        let cache = MemoryCache::with_ttl_and_stale(
+            std::time::Duration::ZERO,
+            std::time::Duration::from_secs(3600),
+        );
+        for key in ["test:serde", "test:tokio"] {
+            cache
+                .insert(
+                    key.to_string(),
+                    VersionInfo {
+                        latest: Some("2.0.0".to_string()),
+                        ..Default::default()
+                    },
+                )
+                .await;
+        }
+        let deps = vec![
+            create_test_dependency("serde", "1.0.0", 1),
+            create_test_dependency("tokio", "1.0.0", 2),
+        ];
+        let uri = Url::parse("file:///test/Cargo.toml").unwrap();
+        let range = Range {
+            start: Position {
+                line: 0,
+                character: 0,
+            },
+            end: Position {
+                line: 10,
+                character: 0,
+            },
+        };
+
+        // When code actions are requested
+        let actions = create_code_actions(
+            &deps,
+            &cache,
+            &uri,
+            range,
+            FileType::Cargo,
+            |name| format!("test:{name}"),
+            &[],
+            None,
+            None,
+        )
+        .await;
+
+        // Then neither the single nor the bulk update writes an old version to the manifest
+        assert!(actions.is_empty());
+    }
 }

@@ -123,7 +123,7 @@ token = "Bearer my-token-here"
 
 Alternative registry dependencies use namespaced cache keys (e.g., `crates:my-registry:my-crate`) to prevent collisions with crates.io packages that may share the same name.
 
-npm and Maven packages fetched from a non-default registry use a key prefixed with a digest of the registry URL, because the disk cache is shared by all your projects. Two registry URLs never share rows, and the URL itself is not stored in the cache.
+npm and Maven packages fetched from a non-default registry use a key prefixed with a digest of the registry URL, because the disk cache is shared by all your projects. Two different registries never share rows (trailing slashes and surrounding whitespace in the URL are ignored), and the URL itself is not stored in the cache.
 
 ## npm Configuration
 

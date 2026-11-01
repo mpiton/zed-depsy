@@ -183,6 +183,8 @@ impl FileType {
 }
 ```
 
+`fmt_cache_key` is the key of the default registry. If your registry URL can be configured, also add a case to `cache_key_for` in `depsy-lsp/src/backend.rs`. Build its key with `custom_registry_digest(url, default_url)`, which normalizes the URL and returns `None` for a blank or default registry, so the result is `{digest}@npm:lodash` for a custom npm registry. This keeps projects using different registries from sharing rows in the user-wide cache.
+
 ### 3.5 Verify
 
 Add a unit test in `file_types.rs` (under the existing `#[cfg(test)] mod tests`). Note that `fmt_cache_key` returns an `impl Display`, so call `.to_string()` on it (or use the `cache_key` convenience wrapper):

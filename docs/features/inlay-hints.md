@@ -149,7 +149,7 @@ Hovering over any dependency reveals detailed information:
 
 ### Stale Hints
 
-1. Wait for cache TTL to expire (default: 1 hour)
+1. Keep the manifest open: data past its 1-hour lifetime is fetched again in the background, and the hints update by themselves
 2. Clear the cache manually:
    ```bash
    rm -rf ~/.cache/depsy/

@@ -28,6 +28,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ([#412](https://github.com/mpiton/zed-depsy/pull/412)).
 - Closing a manifest while its dependencies are still being fetched no
   longer lets that fetch put the document back into the server state.
+- A dependency whose registry fetch failed no longer stays `? Unknown` until
+  the manifest is closed and reopened. The language server retries every
+  failed fetch in the background: network errors, timeouts and rate limits,
+  and also packages the registry reports as missing, since a package that was
+  just published or a private registry that was just configured can answer
+  later. Refresh checks run every 10 seconds while a manifest that uses the
+  package is open; repeated failures back off from 10 seconds up to 30 minutes
+- Hints and diagnostics no longer turn `? Unknown` an hour after a manifest
+  was opened. Registry data past its one-hour cache lifetime is still shown,
+  for up to 7 days, while the language server fetches it again. Update code
+  actions still need data less than an hour old
+- Vulnerabilities no longer disappear from a manifest left open past the
+  6-hour lifetime of their OSV result. The language server queries OSV again
+  in the background, and a failed query is retried with the same backoff
+- A registry response that arrives after a newer one for the same package, from
+  this window or another, no longer replaces the newer data in the cache
+
+### Changed
+
+- The registry data fetched for a manifest is written to the disk cache in one
+  SQLite transaction instead of one per package
 
 ## [2.1.1] - 2026-10-05
 

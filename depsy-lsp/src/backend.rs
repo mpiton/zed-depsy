@@ -43,13 +43,14 @@ use std::{
 };
 
 use dashmap::DashMap;
+use futures::stream::{self, Stream, StreamExt};
 use hashbrown::{HashMap, HashSet};
 use reqwest::Client as HttpClient;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
 
-use crate::cache::{HybridCache, ReadCache, WriteCache};
+use crate::cache::{HybridCache, ReadCache};
 use crate::config::Config;
 use crate::document::DocumentState;
 use crate::file_types::{FileType, is_pnpm_workspace};
@@ -94,6 +95,11 @@ use crate::{
     reports::fmt_markdown_report,
 };
 
+mod refresh;
+
+/// Registry requests one document pass or background refresh runs at once.
+const FETCH_CONCURRENCY: usize = 5;
+
 /// Walk parents of `file_path` looking for a `.zed/` directory.
 /// Returns the first ancestor that contains it, or `None` if no ancestor has `.zed/`.
 ///
@@ -120,10 +126,14 @@ async fn find_workspace_root(file_path: &std::path::Path) -> Option<std::path::P
 /// For Cargo deps with `registry = "name"`, the key is `crates:{registry}:{name}` to avoid
 /// collisions between crates.io and private registries. All other deps use the standard key.
 fn dep_cache_key(dep: &crate::parsers::Dependency, file_type: FileType) -> String {
-    let dep_name = &*dep.name;
-    match (dep.registry.as_deref(), file_type) {
-        (Some(registry), FileType::Cargo) => format!("crates:{registry}:{dep_name}"),
-        _ => file_type.cache_key(dep_name),
+    cache_key_for(file_type, &dep.name, dep.registry.as_deref())
+}
+
+/// Compute cache key for package `name`, from the alternative Cargo `registry` if it has one.
+fn cache_key_for(file_type: FileType, name: &str, registry: Option<&str>) -> String {
+    match (registry, file_type) {
+        (Some(registry), FileType::Cargo) => format!("crates:{registry}:{name}"),
+        _ => file_type.cache_key(name),
     }
 }
 
@@ -146,6 +156,11 @@ impl DocPasses {
         self.claims.remove(uri);
     }
 
+    /// The pass that owns `uri`, if the document is still claimed.
+    fn current(&self, uri: &Url) -> Option<u64> {
+        self.claims.get(uri).as_deref().copied()
+    }
+
     fn if_current(&self, uri: &Url, pass: u64, write: impl FnOnce()) -> bool {
         let claim = self.claims.get(uri);
         let is_current = claim.as_deref().is_some_and(|current| *current == pass);
@@ -153,6 +168,26 @@ impl DocPasses {
             write();
         }
         is_current
+    }
+}
+
+/// A package to fetch from its registry.
+#[derive(Clone)]
+struct FetchTarget {
+    key: String,
+    file_type: FileType,
+    name: String,
+    registry: Option<String>,
+}
+
+impl FetchTarget {
+    fn of(dep: &crate::parsers::Dependency, file_type: FileType) -> Self {
+        Self {
+            key: dep_cache_key(dep, file_type),
+            file_type,
+            name: dep.name.clone(),
+            registry: dep.registry.clone(),
+        }
     }
 }
 
@@ -263,100 +298,15 @@ impl ProcessingContext {
             uri.path()
         );
 
-        // Clone Arc references for async tasks
-        let crates_io = Arc::clone(&self.crates_io);
-        let cargo_custom_registries = Arc::clone(&self.cargo_custom_registries);
-        let npm_registry = Arc::clone(&self.npm_registry);
-        let pypi = Arc::clone(&self.pypi);
-        let go_proxy = Arc::clone(&self.go_proxy);
-        let packagist = Arc::clone(&self.packagist);
-        let pub_dev = Arc::clone(&self.pub_dev);
-        let nuget = Arc::clone(&self.nuget);
-        let rubygems = Arc::clone(&self.rubygems);
-        let maven_central = Arc::clone(&self.maven_central);
-        let cache = Arc::clone(&self.version_cache);
-
-        let fetch_tasks: Vec<_> = dependencies
+        // Spawned so a newer edit aborting this pass does not lose the responses:
+        // the fetch and its cache write finish on their own
+        let targets = dependencies
             .iter()
-            .map(|dep| {
-                let name = dep.name.clone();
-                let registry = dep.registry.clone();
-                let cache_key = dep_cache_key(dep, file_type);
-                let crates_io = Arc::clone(&crates_io);
-                let cargo_custom_registries = Arc::clone(&cargo_custom_registries);
-                let npm_registry = Arc::clone(&npm_registry);
-                let pypi = Arc::clone(&pypi);
-                let go_proxy = Arc::clone(&go_proxy);
-                let packagist = Arc::clone(&packagist);
-                let pub_dev = Arc::clone(&pub_dev);
-                let nuget = Arc::clone(&nuget);
-                let rubygems = Arc::clone(&rubygems);
-                let maven_central = Arc::clone(&maven_central);
-                let cache = Arc::clone(&cache);
-                async move {
-                    // Check cache first
-                    if cache.contains(&cache_key).await {
-                        tracing::debug!("Cache hit for '{name}' (key: {cache_key})");
-                        return;
-                    }
-                    tracing::debug!("Cache miss for '{name}' (key: {cache_key}), fetching from registry {registry:?}");
-                    // Fetch from appropriate registry
-                    let result = match file_type {
-                        FileType::Cargo => {
-                            if let Some(ref reg_name) = registry {
-                                if let Some(reg) = cargo_custom_registries.get(reg_name) {
-                                    reg.get_version_info(&name).await
-                                } else {
-                                    tracing::warn!(
-                                        "Unknown Cargo registry '{reg_name}' for package '{name}', falling back to crates.io",
-                                    );
-                                    crates_io.get_version_info(&name).await
-                                }
-                            } else {
-                                crates_io.get_version_info(&name).await
-                            }
-                        }
-                        FileType::Npm => npm_registry.read().await.get_version_info(&name).await,
-                        FileType::Python => pypi.get_version_info(&name).await,
-                        FileType::Go => go_proxy.get_version_info(&name).await,
-                        FileType::Php => packagist.get_version_info(&name).await,
-                        FileType::Dart => pub_dev.get_version_info(&name).await,
-                        FileType::Csharp => nuget.get_version_info(&name).await,
-                        FileType::Ruby => rubygems.get_version_info(&name).await,
-                        FileType::Maven => {
-                            maven_central.read().await.get_version_info(&name).await
-                        }
-                    };
-                    match result {
-                        Ok(info) => {
-                            cache.insert(cache_key, info).await;
-                        }
-                        Err(e) => {
-                            tracing::error!(
-                                "Failed to fetch version info for '{name}' (registry: {registry:?}): {e}",
-                            );
-                        }
-                    }
-                }
-            })
+            .map(|dep| FetchTarget::of(dep, file_type))
             .collect();
-
-        // Run up to 5 concurrent requests
-        let semaphore = Arc::new(tokio::sync::Semaphore::new(5));
-        let handles: Vec<_> = fetch_tasks
-            .into_iter()
-            .map(|task| {
-                let permit = Arc::clone(&semaphore);
-                tokio::spawn(async move {
-                    let _permit = permit.acquire().await;
-                    task.await
-                })
-            })
-            .collect();
-
-        // Wait for all tasks to complete
-        for handle in handles {
-            let _ = handle.await;
+        let ctx = self.clone();
+        if let Err(e) = tokio::spawn(async move { ctx.fetch_missing(targets).await }).await {
+            tracing::error!("Version fetch failed for {}: {e}", uri.path());
         }
 
         // Store document state IMMEDIATELY (before vulnerability check), unless a newer pass (or `did_close`)
@@ -416,6 +366,95 @@ impl ProcessingContext {
                 ctx.publish_diagnostics(&uri).await;
             });
         }
+    }
+
+    /// Fetches `name` from the registry of `file_type`, or from the alternative Cargo `registry` the manifest names
+    async fn fetch_version_info(
+        &self,
+        file_type: FileType,
+        name: &str,
+        registry: Option<&str>,
+    ) -> anyhow::Result<VersionInfo> {
+        match file_type {
+            FileType::Cargo => {
+                let custom = registry.map(|reg_name| {
+                    // Cloned out so no DashMap guard is held across the fetch
+                    let reg = self.cargo_custom_registries.get(reg_name).map(|reg| Arc::clone(&reg));
+                    if reg.is_none() {
+                        tracing::warn!("Unknown Cargo registry '{reg_name}' for package '{name}', falling back to crates.io");
+                    }
+                    reg
+                });
+                match custom.flatten() {
+                    Some(reg) => reg.get_version_info(name).await,
+                    None => self.crates_io.get_version_info(name).await,
+                }
+            }
+            FileType::Npm => self.npm_registry.read().await.get_version_info(name).await,
+            FileType::Python => self.pypi.get_version_info(name).await,
+            FileType::Go => self.go_proxy.get_version_info(name).await,
+            FileType::Php => self.packagist.get_version_info(name).await,
+            FileType::Dart => self.pub_dev.get_version_info(name).await,
+            FileType::Csharp => self.nuget.get_version_info(name).await,
+            FileType::Ruby => self.rubygems.get_version_info(name).await,
+            FileType::Maven => self.maven_central.read().await.get_version_info(name).await,
+        }
+    }
+
+    /// Fetches `targets` at bounded concurrency, yielding each response with its fetch start.
+    fn fetch_versions(
+        &self,
+        targets: Vec<FetchTarget>,
+    ) -> impl Stream<Item = (FetchTarget, anyhow::Result<VersionInfo>, std::time::Instant)> + '_
+    {
+        stream::iter(targets)
+            .map(move |target| async move {
+                let started = std::time::Instant::now();
+                let result = self
+                    .fetch_version_info(target.file_type, &target.name, target.registry.as_deref())
+                    .await;
+                (target, result, started)
+            })
+            .buffer_unordered(FETCH_CONCURRENCY)
+    }
+
+    /// Fetches the `targets` without fresh cached data and caches the responses.
+    ///
+    /// One SQLite transaction for the whole manifest instead of one per package.
+    async fn fetch_missing(&self, targets: Vec<FetchTarget>) {
+        let mut due = Vec::with_capacity(targets.len());
+        for target in targets {
+            if self.version_cache.contains(&target.key).await {
+                tracing::debug!("Cache hit for '{}' (key: {})", target.name, target.key);
+            } else {
+                tracing::debug!(
+                    "Cache miss for '{}' (key: {}), fetching from registry {:?}",
+                    target.name,
+                    target.key,
+                    target.registry
+                );
+                due.push(target);
+            }
+        }
+
+        let fetched = self
+            .fetch_versions(due)
+            .filter_map(|(target, result, started)| {
+                futures::future::ready(match result {
+                    Ok(info) => Some((target.key, info, started)),
+                    Err(e) => {
+                        tracing::error!(
+                            "Failed to fetch version info for '{}' (registry: {:?}): {e}",
+                            target.name,
+                            target.registry,
+                        );
+                        None
+                    }
+                })
+            })
+            .collect()
+            .await;
+        self.version_cache.insert_many(fetched).await;
     }
 
     /// Publishes diagnostics for `uri` from its current document state.
@@ -537,7 +576,7 @@ struct VulnBgContext {
     documents: Arc<DashMap<Url, DocumentState>>,
     uri: Url,
     lockfile_graph: Option<std::sync::Arc<crate::parsers::lockfile_graph::LockfileGraph>>,
-    /// Claimes of the passes that own each document
+    /// Claims of the passes that own each document
     doc_passes: Arc<DocPasses>,
     /// The pass that stored the document state this scan was started for
     pass: u64,
@@ -643,6 +682,8 @@ pub struct DepsyBackend {
     pending_changes: Arc<DashMap<Url, String>>,
     /// Which processing pass owns each open document
     doc_passes: Arc<DocPasses>,
+    /// Background task refreshing open documents (see [`refresh`])
+    refresh_task: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl DepsyBackend {
@@ -778,6 +819,7 @@ impl DepsyBackend {
             debounce_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             pending_changes: Arc::new(DashMap::new()),
             doc_passes: Arc::new(DocPasses::default()),
+            refresh_task: std::sync::Mutex::new(None),
         }
     }
 
@@ -846,12 +888,7 @@ impl DepsyBackend {
         package_name: &str,
         cargo_registry: Option<&str>,
     ) -> Option<VersionInfo> {
-        let cache_key = match (cargo_registry, file_type) {
-            (Some(registry), FileType::Cargo) => {
-                format!("crates:{registry}:{package_name}")
-            }
-            _ => file_type.cache_key(package_name),
-        };
+        let cache_key = cache_key_for(file_type, package_name, cargo_registry);
 
         // Check cache first
         if let Some(cached) = self.version_cache.get(&cache_key).await {
@@ -859,48 +896,26 @@ impl DepsyBackend {
         }
 
         // Fetch from appropriate registry
-        let result = match file_type {
-            FileType::Cargo => {
-                if let Some(reg_name) = cargo_registry {
-                    if let Some(reg) = self.cargo_custom_registries.get(reg_name) {
-                        reg.get_version_info(package_name).await
-                    } else {
-                        self.crates_io.get_version_info(package_name).await
-                    }
-                } else {
-                    self.crates_io.get_version_info(package_name).await
-                }
-            }
-            FileType::Npm => {
-                self.npm_registry
-                    .read()
-                    .await
-                    .get_version_info(package_name)
-                    .await
-            }
-            FileType::Python => self.pypi.get_version_info(package_name).await,
-            FileType::Go => self.go_proxy.get_version_info(package_name).await,
-            FileType::Php => self.packagist.get_version_info(package_name).await,
-            FileType::Dart => self.pub_dev.get_version_info(package_name).await,
-            FileType::Csharp => self.nuget.get_version_info(package_name).await,
-            FileType::Ruby => self.rubygems.get_version_info(package_name).await,
-            FileType::Maven => {
-                self.maven_central
-                    .read()
-                    .await
-                    .get_version_info(package_name)
-                    .await
-            }
-        };
+        let started = std::time::Instant::now();
+        let result = self
+            .create_processing_context()
+            .await
+            .fetch_version_info(file_type, package_name, cargo_registry)
+            .await;
 
         match result {
             Ok(info) => {
-                self.version_cache.insert(cache_key, info.clone()).await;
+                // With its fetch start like every registry response:
+                // a hover that waited on a slow registry must not replace data a later fetch already stored
+                self.version_cache
+                    .insert_many(vec![(cache_key, info.clone(), started)])
+                    .await;
                 Some(info)
             }
             Err(e) => {
                 tracing::warn!("Failed to fetch version info for {}: {}", package_name, e);
-                None
+                // Outdated data beats an empty hover when the registry is unreachable
+                self.version_cache.get_stale(&cache_key).await
             }
         }
     }
@@ -1607,11 +1622,28 @@ impl LanguageServer for DepsyBackend {
         debug_assert!(Arc::ptr_eq(&base_client, &self.nuget.http_client()));
         debug_assert!(Arc::ptr_eq(&base_client, &self.rubygems.http_client()));
 
+        let ctx = self.create_processing_context().await;
+        let refresh = refresh::spawn_refresh_task(ctx, refresh::REFRESH_INTERVAL);
+        // A client that sends `initialized` twice must not leave two refreshers running
+        if let Ok(mut task) = self.refresh_task.lock()
+            && let Some(previous) = task.replace(refresh)
+        {
+            previous.abort();
+        }
+
         tracing::info!("Depsy LSP initialized");
     }
 
     async fn shutdown(&self) -> Result<()> {
         tracing::info!("Depsy LSP shutting down");
+        if let Some(task) = self
+            .refresh_task
+            .lock()
+            .ok()
+            .and_then(|mut task| task.take())
+        {
+            task.abort();
+        }
         Ok(())
     }
 
@@ -2023,6 +2055,7 @@ impl LanguageServer for DepsyBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cache::WriteCache;
     use crate::parsers::{Dependency, Span};
 
     #[test]
@@ -2053,7 +2086,7 @@ mod tests {
         assert_eq!(package_names, vec!["express"]);
     }
 
-    fn make_dep(name: &str, version: &str, resolved: Option<&str>) -> Dependency {
+    pub(super) fn make_dep(name: &str, version: &str, resolved: Option<&str>) -> Dependency {
         Dependency {
             name: name.to_string(),
             version: version.to_string(),
@@ -2729,7 +2762,7 @@ mod tests {
         registry
     }
 
-    async fn use_npm_registry(backend: &DepsyBackend, registry: &wiremock::MockServer) {
+    pub(super) async fn use_npm_registry(backend: &DepsyBackend, registry: &wiremock::MockServer) {
         use crate::config::NpmRegistryConfig;
 
         *backend.npm_registry.write().await = NpmRegistry::with_client_and_config(
@@ -2870,5 +2903,182 @@ mod tests {
 
         assert!(backend.pending_changes.is_empty());
         assert!(backend.debounce_tasks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn shutdown_stops_the_refresh_task() {
+        let (service, _socket) = tower_lsp::LspService::new(DepsyBackend::in_memory);
+        let backend = service.inner();
+
+        backend.initialized(InitializedParams {}).await;
+        let task = backend
+            .refresh_task
+            .lock()
+            .unwrap()
+            .as_ref()
+            .expect("refresh task started")
+            .abort_handle();
+        assert!(!task.is_finished());
+
+        backend.shutdown().await.unwrap();
+        // Aborting takes effect at the task's next poll
+        for _ in 0..100 {
+            if task.is_finished() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(task.is_finished());
+        assert!(backend.refresh_task.lock().unwrap().is_none());
+    }
+
+    /// Mock answer that signals its request, then waits for the test to release it.
+    ///
+    /// wiremock serves one request at a time on its own thread, so nothing else
+    /// reaches this mock server until the release.
+    struct Gated {
+        received: Arc<tokio::sync::Notify>,
+        release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+        response: wiremock::ResponseTemplate,
+    }
+
+    impl wiremock::Respond for Gated {
+        fn respond(&self, _: &wiremock::Request) -> wiremock::ResponseTemplate {
+            self.received.notify_one();
+            // Also returns once the test dropped the sender
+            self.release.lock().unwrap().recv().ok();
+            self.response.clone()
+        }
+    }
+
+    /// npm registry serving `name` through a [`Gated`] answer with `latest` as its latest version.
+    async fn gated_registry(
+        name: &str,
+        latest: &str,
+    ) -> (
+        wiremock::MockServer,
+        Arc<tokio::sync::Notify>,
+        std::sync::mpsc::Sender<()>,
+    ) {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let received = Arc::new(tokio::sync::Notify::new());
+        let (release, gate) = std::sync::mpsc::channel();
+        let registry = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/{name}")))
+            .respond_with(Gated {
+                received: Arc::clone(&received),
+                release: std::sync::Mutex::new(gate),
+                response: ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "dist-tags": { "latest": latest },
+                    "versions": { latest: {} }
+                })),
+            })
+            .mount(&registry)
+            .await;
+        (registry, received, release)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn slow_hover_lookup_does_not_replace_newer_data() {
+        // Given a hover lookup whose request reached a registry that holds its answer of 1.0.0
+        let (registry, received, release) = gated_registry("lodash", "1.0.0").await;
+        let (service, _socket) = tower_lsp::LspService::new(DepsyBackend::in_memory);
+        let backend = service.inner();
+        use_npm_registry(backend, &registry).await;
+        let hover = backend.get_version_info(FileType::Npm, "lodash", None);
+        let key = FileType::Npm.cache_key("lodash");
+
+        // When a fetch started after it stores 2.0.0 first
+        let newer = async {
+            received.notified().await;
+            let info = VersionInfo {
+                latest: Some("2.0.0".to_string()),
+                ..Default::default()
+            };
+            backend
+                .version_cache
+                .insert_many(vec![(key.clone(), info, std::time::Instant::now())])
+                .await;
+            release.send(()).unwrap();
+        };
+        let (hovered, ()) = tokio::join!(hover, newer);
+
+        // Then the hover shows what it fetched, and the cache keeps the newer data
+        assert_eq!(hovered.unwrap().latest.as_deref(), Some("1.0.0"));
+        let cached = backend.version_cache.get(&key).await.unwrap();
+        assert_eq!(cached.latest.as_deref(), Some("2.0.0"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn hover_falls_back_to_stale_data_when_the_registry_fails() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        // Given a package cached past the TTL and a registry that is down
+        let registry = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/lodash"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&registry)
+            .await;
+        let (service, _socket) = tower_lsp::LspService::new(DepsyBackend::in_memory);
+        let backend = service.inner();
+        use_npm_registry(backend, &registry).await;
+        let old = VersionInfo {
+            latest: Some("1.0.0".to_string()),
+            ..Default::default()
+        };
+        backend
+            .version_cache
+            .insert_many(vec![(
+                FileType::Npm.cache_key("lodash"),
+                old,
+                std::time::Instant::now() - Duration::from_secs(2 * 60 * 60),
+            )])
+            .await;
+
+        // When the hover looks it up
+        let hovered = backend
+            .get_version_info(FileType::Npm, "lodash", None)
+            .await;
+
+        // Then it shows the expired data rather than nothing
+        assert_eq!(hovered.unwrap().latest.as_deref(), Some("1.0.0"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn aborted_pass_still_caches_what_it_fetched() {
+        // Given a pass whose request reached a registry that holds its answer
+        let (registry, received, release) = gated_registry("lodash", "2.0.0").await;
+        let (service, _socket) = tower_lsp::LspService::new(DepsyBackend::in_memory);
+        let backend = service.inner();
+        use_npm_registry(backend, &registry).await;
+        let ctx = backend.create_processing_context().await;
+        let dir = tempfile::tempdir().unwrap();
+        let uri = Url::from_file_path(dir.path().join("package.json")).unwrap();
+        let pass = tokio::spawn(async move {
+            ctx.process_document(&uri, r#"{"dependencies": {"lodash": "1.0.0"}}"#)
+                .await;
+        });
+        tokio::time::timeout(Duration::from_secs(10), received.notified())
+            .await
+            .expect("the package was never requested");
+
+        // When the next edit aborts the pass before the answer arrives
+        pass.abort();
+        release.send(()).unwrap();
+
+        // Then the response still reaches the cache
+        let key = FileType::Npm.cache_key("lodash");
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !backend.version_cache.contains(&key).await {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the aborted pass lost its response");
     }
 }

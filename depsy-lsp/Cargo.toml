@@ -46,6 +46,7 @@ wiremock = "0.6"
 tempfile = "3"
 criterion = { version = "5.0.1", package = "codspeed-criterion-compat", features = ["html_reports"] }
 tokio = { version = "1.53.1", features = ["net"] }
+tower-service = "0.3.3"
 
 [[bench]]
 name = "benchmarks"

@@ -13,6 +13,7 @@
 
 use std::fmt::Display;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
@@ -115,7 +116,13 @@ impl CacheEntry {
 #[derive(Clone)]
 pub struct MemoryCache {
     entries: Arc<DashMap<String, CacheEntry>>,
-    ttl: Duration,
+    /// TTL in milliseconds of the entries inserted from now on, shared between clones
+    ttl_ms: Arc<AtomicU64>,
+}
+
+/// `ttl` in milliseconds, saturating at what the cache can store
+fn ttl_millis(ttl: Duration) -> u64 {
+    u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX)
 }
 
 impl Default for MemoryCache {
@@ -129,8 +136,20 @@ impl MemoryCache {
     pub fn new() -> Self {
         Self {
             entries: Arc::new(DashMap::new()),
-            ttl: DEFAULT_TTL,
+            ttl_ms: Arc::new(AtomicU64::new(ttl_millis(DEFAULT_TTL))),
         }
+    }
+
+    /// Set the TTL of the entries inserted from now on
+    ///
+    /// Each entry keeps the TTL it was inserted with, so existing entries are unaffected.
+    pub fn set_ttl(&self, ttl: Duration) {
+        self.ttl_ms.store(ttl_millis(ttl), Ordering::Relaxed);
+    }
+
+    /// TTL of the entries inserted from now on
+    fn ttl(&self) -> Duration {
+        Duration::from_millis(self.ttl_ms.load(Ordering::Relaxed))
     }
 }
 
@@ -160,7 +179,7 @@ impl WriteCache for MemoryCache {
             CacheEntry {
                 data: value,
                 inserted_at: Instant::now(),
-                ttl: self.ttl,
+                ttl: self.ttl(),
             },
         );
     }
@@ -222,7 +241,7 @@ impl MemoryCache {
     pub fn with_ttl(ttl: Duration) -> Self {
         Self {
             entries: Arc::new(DashMap::new()),
-            ttl,
+            ttl_ms: Arc::new(AtomicU64::new(ttl_millis(ttl))),
         }
     }
 }
@@ -284,6 +303,23 @@ impl HybridCache {
         Self::spawn_cleanup_task(memory.clone(), sqlite.clone());
 
         Self { memory, sqlite }
+    }
+
+    /// Set the TTL of the entries written from now on, in both layers
+    ///
+    /// The cache is built and shared before the client settings arrive in `initialize`, hence a setter
+    /// rather than a constructor parameter. Entries already written keep the TTL they were written with.
+    pub fn set_ttl(&self, ttl: Duration) {
+        self.memory.set_ttl(ttl);
+        if let Some(ref sqlite) = self.sqlite {
+            sqlite.set_ttl(ttl);
+        }
+    }
+
+    /// TTL of the entries written from now on
+    #[cfg(test)]
+    pub fn ttl(&self) -> Duration {
+        self.memory.ttl()
     }
 
     // Create a hybrid cache whose persistent layer is an in-memory SQLite database
@@ -541,6 +577,46 @@ mod tests {
 
         assert!(!cache.contains("key").await);
         assert!(!cache.memory.contains("key").await);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn hybrid_set_ttl_expires_new_entries_in_both_layers() {
+        // Given a TTL shorter than the default
+        let cache = HybridCache::in_memory();
+        cache.set_ttl(Duration::from_secs(1));
+
+        // When an entry is written and outlives it
+        cache
+            .insert("key".to_string(), create_test_version_info())
+            .await;
+        assert!(cache.get("key").await.is_some());
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+
+        // Then neither layer serves it any more
+        let sqlite = cache.sqlite.as_ref().expect("in-memory SQLite layer");
+        assert!(cache.memory.get("key").await.is_none());
+        assert!(sqlite.get("key").await.is_none());
+        assert!(cache.get("key").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn memory_set_ttl_applies_to_new_entries_only() {
+        // Given an entry inserted with a TTL about to end
+        let cache = MemoryCache::with_ttl(Duration::from_millis(20));
+        cache
+            .insert("old".to_string(), create_test_version_info())
+            .await;
+
+        // When the TTL is raised before another entry is inserted
+        cache.set_ttl(Duration::from_secs(60));
+        cache
+            .insert("new".to_string(), create_test_version_info())
+            .await;
+        tokio::time::sleep(Duration::from_millis(40)).await;
+
+        // Then only the entry inserted after the change outlives the old TTL
+        assert!(cache.get("old").await.is_none());
+        assert!(cache.get("new").await.is_some());
     }
 
     #[tokio::test]

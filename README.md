@@ -268,7 +268,7 @@ Configure Depsy in your Zed `settings.json`:
 | `inlay_hints.enabled` | bool | `true` | Enable/disable inlay hints |
 | `inlay_hints.show_up_to_date` | bool | `true` | Show hints for up-to-date packages |
 | `diagnostics.enabled` | bool | `true` | Enable/disable diagnostics |
-| `cache.ttl_secs` | number | `3600` | Cache TTL in seconds (1 hour) |
+| `cache.ttl_secs` | number | `3600` | Version cache TTL in seconds (1 hour), clamped to 60–315360000 |
 | `cache.debounce_ms` | number | `200` | Debounce delay for file change notifications (ms) |
 | `ignore` | string[] | `[]` | Package names/patterns to ignore |
 | `security.enabled` | bool | `true` | Enable/disable vulnerability scanning |

@@ -1,10 +1,23 @@
 //! Configuration management for Depsy LSP
 
+use std::time::Duration;
+
 use hashbrown::HashMap;
 use serde::Deserialize;
 
 /// Default cache TTL (1 hour)
 const DEFAULT_CACHE_TTL_SECS: u64 = 3600;
+
+/// Lowest accepted cache TTL (1 minute)
+///
+/// Inlay hints only read the cache, so a TTL close to zero would show every package as unknown
+/// right after it was fetched.
+const MIN_CACHE_TTL_SECS: u64 = 60;
+
+/// Highest accepted cache TTL (10 years)
+///
+/// The SQLite layer compares timestamps as `i64` nanoseconds, so `inserted_at + ttl` has to fit.
+const MAX_CACHE_TTL_SECS: u64 = 10 * 365 * 24 * 3600;
 
 /// Default vulnerability cache TTL (6 hours)
 const DEFAULT_VULN_CACHE_TTL_SECS: u64 = 6 * 3600;
@@ -83,6 +96,13 @@ impl Default for CacheConfig {
             ttl_secs: DEFAULT_CACHE_TTL_SECS,
             debounce_ms: DEFAULT_DEBOUNCE_MS,
         }
+    }
+}
+
+impl CacheConfig {
+    /// Version cache TTL, with `ttl_secs` clamped to the accepted range
+    pub fn ttl(&self) -> Duration {
+        Duration::from_secs(self.ttl_secs.clamp(MIN_CACHE_TTL_SECS, MAX_CACHE_TTL_SECS))
     }
 }
 
@@ -430,6 +450,22 @@ mod tests {
         let config = CacheConfig::default();
         assert_eq!(config.ttl_secs, DEFAULT_CACHE_TTL_SECS);
         assert_eq!(config.debounce_ms, DEFAULT_DEBOUNCE_MS);
+    }
+
+    #[test]
+    fn cache_ttl_keeps_a_value_in_range_and_clamps_the_others() {
+        let ttl = |ttl_secs| {
+            CacheConfig {
+                ttl_secs,
+                ..CacheConfig::default()
+            }
+            .ttl()
+            .as_secs()
+        };
+
+        assert_eq!(ttl(7200), 7200);
+        assert_eq!(ttl(0), MIN_CACHE_TTL_SECS);
+        assert_eq!(ttl(u64::MAX), MAX_CACHE_TTL_SECS);
     }
 
     #[test]

@@ -3,7 +3,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 #[cfg(test)]
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::sqlite_manager::{NANOS_PER_SEC, SqliteConnectionManager};
@@ -52,13 +53,22 @@ impl Default for SqliteCacheConfig {
 /// SQLite-based persistent cache with connection pooling
 pub struct SqliteCache {
     pool: Arc<Pool<SqliteConnectionManager>>,
-    ttl_secs: i64,
+    /// TTL stored with the rows written from now on, see [`Self::set_ttl`]
+    ttl_secs: AtomicI64,
 }
 
 impl SqliteCache {
     /// Create a new SQLite cache at the default location (~/.cache/depsy/cache.db)
     pub fn new() -> anyhow::Result<Self> {
         Self::with_config(SqliteCacheConfig::default())
+    }
+
+    /// Set the TTL of the rows written from now on, truncated to whole seconds
+    ///
+    /// Each row keeps the TTL it was written with, so existing rows are unaffected.
+    pub fn set_ttl(&self, ttl: Duration) {
+        let ttl_secs = i64::try_from(ttl.as_secs()).unwrap_or(i64::MAX);
+        self.ttl_secs.store(ttl_secs, Ordering::Relaxed);
     }
 
     /// Create a new SQLite cache with custom configuration
@@ -87,7 +97,7 @@ impl SqliteCache {
 
         let cache = Self {
             pool: Arc::new(pool),
-            ttl_secs: config.ttl_secs,
+            ttl_secs: AtomicI64::new(config.ttl_secs),
         };
 
         cache.init_schema()?;
@@ -129,7 +139,7 @@ impl SqliteCache {
 
         let cache = Self {
             pool: Arc::new(pool),
-            ttl_secs: config.ttl_secs,
+            ttl_secs: AtomicI64::new(config.ttl_secs),
         };
 
         cache.init_schema_memory()?;
@@ -253,7 +263,7 @@ impl ReadCache for SqliteCache {
 impl WriteCache for SqliteCache {
     async fn insert(&self, key: String, value: VersionInfo) {
         let pool = Arc::clone(&self.pool);
-        let ttl_secs = self.ttl_secs;
+        let ttl_secs = self.ttl_secs.load(Ordering::Relaxed);
         // Compute the submission timestamp BEFORE handing off to spawn_blocking
         // so concurrent inserts carry their actual submission time. The UPSERT
         // below only overwrites when the new timestamp is at least as recent as
@@ -316,7 +326,7 @@ impl SqliteCache {
         }
 
         let pool = Arc::clone(&self.pool);
-        let ttl_secs = self.ttl_secs;
+        let ttl_secs = self.ttl_secs.load(Ordering::Relaxed);
         tokio::task::spawn_blocking(move || -> anyhow::Result<usize> {
             let mut conn = pool.get()?;
             let tx = conn.transaction()?;
@@ -558,6 +568,34 @@ mod tests {
         assert_eq!(config.busy_timeout_ms, 5000);
         assert_eq!(config.cache_size_kb, 64000);
         assert_eq!(config.ttl_secs, DEFAULT_TTL_SECS);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn set_ttl_is_stored_with_new_rows_only() {
+        let cache = SqliteCache::in_memory().unwrap();
+        cache
+            .insert("old".to_string(), create_test_version_info())
+            .await;
+
+        cache.set_ttl(Duration::from_secs(7200));
+        cache
+            .insert("new".to_string(), create_test_version_info())
+            .await;
+
+        let stored_ttl = |key: &str| -> i64 {
+            cache
+                .pool
+                .get()
+                .unwrap()
+                .query_row(
+                    "SELECT ttl_secs FROM packages WHERE key = ?",
+                    params![key],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(stored_ttl("old"), DEFAULT_TTL_SECS);
+        assert_eq!(stored_ttl("new"), 7200);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

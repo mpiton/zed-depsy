@@ -338,7 +338,7 @@ flowchart TB
 
 Two-tier read-through, write-through cache (`depsy-lsp/src/cache/mod.rs`):
 
-- **L1 = `MemoryCache`** — `DashMap<String, CacheEntry>`. Key like `"crates.io:serde"`. Value = `VersionInfo` + `(inserted_at, ttl)`. Default TTL 1 hour. Lazy expiry on `get`; bulk sweep every 30 min by a background tokio task.
+- **L1 = `MemoryCache`** — `DashMap<String, CacheEntry>`. Key like `"crates.io:serde"`. Value = `VersionInfo` + `(inserted_at, ttl)`. Default TTL 1 hour, set from `cache.ttl_secs` in `initialize` for both tiers. Lazy expiry on `get`; bulk sweep every 30 min by a background tokio task.
 - **L2 = `SqliteCache`** — `r2d2::Pool<SqliteConnectionManager>` over `~/.cache/depsy/cache.db`. Schema: `packages(key TEXT PRIMARY KEY, data TEXT, inserted_at INTEGER, ttl_secs INTEGER)`. WAL journal. Index on `(inserted_at, ttl_secs)` for bulk expiry deletes. All DB calls offloaded to `tokio::task::spawn_blocking` — never block the runtime.
 
 Read path: check L1 → on miss, read L2 → on hit, write back to L1. Write path: write to both layers simultaneously.

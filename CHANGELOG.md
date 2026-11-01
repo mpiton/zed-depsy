@@ -28,6 +28,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ([#412](https://github.com/mpiton/zed-depsy/pull/412)).
 - Closing a manifest while its dependencies are still being fetched no
   longer lets that fetch put the document back into the server state.
+- `cache.ttl_secs` now takes effect. It was parsed and then ignored, so
+  version cache entries always lasted 1 hour. Values are clamped to the range
+  from 60 seconds to 10 years, and entries already cached keep their TTL.
 
 ## [2.1.1] - 2026-10-05
 

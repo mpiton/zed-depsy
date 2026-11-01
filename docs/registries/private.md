@@ -121,9 +121,9 @@ token = "Bearer my-token-here"
 
 ### Cache Behavior
 
-Alternative registry dependencies use namespaced cache keys (e.g., `crates:my-registry:my-crate`) to prevent collisions with crates.io packages that may share the same name.
+Packages fetched from an alternative Cargo registry, or from a non-default npm or Maven registry, use a key prefixed with a digest of the registry URL (e.g., `{digest}@crates:my-crate`), because the disk cache is shared by all your projects. Two different registries never share rows, even under the same Cargo registry name (trailing slashes and surrounding whitespace in the URL are ignored), and neither the URL nor the registry name is stored in the cache.
 
-npm and Maven packages fetched from a non-default registry use a key prefixed with a digest of the registry URL, because the disk cache is shared by all your projects. Two different registries never share rows (trailing slashes and surrounding whitespace in the URL are ignored), and the URL itself is not stored in the cache.
+A dependency naming a Cargo registry that the project does not configure, or configures with an empty `index_url`, is fetched from crates.io with a warning in the logs. Its data is cached under the crates.io key `crates:my-crate`, so it never reaches a project that configures that registry.
 
 ## npm Configuration
 

@@ -142,12 +142,12 @@ fn dep_cache_key(
 
 /// Compute cache key for package `name`, from the alternative Cargo `registry` if it has one.
 ///
-/// `cache.db` is shared by every project of the user, while the npm and Maven registries are set
-/// per project. Packages of a non-default registry therefore use `{url digest}@{standard key}`,
-/// so a project cannot read rows another project fetched from a different registry. The digest
-/// keeps URLs, which can embed credentials, out of the database, and a standard key never starts
-/// with one. Cargo deps with `registry = "name"` use `crates:{registry}:{name}`. All other deps
-/// use the standard key.
+/// `cache.db` is shared by every project of the user, while the npm, Maven and alternative Cargo
+/// registries are set per project. Packages of a non-default registry therefore use
+/// `{url digest}@{standard key}`, so a project cannot read rows another project fetched from a
+/// different registry. The digest keeps URLs, which can embed credentials, out of the database,
+/// and a standard key never starts with one. All other deps use the standard key, including Cargo
+/// deps naming a registry this project does not configure: those are fetched from crates.io.
 fn cache_key_for(
     registries: &RegistriesConfig,
     file_type: FileType,
@@ -155,7 +155,12 @@ fn cache_key_for(
     registry: Option<&str>,
 ) -> String {
     let (url, default_url) = match (file_type, registry) {
-        (FileType::Cargo, Some(registry)) => return format!("crates:{registry}:{name}"),
+        (FileType::Cargo, Some(registry)) => match registries.cargo.registries.get(registry) {
+            // No default URL: crates.io behind the sparse client answers with less metadata than
+            // the crates.io client, so its rows must not replace the standard ones
+            Some(config) => (config.index_url.as_str(), ""),
+            None => return file_type.cache_key(name),
+        },
         (FileType::Npm, _) => (registries.npm.url_for(name), DEFAULT_NPM_REGISTRY_URL),
         (FileType::Maven, _) => (registries.maven.url.as_str(), DEFAULT_MAVEN_REGISTRY_URL),
         _ => return file_type.cache_key(name),
@@ -1583,6 +1588,12 @@ impl LanguageServer for DepsyBackend {
             };
 
             for (registry_name, registry_config) in &config.registries.cargo.registries {
+                // Handled as an unknown registry, as its cache key does
+                if registry_config.index_url.trim().is_empty() {
+                    tracing::warn!("Ignoring Cargo registry '{registry_name}': empty index_url");
+                    continue;
+                }
+
                 // Token priority: LSP config auth > credentials.toml
                 let token = registry_config
                     .auth
@@ -3329,10 +3340,227 @@ mod tests {
             cache_key_for(&registries, FileType::Cargo, "serde", None),
             "crates:serde"
         );
+    }
+
+    fn registries_with_cargo(entries: &[(&str, &str)]) -> RegistriesConfig {
+        let mut registries = RegistriesConfig::default();
+        for (name, index_url) in entries {
+            registries.cargo.registries.insert(
+                (*name).to_string(),
+                crate::config::CargoCustomRegistryConfig {
+                    index_url: (*index_url).to_string(),
+                    auth: None,
+                },
+            );
+        }
+        registries
+    }
+
+    #[test]
+    fn same_cargo_registry_name_with_other_index_url_gets_its_own_key() {
+        let first = registries_with_cargo(&[("corp", "https://one.example/index")]);
+        let second = registries_with_cargo(&[("corp", "https://two.example/index")]);
+
+        let first_key = cache_key_for(&first, FileType::Cargo, "serde", Some("corp"));
+        let second_key = cache_key_for(&second, FileType::Cargo, "serde", Some("corp"));
+
+        assert_ne!(first_key, second_key);
+        assert!(first_key.ends_with("@crates:serde"));
+        assert!(second_key.ends_with("@crates:serde"));
+    }
+
+    #[test]
+    fn cargo_key_follows_the_index_url_and_not_the_registry_name() {
+        let first = registries_with_cargo(&[("corp", "https://one.example/index")]);
+        let second = registries_with_cargo(&[("mirror", "https://one.example/index/")]);
+
         assert_eq!(
-            cache_key_for(&registries, FileType::Cargo, "serde", Some("corp")),
-            "crates:corp:serde"
+            cache_key_for(&first, FileType::Cargo, "serde", Some("corp")),
+            cache_key_for(&second, FileType::Cargo, "serde", Some("mirror"))
         );
+    }
+
+    #[test]
+    fn cargo_key_does_not_store_the_index_url_or_the_registry_name() {
+        let registries =
+            registries_with_cargo(&[("corp", "https://user:secret@cargo.example/token/abc")]);
+        let key = cache_key_for(&registries, FileType::Cargo, "serde", Some("corp"));
+
+        assert!(!key.contains("secret"));
+        assert!(!key.contains("cargo.example"));
+        assert!(!key.contains("corp"));
+    }
+
+    #[test]
+    fn cargo_registry_this_project_does_not_configure_uses_the_crates_io_key() {
+        // Given a manifest naming a registry that falls back to crates.io
+        let unconfigured = RegistriesConfig::default();
+        let other = registries_with_cargo(&[("other", "https://other.example/index")]);
+        let blank = registries_with_cargo(&[("corp", "  ")]);
+
+        // Then its row is the crates.io row, which is where the data comes from
+        for registries in [&unconfigured, &other, &blank] {
+            assert_eq!(
+                cache_key_for(registries, FileType::Cargo, "serde", Some("corp")),
+                "crates:serde"
+            );
+        }
+    }
+
+    #[test]
+    fn crates_io_index_as_alternative_registry_keeps_its_own_key() {
+        let registries = registries_with_cargo(&[("mirror", "https://index.crates.io")]);
+
+        assert_ne!(
+            cache_key_for(&registries, FileType::Cargo, "serde", Some("mirror")),
+            "crates:serde"
+        );
+    }
+
+    #[test]
+    fn crafted_crate_name_cannot_reach_an_alternative_registry_key() {
+        let registries = registries_with_cargo(&[("corp", "https://one.example/index")]);
+        let custom = cache_key_for(&registries, FileType::Cargo, "serde", Some("corp"));
+
+        for name in ["corp:serde", custom.as_str()] {
+            assert_ne!(
+                cache_key_for(&registries, FileType::Cargo, name, None),
+                custom
+            );
+        }
+    }
+
+    /// A backend initialized with `cargo_registries`, sharing the one cache of this user.
+    async fn cargo_project(
+        shared: &Arc<HybridCache>,
+        cargo_registries: serde_json::Value,
+    ) -> (tower_lsp::LspService<DepsyBackend>, tower_lsp::ClientSocket) {
+        let shared = Arc::clone(shared);
+        let (service, socket) = tower_lsp::LspService::new(move |client| {
+            let mut config = Config::default();
+            config.advisory_cache.enabled = false;
+            config.security.enabled = false;
+            let mut backend =
+                DepsyBackend::with_parts(client, None, HybridCache::in_memory(), config);
+            backend.version_cache = shared;
+            backend
+        });
+        let params = InitializeParams {
+            initialization_options: Some(serde_json::json!({
+                "security": { "enabled": false },
+                "advisory_cache": { "enabled": false },
+                "registries": { "cargo": { "registries": cargo_registries } },
+            })),
+            ..Default::default()
+        };
+        service
+            .inner()
+            .initialize(params)
+            .await
+            .expect("initialize failed");
+        (service, socket)
+    }
+
+    async fn sparse_registry_serving(version: &str) -> wiremock::MockServer {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let registry = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/se/rd/serde"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(format!(
+                r#"{{"name":"serde","vers":"{version}","yanked":false}}"#
+            )))
+            .mount(&registry)
+            .await;
+        registry
+    }
+
+    #[tokio::test]
+    async fn projects_with_the_same_cargo_registry_name_do_not_read_each_others_rows() {
+        // Given two projects calling different registries "corp"
+        let shared = Arc::new(HybridCache::in_memory());
+        let (first_registry, second_registry) = (
+            sparse_registry_serving("1.0.0").await,
+            sparse_registry_serving("2.0.0").await,
+        );
+        let (first, _first_socket) = cargo_project(
+            &shared,
+            serde_json::json!({ "corp": { "index_url": first_registry.uri() } }),
+        )
+        .await;
+        let (second, _second_socket) = cargo_project(
+            &shared,
+            serde_json::json!({ "corp": { "index_url": second_registry.uri() } }),
+        )
+        .await;
+
+        // When both look up the same crate
+        let first_info = first
+            .inner()
+            .get_version_info(FileType::Cargo, "serde", Some("corp"))
+            .await;
+        let second_info = second
+            .inner()
+            .get_version_info(FileType::Cargo, "serde", Some("corp"))
+            .await;
+
+        // Then each one sees what its own registry answered, and the crates.io key stays empty
+        assert_eq!(first_info.unwrap().latest.as_deref(), Some("1.0.0"));
+        assert_eq!(second_info.unwrap().latest.as_deref(), Some("2.0.0"));
+        assert!(
+            shared
+                .get_stale(&FileType::Cargo.cache_key("serde"))
+                .await
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn unconfigured_cargo_registry_shares_nothing_with_a_project_configuring_it() {
+        // Given a crates.io row, and a project that does not configure the registry "corp"
+        let shared = Arc::new(HybridCache::in_memory());
+        let crates_io_info = VersionInfo {
+            latest: Some("9.9.9".to_string()),
+            ..Default::default()
+        };
+        shared
+            .insert_many(vec![(
+                FileType::Cargo.cache_key("serde"),
+                crates_io_info,
+                std::time::Instant::now(),
+            )])
+            .await;
+        let (fallback, _fallback_socket) = cargo_project(&shared, serde_json::json!({})).await;
+        let registry = sparse_registry_serving("1.0.0").await;
+        let (configured, _configured_socket) = cargo_project(
+            &shared,
+            serde_json::json!({ "corp": { "index_url": registry.uri() } }),
+        )
+        .await;
+
+        // When both look up a crate of that registry
+        let fallback_info = fallback
+            .inner()
+            .get_version_info(FileType::Cargo, "serde", Some("corp"))
+            .await;
+        let configured_info = configured
+            .inner()
+            .get_version_info(FileType::Cargo, "serde", Some("corp"))
+            .await;
+
+        // Then the fallback reads the crates.io row, and the other project its own registry
+        assert_eq!(fallback_info.unwrap().latest.as_deref(), Some("9.9.9"));
+        assert_eq!(configured_info.unwrap().latest.as_deref(), Some("1.0.0"));
+    }
+
+    #[tokio::test]
+    async fn blank_index_url_is_not_a_configured_registry() {
+        let shared = Arc::new(HybridCache::in_memory());
+        let (project, _socket) =
+            cargo_project(&shared, serde_json::json!({ "corp": { "index_url": " " } })).await;
+
+        assert!(project.inner().cargo_custom_registries.is_empty());
     }
 
     #[tokio::test]

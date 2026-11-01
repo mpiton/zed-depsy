@@ -1,10 +1,21 @@
 //! Configuration management for Depsy LSP
 
+use std::time::Duration;
+
 use hashbrown::HashMap;
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 
 /// Default cache TTL (1 hour)
 const DEFAULT_CACHE_TTL_SECS: u64 = 3600;
+
+/// Lowest accepted cache TTL (1 minute)
+///
+/// Expired data is fetched again by the 10-second background refresh, and update code actions need
+/// live data, so a TTL close to zero would refetch open packages constantly and offer no updates.
+const MIN_CACHE_TTL_SECS: u64 = 60;
+
+/// Highest accepted cache TTL (10 years)
+const MAX_CACHE_TTL_SECS: u64 = crate::cache::MAX_TTL.as_secs();
 
 /// Default vulnerability cache TTL (6 hours)
 const DEFAULT_VULN_CACHE_TTL_SECS: u64 = 6 * 3600;
@@ -72,6 +83,7 @@ const DEFAULT_DEBOUNCE_MS: u64 = 200;
 #[serde(default)]
 pub struct CacheConfig {
     /// Cache TTL in seconds
+    #[serde(deserialize_with = "saturating_secs")]
     pub ttl_secs: u64,
     /// Debounce delay for did_change notifications in milliseconds
     pub debounce_ms: u64,
@@ -83,6 +95,22 @@ impl Default for CacheConfig {
             ttl_secs: DEFAULT_CACHE_TTL_SECS,
             debounce_ms: DEFAULT_DEBOUNCE_MS,
         }
+    }
+}
+
+/// Reads any JSON number as whole seconds, so that a value `u64` cannot hold reaches the clamp in
+/// [`CacheConfig::ttl`] instead of failing the parse and resetting every setting
+///
+/// The float cast saturates: negative values give 0, too large ones `u64::MAX`, fractions are
+/// dropped. Its precision loss only starts far above the highest accepted TTL.
+fn saturating_secs<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
+    f64::deserialize(deserializer).map(|secs| secs as u64)
+}
+
+impl CacheConfig {
+    /// Version cache TTL, with `ttl_secs` clamped to the accepted range
+    pub fn ttl(&self) -> Duration {
+        Duration::from_secs(self.ttl_secs.clamp(MIN_CACHE_TTL_SECS, MAX_CACHE_TTL_SECS))
     }
 }
 
@@ -430,6 +458,39 @@ mod tests {
         let config = CacheConfig::default();
         assert_eq!(config.ttl_secs, DEFAULT_CACHE_TTL_SECS);
         assert_eq!(config.debounce_ms, DEFAULT_DEBOUNCE_MS);
+    }
+
+    #[test]
+    fn cache_ttl_keeps_a_value_in_range_and_clamps_the_others() {
+        let ttl = |ttl_secs| {
+            CacheConfig {
+                ttl_secs,
+                ..CacheConfig::default()
+            }
+            .ttl()
+            .as_secs()
+        };
+
+        assert_eq!(ttl(7200), 7200);
+        assert_eq!(ttl(0), MIN_CACHE_TTL_SECS);
+        assert_eq!(ttl(u64::MAX), 315_360_000);
+    }
+
+    #[test]
+    fn cache_ttl_a_u64_cannot_hold_is_clamped_and_keeps_the_other_settings() {
+        for (ttl_secs, expected) in [
+            (serde_json::json!(-1), 60),
+            (serde_json::json!(3600.5), 3600),
+            (serde_json::json!(1e30), 315_360_000),
+        ] {
+            let config = Config::from_init_options(Some(serde_json::json!({
+                "cache": { "ttl_secs": ttl_secs },
+                "ignore": ["lodash"]
+            })));
+
+            assert_eq!(config.cache.ttl().as_secs(), expected, "{ttl_secs}");
+            assert_eq!(config.ignore, ["lodash"], "{ttl_secs}");
+        }
     }
 
     #[test]

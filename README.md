@@ -268,7 +268,7 @@ Configure Depsy in your Zed `settings.json`:
 | `inlay_hints.enabled` | bool | `true` | Enable/disable inlay hints |
 | `inlay_hints.show_up_to_date` | bool | `true` | Show hints for up-to-date packages |
 | `diagnostics.enabled` | bool | `true` | Enable/disable diagnostics |
-| `cache.ttl_secs` | number | `3600` | Cache TTL in seconds (1 hour) |
+| `cache.ttl_secs` | number | `3600` | Version cache TTL in seconds (1 hour), clamped to 60–315360000 |
 | `cache.debounce_ms` | number | `200` | Debounce delay for file change notifications (ms) |
 | `ignore` | string[] | `[]` | Package names/patterns to ignore |
 | `security.enabled` | bool | `true` | Enable/disable vulnerability scanning |
@@ -626,7 +626,7 @@ security-scan:
 - Known updates not appearing
 
 **Solutions:**
-1. While a manifest is open, data past its 1-hour lifetime is fetched again in the background, and the hints update by themselves. Refresh checks run every 10 seconds
+1. While a manifest is open, data past its cache lifetime (`cache.ttl_secs`, 1 hour by default) is fetched again in the background, and the hints update by themselves. Refresh checks run every 10 seconds
 2. Clear cache manually to force refresh:
    ```bash
    rm -rf ~/.cache/depsy/
@@ -704,7 +704,7 @@ Depsy uses a hybrid caching system:
   - macOS: `~/Library/Caches/depsy/cache.db`
   - Windows: `%LOCALAPPDATA%\depsy\cache.db`
 
-Cache entries expire after 1 hour, then stay available for 7 days as a fallback. Vulnerability data is cached for 6 hours. While a dependency file is open, cached data is shown immediately and expired data is fetched again in the background.
+Cache entries expire after 1 hour by default, then stay available for 7 days as a fallback. `cache.ttl_secs` sets the lifetime of entries written after the change; an existing entry lasts for the shorter of the lifetime it was written with and the current one. Vulnerability data is cached for 6 hours. While a dependency file is open, cached data is shown immediately and expired data is fetched again in the background.
 
 ### How do I clear the cache?
 
@@ -723,7 +723,7 @@ Then restart Zed. The cache will rebuild as you open dependency files.
 
 ### Can I use this offline?
 
-Yes, with limitations. Cached packages stay available offline for 7 days after their 1-hour cache lifetime ends, shown as they were last fetched. That window is not configurable. New packages or those not in cache won't have version information, and update code actions need data less than 1 hour old.
+Yes, with limitations. Cached packages stay available offline for 7 days after their cache lifetime ends (`cache.ttl_secs`, 1 hour by default), shown as they were last fetched. That window is not configurable. New packages or those not in cache won't have version information, and update code actions need data within that lifetime.
 
 ### Which package registries are supported?
 

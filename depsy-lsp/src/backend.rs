@@ -1570,6 +1570,17 @@ impl LanguageServer for DepsyBackend {
             config.advisory_cache.negative_ttl_secs
         );
 
+        // Same reason as above: the version cache was built before the client settings arrived
+        let cache_ttl = config.cache.ttl();
+        if cache_ttl.as_secs() != config.cache.ttl_secs {
+            tracing::warn!(
+                requested = config.cache.ttl_secs,
+                applied = cache_ttl.as_secs(),
+                "cache.ttl_secs out of range, clamped"
+            );
+        }
+        self.version_cache.set_ttl(cache_ttl);
+
         // Store the configuration
         if let Ok(mut cfg) = self.config.write() {
             *cfg = config;
@@ -2798,6 +2809,59 @@ mod tests {
         .await
         .expect("the slow package was never requested from the mock registry");
         pass
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn initialize_applies_the_configured_cache_ttl() {
+        let (service, _socket) = tower_lsp::LspService::new(DepsyBackend::in_memory);
+        let backend = service.inner();
+
+        backend
+            .initialize(InitializeParams {
+                initialization_options: Some(serde_json::json!({
+                    "cache": { "ttl_secs": 7200 },
+                    "advisory_cache": { "enabled": false },
+                    "security": { "enabled": false }
+                })),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            backend.version_cache.ttl(),
+            std::time::Duration::from_secs(7200)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn initialize_clamps_an_out_of_range_cache_ttl() {
+        for (ttl_secs, expected) in [
+            (serde_json::json!(0), 60),
+            (serde_json::json!(-1), 60),
+            (serde_json::json!(u64::MAX), 315_360_000),
+        ] {
+            let (service, _socket) = tower_lsp::LspService::new(DepsyBackend::in_memory);
+            let backend = service.inner();
+
+            backend
+                .initialize(InitializeParams {
+                    initialization_options: Some(serde_json::json!({
+                        "cache": { "ttl_secs": ttl_secs },
+                        "advisory_cache": { "enabled": false },
+                        "security": { "enabled": false }
+                    })),
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+
+            assert_eq!(
+                backend.version_cache.ttl(),
+                std::time::Duration::from_secs(expected),
+                "{ttl_secs}"
+            );
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

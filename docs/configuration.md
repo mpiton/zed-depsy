@@ -106,8 +106,14 @@ Configure Depsy in your Zed `settings.json`:
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `cache.ttl_secs` | number | `3600` | Cache time-to-live in seconds (1 hour default) |
+| `cache.ttl_secs` | number | `3600` | Version cache time-to-live in seconds (1 hour default) |
 | `cache.debounce_ms` | number | `200` | Debounce delay for file change notifications (ms) |
+
+{: .note }
+Numbers outside 60–315360000 (10 years), negative ones included, are clamped with a warning in the log, and fractions of a second are dropped. The setting sets the TTL of entries fetched after the change. An existing entry lasts for the shorter of the TTL it was written with and the current one, so lowering the setting also applies to it and raising it does not. An expired entry is fetched again in the background while a manifest that uses it is open.
+
+{: .warning }
+A `cache.ttl_secs` shorter than the time needed to fetch a whole manifest keeps the background refresh running without end, and update code actions can disappear for packages whose data has already expired. crates.io allows one request per second, so a `Cargo.toml` with 100 dependencies needs about 100 seconds.
 
 **Example:**
 ```json
@@ -287,7 +293,7 @@ Then restart Zed. The cache will rebuild as you open dependency files.
 
 ### Offline Work
 
-Cached registry data stays available offline for 7 days after its 1-hour lifetime ends, shown as it was last fetched. That window is not configurable. Update code actions need data less than 1 hour old, so they are not offered on older data.
+Cached registry data stays available offline for 7 days after its lifetime ends (`cache.ttl_secs`, 1 hour by default), shown as it was last fetched. That window is not configurable. Update code actions need data within that lifetime, so they are not offered on older data.
 
 ### Noisy Projects
 

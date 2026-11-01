@@ -85,7 +85,7 @@ The extension could not download the language-server release matching its own ve
 
 **Solutions:**
 
-1. While a manifest is open, data past its 1-hour lifetime is fetched again in the background, and the hints update by themselves. Refresh checks run every 10 seconds
+1. While a manifest is open, data past its cache lifetime (`cache.ttl_secs`, 1 hour by default) is fetched again in the background, and the hints update by themselves. Refresh checks run every 10 seconds. Lowering the setting also applies to data already cached; raising it only applies to data fetched afterwards
 2. Clear cache manually to force refresh:
    ```bash
    rm -rf ~/.cache/depsy/

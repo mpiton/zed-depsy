@@ -110,7 +110,10 @@ Configure Depsy in your Zed `settings.json`:
 | `cache.debounce_ms` | number | `200` | Debounce delay for file change notifications (ms) |
 
 {: .note }
-Values of `cache.ttl_secs` outside 60–315360000 (10 years) are clamped, with a warning in the log. The setting applies to entries fetched after the change: existing entries keep the TTL they were written with. An expired entry is fetched again in the background while a manifest that uses it is open.
+Numbers outside 60–315360000 (10 years), negative ones included, are clamped with a warning in the log, and fractions of a second are dropped. The setting sets the TTL of entries fetched after the change. An existing entry lasts for the shorter of the TTL it was written with and the current one, so lowering the setting also applies to it and raising it does not. An expired entry is fetched again in the background while a manifest that uses it is open.
+
+{: .warning }
+A `cache.ttl_secs` shorter than the time needed to fetch a whole manifest keeps the background refresh running without end, and update code actions can disappear for packages whose data has already expired. crates.io allows one request per second, so a `Cargo.toml` with 100 dependencies needs about 100 seconds.
 
 **Example:**
 ```json

@@ -312,7 +312,7 @@ Three independent caches each live in `depsy-lsp/src/cache/`. They serve differe
 ```mermaid
 flowchart TB
     subgraph hybrid["HybridCache (version info)"]
-        L1[("Memory L1<br/>DashMap<String, CacheEntry><br/>TTL 1h, lazy expiry")]
+        L1[("Memory L1<br/>DashMap<String, CacheEntry><br/>TTL from cache.ttl_secs, lazy expiry")]
         L2[("SQLite L2<br/>r2d2 pool, WAL<br/>~/.cache/depsy/cache.db")]
         L1 -->|miss → read-through| L2
         L2 -->|backfill| L1

@@ -2835,6 +2835,36 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn initialize_clamps_an_out_of_range_cache_ttl() {
+        for (ttl_secs, expected) in [
+            (serde_json::json!(0), 60),
+            (serde_json::json!(-1), 60),
+            (serde_json::json!(u64::MAX), 315_360_000),
+        ] {
+            let (service, _socket) = tower_lsp::LspService::new(DepsyBackend::in_memory);
+            let backend = service.inner();
+
+            backend
+                .initialize(InitializeParams {
+                    initialization_options: Some(serde_json::json!({
+                        "cache": { "ttl_secs": ttl_secs },
+                        "advisory_cache": { "enabled": false },
+                        "security": { "enabled": false }
+                    })),
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+
+            assert_eq!(
+                backend.version_cache.ttl(),
+                std::time::Duration::from_secs(expected),
+                "{ttl_secs}"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn superseded_pass_does_not_replace_the_newer_document_state() {
         // Given a pass still waiting on a slow package
         let registry = registry_with_a_slow_package().await;

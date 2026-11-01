@@ -82,7 +82,8 @@ impl Default for SqliteCacheConfig {
 /// SQLite-based persistent cache with connection pooling
 pub struct SqliteCache {
     pool: Arc<Pool<SqliteConnectionManager>>,
-    /// TTL stored with the rows written from now on, see [`Self::set_ttl`]
+    /// TTL stored with the rows written from now on, and upper bound of the TTL of the rows read,
+    /// see [`Self::set_ttl`]
     ttl_secs: AtomicI64,
     stale_secs: i64,
 }
@@ -95,7 +96,9 @@ impl SqliteCache {
 
     /// Set the TTL of the rows written from now on, truncated to whole seconds and capped at [`MAX_TTL`]
     ///
-    /// Each row keeps the TTL it was written with, so existing rows are unaffected.
+    /// A row read later lasts for the shorter of its stored TTL and this one. The file is shared by
+    /// every project, so a long TTL set by one of them must not bind the others, and raising the TTL
+    /// does not extend the rows already written.
     pub fn set_ttl(&self, ttl: Duration) {
         let ttl_secs = i64::try_from(ttl.min(MAX_TTL).as_secs()).unwrap_or(i64::MAX);
         self.ttl_secs.store(ttl_secs, Ordering::Relaxed);
@@ -249,6 +252,7 @@ impl ReadCache for SqliteCache {
         // Mirrors `get`'s expiration policy but only reads `inserted_at`/`ttl_secs`.
         let pool = Arc::clone(&self.pool);
         let key = key.to_string();
+        let max_ttl_secs = self.ttl_secs.load(Ordering::Relaxed);
         tokio::task::spawn_blocking(move || {
             let Ok(conn) = pool.get() else {
                 return false;
@@ -260,7 +264,9 @@ impl ReadCache for SqliteCache {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             );
             match result {
-                Ok((inserted_at, ttl_secs)) => now <= inserted_at + ttl_secs * NANOS_PER_SEC,
+                Ok((inserted_at, ttl_secs)) => {
+                    now <= inserted_at + ttl_secs.min(max_ttl_secs) * NANOS_PER_SEC
+                }
                 Err(_) => false,
             }
         })
@@ -326,6 +332,7 @@ impl SqliteCache {
         let pool = Arc::clone(&self.pool);
         let key = key.to_string();
         let stale_secs = self.stale_secs;
+        let max_ttl_secs = self.ttl_secs.load(Ordering::Relaxed);
         // spawn_blocking offloads the blocking rusqlite work to the dedicated blocking thread pool
         // keeping the tokio event loop responsive
         // Note: spawn_blocking tasks are not cancelable if the future is dropped
@@ -341,6 +348,7 @@ impl SqliteCache {
                     |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                 )
                 .ok()?;
+            let ttl_secs = ttl_secs.min(max_ttl_secs);
             let fresh = now <= inserted_at + ttl_secs * NANOS_PER_SEC;
             let in_stale_window = now <= inserted_at + (ttl_secs + stale_secs) * NANOS_PER_SEC;
             if !(fresh || allow_stale && in_stale_window) {
@@ -476,9 +484,9 @@ pub(crate) struct StoredRow {
     pub(crate) value: VersionInfo,
     /// How long ago the value was fetched
     pub(crate) age: Duration,
-    /// TTL the row was written with
+    /// Shorter of the TTL the row was written with and the current one
     pub(crate) ttl: Duration,
-    /// Whether the row is still within its TTL
+    /// Whether the row is still within that TTL
     pub(crate) fresh: bool,
 }
 

@@ -3,15 +3,15 @@
 use std::time::Duration;
 
 use hashbrown::HashMap;
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 
 /// Default cache TTL (1 hour)
 const DEFAULT_CACHE_TTL_SECS: u64 = 3600;
 
 /// Lowest accepted cache TTL (1 minute)
 ///
-/// Inlay hints only read the cache, so a TTL close to zero would show every package as unknown
-/// right after it was fetched.
+/// Expired data is fetched again by the 10-second background refresh, and update code actions need
+/// live data, so a TTL close to zero would refetch open packages constantly and offer no updates.
 const MIN_CACHE_TTL_SECS: u64 = 60;
 
 /// Highest accepted cache TTL (10 years)
@@ -83,6 +83,7 @@ const DEFAULT_DEBOUNCE_MS: u64 = 200;
 #[serde(default)]
 pub struct CacheConfig {
     /// Cache TTL in seconds
+    #[serde(deserialize_with = "saturating_secs")]
     pub ttl_secs: u64,
     /// Debounce delay for did_change notifications in milliseconds
     pub debounce_ms: u64,
@@ -95,6 +96,15 @@ impl Default for CacheConfig {
             debounce_ms: DEFAULT_DEBOUNCE_MS,
         }
     }
+}
+
+/// Reads any JSON number as whole seconds, so that a value `u64` cannot hold reaches the clamp in
+/// [`CacheConfig::ttl`] instead of failing the parse and resetting every setting
+///
+/// The float cast saturates: negative values give 0, too large ones `u64::MAX`, fractions are
+/// dropped. Its precision loss only starts far above the highest accepted TTL.
+fn saturating_secs<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
+    f64::deserialize(deserializer).map(|secs| secs as u64)
 }
 
 impl CacheConfig {
@@ -463,7 +473,24 @@ mod tests {
 
         assert_eq!(ttl(7200), 7200);
         assert_eq!(ttl(0), MIN_CACHE_TTL_SECS);
-        assert_eq!(ttl(u64::MAX), MAX_CACHE_TTL_SECS);
+        assert_eq!(ttl(u64::MAX), 315_360_000);
+    }
+
+    #[test]
+    fn cache_ttl_a_u64_cannot_hold_is_clamped_and_keeps_the_other_settings() {
+        for (ttl_secs, expected) in [
+            (serde_json::json!(-1), 60),
+            (serde_json::json!(3600.5), 3600),
+            (serde_json::json!(1e30), 315_360_000),
+        ] {
+            let config = Config::from_init_options(Some(serde_json::json!({
+                "cache": { "ttl_secs": ttl_secs },
+                "ignore": ["lodash"]
+            })));
+
+            assert_eq!(config.cache.ttl().as_secs(), expected, "{ttl_secs}");
+            assert_eq!(config.ignore, ["lodash"], "{ttl_secs}");
+        }
     }
 
     #[test]

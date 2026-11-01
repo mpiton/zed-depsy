@@ -30,7 +30,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   longer lets that fetch put the document back into the server state.
 - `cache.ttl_secs` now takes effect. It was parsed and then ignored, so
   version cache entries always lasted 1 hour. Values are clamped to the range
-  from 60 seconds to 10 years, and entries already cached keep their TTL.
+  from 60 seconds to 10 years. An entry already cached lasts for the shorter
+  of the TTL it was written with and the current one.
 - A dependency whose registry fetch failed no longer stays `? Unknown` until
   the manifest is closed and reopened. The language server retries every
   failed fetch in the background: network errors, timeouts and rate limits,
@@ -39,9 +40,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   later. Refresh checks run every 10 seconds while a manifest that uses the
   package is open; repeated failures back off from 10 seconds up to 30 minutes
 - Hints and diagnostics no longer turn `? Unknown` an hour after a manifest
-  was opened. Registry data past its one-hour cache lifetime is still shown,
-  for up to 7 days, while the language server fetches it again. Update code
-  actions still need data less than an hour old
+  was opened. Registry data past its cache lifetime (`cache.ttl_secs`, 1 hour
+  by default) is still shown, for up to 7 days, while the language server
+  fetches it again. Update code actions still need data within that lifetime
 - Vulnerabilities no longer disappear from a manifest left open past the
   6-hour lifetime of their OSV result. The language server queries OSV again
   in the background, and a failed query is retried with the same backoff

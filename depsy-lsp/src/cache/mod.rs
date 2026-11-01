@@ -371,7 +371,8 @@ impl HybridCache {
     /// Set the TTL of the entries written from now on, in both layers
     ///
     /// The cache is built and shared before the client settings arrive in `initialize`, hence a setter
-    /// rather than a constructor parameter. Entries already written keep the TTL they were written with.
+    /// rather than a constructor parameter. A disk row lasts for the shorter of the TTL it was written with
+    /// and this one, see [`SqliteCache::set_ttl`].
     pub fn set_ttl(&self, ttl: Duration) {
         self.memory.set_ttl(ttl);
         if let Some(ref sqlite) = self.sqlite {
@@ -721,20 +722,31 @@ mod tests {
     async fn hybrid_set_ttl_expires_new_entries_in_both_layers() {
         // Given a TTL shorter than the default
         let cache = HybridCache::in_memory();
-        cache.set_ttl(Duration::from_secs(1));
+        cache.set_ttl(Duration::from_secs(60));
 
-        // When an entry is written and outlives it
+        // When one entry is written within it and another one past it
         cache
-            .insert("key".to_string(), create_test_version_info())
+            .insert_many(vec![
+                (
+                    "within".to_string(),
+                    create_test_version_info(),
+                    Instant::now() - Duration::from_secs(30),
+                ),
+                (
+                    "past".to_string(),
+                    create_test_version_info(),
+                    Instant::now() - Duration::from_secs(90),
+                ),
+            ])
             .await;
-        assert!(cache.get("key").await.is_some());
-        tokio::time::sleep(Duration::from_millis(1100)).await;
 
-        // Then neither layer serves it any more
+        // Then both layers serve the first one and neither serves the other
         let sqlite = cache.sqlite.as_ref().expect("in-memory SQLite layer");
-        assert!(cache.memory.get("key").await.is_none());
-        assert!(sqlite.get("key").await.is_none());
-        assert!(cache.get("key").await.is_none());
+        assert!(cache.memory.get("within").await.is_some());
+        assert!(sqlite.get("within").await.is_some());
+        assert!(cache.memory.get("past").await.is_none());
+        assert!(sqlite.get("past").await.is_none());
+        assert!(cache.get("past").await.is_none());
     }
 
     /// Hybrid cache holding one row on disk only, written `age` ago with `written_ttl`
@@ -765,17 +777,50 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn promoted_row_stays_fresh_in_memory_after_the_ttl_is_lowered() {
-        let written_ttl = Duration::from_secs(3600);
-        let cache = hybrid_with_disk_row(written_ttl, Duration::from_secs(90)).await;
+    async fn promoted_row_takes_a_ttl_lower_than_the_one_it_was_written_with() {
+        let cache = hybrid_with_disk_row(Duration::from_secs(3600), Duration::from_secs(30)).await;
 
-        // Older than the new TTL, but still within the one it was written with
-        cache.set_ttl(Duration::from_secs(60));
+        let lowered_ttl = Duration::from_secs(60);
+        cache.set_ttl(lowered_ttl);
         assert!(cache.get("key").await.is_some());
 
-        assert!(cache.memory.contains("key").await);
         let entry = cache.memory.entries.get("key").unwrap();
-        assert_eq!(entry.ttl, written_ttl);
+        assert_eq!(entry.ttl, lowered_ttl);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn row_past_a_lowered_ttl_is_stale_for_this_project() {
+        // Given a row another project wrote with a long TTL
+        let cache = hybrid_with_disk_row(MAX_TTL, Duration::from_secs(90)).await;
+
+        // When this project reads it with a TTL the row has outlived
+        cache.set_ttl(Duration::from_secs(60));
+
+        // Then it is stale here, whichever way it is looked up
+        let sqlite = cache.sqlite.as_ref().expect("in-memory SQLite layer");
+        assert!(!sqlite.contains("key").await);
+        assert!(cache.get("key").await.is_none());
+        assert!(!cache.contains("key").await);
+        assert!(cache.get_stale("key").await.is_some());
+        assert!(!cache.memory.contains("key").await);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stale_window_runs_from_the_lowered_ttl() {
+        let cache = hybrid_with_test_windows();
+        cache.set_ttl(MAX_TTL);
+        cache
+            .insert_many(vec![(
+                "key".to_string(),
+                create_test_version_info(),
+                Instant::now() - EVICTABLE_AGE,
+            )])
+            .await;
+        cache.memory.remove("key").await;
+
+        cache.set_ttl(TEST_WINDOW);
+
+        assert!(cache.get_stale("key").await.is_none());
     }
 
     #[tokio::test]

@@ -312,7 +312,7 @@ Three independent caches each live in `depsy-lsp/src/cache/`. They serve differe
 ```mermaid
 flowchart TB
     subgraph hybrid["HybridCache (version info)"]
-        L1[("Memory L1<br/>DashMap<String, CacheEntry><br/>TTL from cache.ttl_secs, lazy expiry")]
+        L1[("Memory L1<br/>DashMap<String, CacheEntry><br/>TTL stored per entry, capped by cache.ttl_secs, lazy expiry")]
         L2[("SQLite L2<br/>r2d2 pool, WAL<br/>~/.cache/depsy/cache.db")]
         L1 -->|miss → read-through| L2
         L2 -->|backfill| L1
@@ -338,7 +338,7 @@ flowchart TB
 
 Two-tier read-through, write-through cache (`depsy-lsp/src/cache/mod.rs`):
 
-- **L1 = `MemoryCache`** — `DashMap<String, CacheEntry>`. Key like `"crates.io:serde"`. Value = `VersionInfo` + `(inserted_at, ttl)`. Default TTL 1 hour, set from `cache.ttl_secs` in `initialize` for both tiers. Lazy expiry on `get`; bulk sweep every 30 min by a background tokio task.
+- **L1 = `MemoryCache`** — `DashMap<String, CacheEntry>`. Key like `"crates.io:serde"`. Value = `VersionInfo` + `(inserted_at, ttl)`. Default TTL 1 hour, set from `cache.ttl_secs` in `initialize` for both tiers. A new entry stores that TTL, and an existing row lasts for the shorter of its stored TTL and the current one. Lazy expiry on `get`; bulk sweep every 30 min by a background tokio task.
 - **L2 = `SqliteCache`** — `r2d2::Pool<SqliteConnectionManager>` over `~/.cache/depsy/cache.db`. Schema: `packages(key TEXT PRIMARY KEY, data TEXT, inserted_at INTEGER, ttl_secs INTEGER)`. WAL journal. Index on `(inserted_at, ttl_secs)` for bulk expiry deletes. All DB calls offloaded to `tokio::task::spawn_blocking` — never block the runtime.
 
 Read path: check L1 → on miss, read L2 → on hit, write back to L1. Write path: write to both layers simultaneously.

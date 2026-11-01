@@ -149,7 +149,7 @@ Hovering over any dependency reveals detailed information:
 
 ### Stale Hints
 
-1. Keep the manifest open: data past its cache lifetime (`cache.ttl_secs`, 1 hour by default) is fetched again in the background, and the hints update by themselves
+1. Keep the manifest open: data past its cache lifetime (`cache.ttl_secs`, 1 hour by default) is fetched again in the background, and the hints update by themselves. Lowering the setting also applies to data already cached; raising it only applies to data fetched afterwards
 2. Clear the cache manually:
    ```bash
    rm -rf ~/.cache/depsy/

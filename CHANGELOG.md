@@ -18,6 +18,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pass certificate verification).
 - Bumped `tokio` from 1.53.2 to 1.54.1 to clear the RUSTSEC-2026-0386
   unsoundness warning.
+- npm and Maven data fetched from a custom registry no longer lands under the
+  key of the public registry in the user-wide `cache.db`. A `.zed/settings.json`
+  setting `registries.npm.url`, a scoped npm registry or `registries.maven.url`
+  could otherwise feed versions to every other project using the same package.
+  Each non-default registry URL now has its own rows; default registries keep
+  their existing rows. Rows written before this change stay under the public
+  key until they expire.
 
 ### Fixed
 

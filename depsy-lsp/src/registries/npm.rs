@@ -117,7 +117,8 @@ impl NpmRegistry {
 
             // Normalize scope name: remove leading '@' and trim whitespace
             let normalized_scope = scope.trim().strip_prefix('@').unwrap_or(scope.trim());
-            scoped_registries.insert(normalized_scope.to_string(), cfg.url.clone());
+            let url = config.scoped_url(normalized_scope).unwrap_or(&cfg.url);
+            scoped_registries.insert(normalized_scope.to_string(), url.to_string());
 
             // Set up authentication if configured
             if let Some(auth) = &cfg.auth {

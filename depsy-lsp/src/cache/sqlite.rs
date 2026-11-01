@@ -11,7 +11,7 @@ use super::sqlite_manager::{NANOS_PER_SEC, SqliteConnectionManager};
 use r2d2::Pool;
 use rusqlite::params;
 
-use crate::cache::{ReadCache, WriteCache};
+use crate::cache::{MAX_TTL, ReadCache, WriteCache};
 use crate::registries::VersionInfo;
 
 /// Default TTL for cache entries (1 hour)
@@ -93,11 +93,11 @@ impl SqliteCache {
         Self::with_config(SqliteCacheConfig::default())
     }
 
-    /// Set the TTL of the rows written from now on, truncated to whole seconds
+    /// Set the TTL of the rows written from now on, truncated to whole seconds and capped at [`MAX_TTL`]
     ///
     /// Each row keeps the TTL it was written with, so existing rows are unaffected.
     pub fn set_ttl(&self, ttl: Duration) {
-        let ttl_secs = i64::try_from(ttl.as_secs()).unwrap_or(i64::MAX);
+        let ttl_secs = i64::try_from(ttl.min(MAX_TTL).as_secs()).unwrap_or(i64::MAX);
         self.ttl_secs.store(ttl_secs, Ordering::Relaxed);
     }
 
@@ -347,9 +347,12 @@ impl SqliteCache {
                 return None;
             }
             let age = Duration::from_nanos(u64::try_from(now - inserted_at).unwrap_or(0));
-            serde_json::from_str(&data)
-                .ok()
-                .map(|value| StoredRow { value, age, fresh })
+            serde_json::from_str(&data).ok().map(|value| StoredRow {
+                value,
+                age,
+                ttl: Duration::from_secs(u64::try_from(ttl_secs).unwrap_or(0)),
+                fresh,
+            })
         })
         .await
         .ok()
@@ -473,6 +476,8 @@ pub(crate) struct StoredRow {
     pub(crate) value: VersionInfo,
     /// How long ago the value was fetched
     pub(crate) age: Duration,
+    /// TTL the row was written with
+    pub(crate) ttl: Duration,
     /// Whether the row is still within its TTL
     pub(crate) fresh: bool,
 }
@@ -779,6 +784,22 @@ mod tests {
         };
         assert_eq!(stored_ttl("old"), DEFAULT_TTL_SECS);
         assert_eq!(stored_ttl("new"), 7200);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn set_ttl_caps_values_the_freshness_check_cannot_hold() {
+        let cache = SqliteCache::in_memory().unwrap();
+        cache.set_ttl(Duration::from_secs(u64::MAX));
+        cache
+            .insert("k".to_string(), create_test_version_info())
+            .await;
+
+        assert_eq!(
+            cache.ttl_secs.load(Ordering::Relaxed),
+            i64::try_from(MAX_TTL.as_secs()).unwrap()
+        );
+        assert!(cache.get("k").await.is_some());
+        assert!(cache.contains("k").await);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

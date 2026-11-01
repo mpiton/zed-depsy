@@ -704,7 +704,7 @@ Depsy uses a hybrid caching system:
   - macOS: `~/Library/Caches/depsy/cache.db`
   - Windows: `%LOCALAPPDATA%\depsy\cache.db`
 
-Cache entries expire after 1 hour by default (configurable via `cache.ttl_secs`), then stay available for 7 days as a fallback. Vulnerability data is cached for 6 hours. While a dependency file is open, cached data is shown immediately and expired data is fetched again in the background.
+Cache entries expire after 1 hour by default, then stay available for 7 days as a fallback. `cache.ttl_secs` changes the lifetime of entries written after the change; existing entries keep the one they were written with. Vulnerability data is cached for 6 hours. While a dependency file is open, cached data is shown immediately and expired data is fetched again in the background.
 
 ### How do I clear the cache?
 

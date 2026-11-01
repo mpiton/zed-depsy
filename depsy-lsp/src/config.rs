@@ -15,9 +15,7 @@ const DEFAULT_CACHE_TTL_SECS: u64 = 3600;
 const MIN_CACHE_TTL_SECS: u64 = 60;
 
 /// Highest accepted cache TTL (10 years)
-///
-/// The SQLite layer compares timestamps as `i64` nanoseconds, so `inserted_at + ttl` has to fit.
-const MAX_CACHE_TTL_SECS: u64 = 10 * 365 * 24 * 3600;
+const MAX_CACHE_TTL_SECS: u64 = crate::cache::MAX_TTL.as_secs();
 
 /// Default vulnerability cache TTL (6 hours)
 const DEFAULT_VULN_CACHE_TTL_SECS: u64 = 6 * 3600;

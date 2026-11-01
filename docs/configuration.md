@@ -106,8 +106,11 @@ Configure Depsy in your Zed `settings.json`:
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `cache.ttl_secs` | number | `3600` | Version cache time-to-live in seconds (1 hour default). Values outside 60–315360000 (10 years) are clamped, with a warning in the log. Applies to entries fetched from then on: existing entries keep the TTL they were written with, and an expired entry is fetched again in the background while a manifest that uses it is open |
+| `cache.ttl_secs` | number | `3600` | Version cache time-to-live in seconds (1 hour default) |
 | `cache.debounce_ms` | number | `200` | Debounce delay for file change notifications (ms) |
+
+{: .note }
+Values of `cache.ttl_secs` outside 60–315360000 (10 years) are clamped, with a warning in the log. The setting applies to entries fetched after the change: existing entries keep the TTL they were written with. An expired entry is fetched again in the background while a manifest that uses it is open.
 
 **Example:**
 ```json

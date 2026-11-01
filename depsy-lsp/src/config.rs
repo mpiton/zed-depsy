@@ -159,6 +159,12 @@ impl AuthConfig {
     }
 }
 
+/// URL of the public npm registry
+pub const DEFAULT_NPM_REGISTRY_URL: &str = "https://registry.npmjs.org";
+
+/// URL of Maven Central
+pub const DEFAULT_MAVEN_REGISTRY_URL: &str = "https://repo1.maven.org/maven2";
+
 /// Configuration for a scoped npm registry
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct NpmScopedConfig {
@@ -183,9 +189,35 @@ pub struct NpmRegistryConfig {
 impl Default for NpmRegistryConfig {
     fn default() -> Self {
         Self {
-            url: "https://registry.npmjs.org".to_string(),
+            url: DEFAULT_NPM_REGISTRY_URL.to_string(),
             scoped: HashMap::new(),
         }
+    }
+}
+
+impl NpmRegistryConfig {
+    /// URL of the registry configured for `scope` (without `@`).
+    ///
+    /// Scope names are compared without whitespace and `@`. When several spellings of a scope are
+    /// configured, the first in sort order wins, so cache keys and requests agree on the registry.
+    pub fn scoped_url(&self, scope: &str) -> Option<&str> {
+        self.scoped
+            .iter()
+            .filter(|(name, cfg)| {
+                let name = name.trim();
+                !cfg.url.is_empty() && name.strip_prefix('@').unwrap_or(name) == scope
+            })
+            .min_by_key(|(name, _)| name.as_str())
+            .map(|(_, cfg)| cfg.url.as_str())
+    }
+
+    /// URL of the registry that serves `package_name`, its scope's registry if it has one.
+    pub fn url_for(&self, package_name: &str) -> &str {
+        package_name
+            .strip_prefix('@')
+            .and_then(|scoped| scoped.split_once('/'))
+            .and_then(|(scope, _)| self.scoped_url(scope))
+            .unwrap_or(&self.url)
     }
 }
 
@@ -220,7 +252,7 @@ pub struct MavenRegistryConfig {
 impl Default for MavenRegistryConfig {
     fn default() -> Self {
         Self {
-            url: "https://repo1.maven.org/maven2".to_string(),
+            url: DEFAULT_MAVEN_REGISTRY_URL.to_string(),
         }
     }
 }
@@ -487,6 +519,25 @@ mod tests {
             config.registries.npm.scoped.get("github").unwrap().url,
             "https://npm.pkg.github.com"
         );
+    }
+
+    #[test]
+    fn test_npm_url_for_routes_scoped_packages() {
+        let config: NpmRegistryConfig = serde_json::from_value(serde_json::json!({
+            "url": "https://npm.company.com",
+            "scoped": {
+                "@zeta": { "url": "https://second.example.com" },
+                "zeta": { "url": "https://first.example.com" },
+                "empty": { "url": "" }
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(config.url_for("lodash"), "https://npm.company.com");
+        assert_eq!(config.url_for("@other/pkg"), "https://npm.company.com");
+        assert_eq!(config.url_for("@empty/pkg"), "https://npm.company.com");
+        // "@zeta" sorts before "zeta"
+        assert_eq!(config.url_for("@zeta/pkg"), "https://second.example.com");
     }
 
     #[test]

@@ -39,7 +39,7 @@ use core::fmt;
 use std::time::Duration;
 use std::{
     path::PathBuf,
-    sync::{Arc, RwLock},
+    sync::{Arc, PoisonError, RwLock},
 };
 
 use dashmap::DashMap;
@@ -51,7 +51,9 @@ use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
 
 use crate::cache::{HybridCache, ReadCache};
-use crate::config::Config;
+use crate::config::{
+    Config, DEFAULT_MAVEN_REGISTRY_URL, DEFAULT_NPM_REGISTRY_URL, RegistriesConfig,
+};
 use crate::document::DocumentState;
 use crate::file_types::{FileType, is_pnpm_workspace};
 use crate::parsers::Parser;
@@ -100,6 +102,12 @@ mod refresh;
 /// Registry requests one document pass or background refresh runs at once.
 const FETCH_CONCURRENCY: usize = 5;
 
+/// SHA-256 bytes kept to tell registries apart in cache keys.
+///
+/// 128 bits keep a crafted collision with another project's registry out of reach. Changing this
+/// value orphans the rows of custom registries, which are then fetched again.
+const REGISTRY_DIGEST_BYTES: usize = 16;
+
 /// Walk parents of `file_path` looking for a `.zed/` directory.
 /// Returns the first ancestor that contains it, or `None` if no ancestor has `.zed/`.
 ///
@@ -121,20 +129,77 @@ async fn find_workspace_root(file_path: &std::path::Path) -> Option<std::path::P
     None
 }
 
-/// Compute cache key for a dependency, including registry for Cargo alternative registries.
+/// Compute cache key for a dependency, including the registry it is fetched from.
 ///
-/// For Cargo deps with `registry = "name"`, the key is `crates:{registry}:{name}` to avoid
-/// collisions between crates.io and private registries. All other deps use the standard key.
-fn dep_cache_key(dep: &crate::parsers::Dependency, file_type: FileType) -> String {
-    cache_key_for(file_type, &dep.name, dep.registry.as_deref())
+/// See [`cache_key_for`] for the key formats.
+fn dep_cache_key(
+    dep: &crate::parsers::Dependency,
+    file_type: FileType,
+    registries: &RegistriesConfig,
+) -> String {
+    cache_key_for(registries, file_type, &dep.name, dep.registry.as_deref())
 }
 
 /// Compute cache key for package `name`, from the alternative Cargo `registry` if it has one.
-fn cache_key_for(file_type: FileType, name: &str, registry: Option<&str>) -> String {
-    match (registry, file_type) {
-        (Some(registry), FileType::Cargo) => format!("crates:{registry}:{name}"),
-        _ => file_type.cache_key(name),
+///
+/// `cache.db` is shared by every project of the user, while the npm and Maven registries are set
+/// per project. Packages of a non-default registry therefore use `{url digest}@{standard key}`,
+/// so a project cannot read rows another project fetched from a different registry. The digest
+/// keeps URLs, which can embed credentials, out of the database, and a standard key never starts
+/// with one. Cargo deps with `registry = "name"` use `crates:{registry}:{name}`. All other deps
+/// use the standard key.
+fn cache_key_for(
+    registries: &RegistriesConfig,
+    file_type: FileType,
+    name: &str,
+    registry: Option<&str>,
+) -> String {
+    let (url, default_url) = match (file_type, registry) {
+        (FileType::Cargo, Some(registry)) => return format!("crates:{registry}:{name}"),
+        (FileType::Npm, _) => (registries.npm.url_for(name), DEFAULT_NPM_REGISTRY_URL),
+        (FileType::Maven, _) => (registries.maven.url.as_str(), DEFAULT_MAVEN_REGISTRY_URL),
+        _ => return file_type.cache_key(name),
+    };
+    match custom_registry_digest(url, default_url) {
+        Some(digest) => format!("{digest}@{}", file_type.fmt_cache_key(name)),
+        None => file_type.cache_key(name),
     }
+}
+
+/// Hex digest identifying the registry at `url`, or `None` when `url` is the default registry.
+fn custom_registry_digest(url: &str, default_url: &str) -> Option<String> {
+    let url = normalize_registry_url(url);
+    if url.is_empty() || url == normalize_registry_url(default_url) {
+        return None;
+    }
+    let digest = aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, url.as_bytes());
+    Some(
+        digest.as_ref()[..REGISTRY_DIGEST_BYTES]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect(),
+    )
+}
+
+/// Spells a registry URL one way, so that `https://host/` and `https://host` share their rows.
+fn normalize_registry_url(url: &str) -> String {
+    let url = url.trim();
+    Url::parse(url)
+        .map_or_else(|_| url.to_string(), String::from)
+        .trim_end_matches('/')
+        .to_string()
+}
+
+/// The registries that select cache keys.
+///
+/// A poisoned lock still holds the configuration: the defaults would select the rows of the
+/// public registries for a project that uses private ones.
+fn configured_registries(config: &RwLock<Config>) -> RegistriesConfig {
+    config
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .registries
+        .clone()
 }
 
 #[derive(Default)]
@@ -181,9 +246,13 @@ struct FetchTarget {
 }
 
 impl FetchTarget {
-    fn of(dep: &crate::parsers::Dependency, file_type: FileType) -> Self {
+    fn of(
+        dep: &crate::parsers::Dependency,
+        file_type: FileType,
+        registries: &RegistriesConfig,
+    ) -> Self {
         Self {
-            key: dep_cache_key(dep, file_type),
+            key: dep_cache_key(dep, file_type, registries),
             file_type,
             name: dep.name.clone(),
             registry: dep.registry.clone(),
@@ -300,9 +369,10 @@ impl ProcessingContext {
 
         // Spawned so a newer edit aborting this pass does not lose the responses:
         // the fetch and its cache write finish on their own
+        let registries = configured_registries(&self.config);
         let targets = dependencies
             .iter()
-            .map(|dep| FetchTarget::of(dep, file_type))
+            .map(|dep| FetchTarget::of(dep, file_type, &registries))
             .collect();
         let ctx = self.clone();
         if let Err(e) = tokio::spawn(async move { ctx.fetch_missing(targets).await }).await {
@@ -490,9 +560,10 @@ impl ProcessingContext {
         }
 
         // Pre-build cache key map for registry-aware lookups
+        let registries = configured_registries(&self.config);
         let cache_key_map: HashMap<String, String> = dependencies
             .iter()
-            .map(|dep| (dep.name.clone(), dep_cache_key(dep, file_type)))
+            .map(|dep| (dep.name.clone(), dep_cache_key(dep, file_type, &registries)))
             .collect();
         let diagnostics = create_diagnostics(
             &dependencies,
@@ -501,7 +572,7 @@ impl ProcessingContext {
                 cache_key_map
                     .get(name)
                     .cloned()
-                    .unwrap_or_else(|| file_type.cache_key(name))
+                    .unwrap_or_else(|| cache_key_for(&registries, file_type, name, None))
             },
             severity_filter,
             file_type,
@@ -888,7 +959,8 @@ impl DepsyBackend {
         package_name: &str,
         cargo_registry: Option<&str>,
     ) -> Option<VersionInfo> {
-        let cache_key = cache_key_for(file_type, package_name, cargo_registry);
+        let registries = configured_registries(&self.config);
+        let cache_key = cache_key_for(&registries, file_type, package_name, cargo_registry);
 
         // Check cache first
         if let Some(cached) = self.version_cache.get(&cache_key).await {
@@ -1235,8 +1307,9 @@ impl DepsyBackend {
 
         // Collect vulnerabilities from the version cache and per-version OSV results
         let mut hits: Vec<(&crate::parsers::Dependency, Vec<Vulnerability>)> = Vec::new();
+        let registries = configured_registries(&self.config);
         for dep in &dependencies {
-            let cache_key = dep_cache_key(dep, file_type);
+            let cache_key = dep_cache_key(dep, file_type, &registries);
             if let Some(info) = cached_version_info(
                 &self.version_cache,
                 &cache_key,
@@ -1803,16 +1876,18 @@ impl LanguageServer for DepsyBackend {
         // Prefetch per dependency, not per cache key: two declarations of one
         // package (pnpm named catalogs) share a key but need their own overlay.
         const PREFETCH_CONCURRENCY: usize = 8;
+        let registries = configured_registries(&self.config);
         let version_infos: Vec<Option<VersionInfo>> = {
             use futures::stream::{self, StreamExt};
             // Collected first: keeping the `&Dependency` closure inside the stream
             // trips a higher-ranked lifetime error in the async-trait future.
+            let registries = &registries;
             let lookups: Vec<_> = visible_deps
                 .iter()
                 .map(|dep| async move {
                     cached_version_info(
                         &self.version_cache,
-                        &dep_cache_key(dep, file_type),
+                        &dep_cache_key(dep, file_type, registries),
                         &self.vuln_cache,
                         file_type.to_ecosystem(),
                         dep,
@@ -1944,6 +2019,7 @@ impl LanguageServer for DepsyBackend {
         // Snapshot everything we need from the document state, then drop the
         // DashMap guard before any .await — holding a guard across .await can
         // deadlock other tasks waiting on the same key.
+        let registries = configured_registries(&self.config);
         let (file_type, dependencies, cache_key_map) = {
             let Some(doc) = self.documents.get(uri) else {
                 return Ok(Some(vec![]));
@@ -1953,7 +2029,7 @@ impl LanguageServer for DepsyBackend {
             let cache_key_map: HashMap<String, String> = doc
                 .dependencies
                 .iter()
-                .map(|dep| (dep.name.clone(), dep_cache_key(dep, file_type)))
+                .map(|dep| (dep.name.clone(), dep_cache_key(dep, file_type, &registries)))
                 .collect();
             (file_type, dependencies, cache_key_map)
         };
@@ -1989,7 +2065,7 @@ impl LanguageServer for DepsyBackend {
                 cache_key_map
                     .get(name)
                     .cloned()
-                    .unwrap_or_else(|| file_type.cache_key(name))
+                    .unwrap_or_else(|| cache_key_for(&registries, file_type, name, None))
             },
             &ignored_packages,
             workspace_root.as_deref(),
@@ -2007,6 +2083,7 @@ impl LanguageServer for DepsyBackend {
         // Snapshot everything we need from the document state, then drop the
         // DashMap guard before any .await — holding a guard across .await can
         // block other tasks waiting on the same key.
+        let registries = configured_registries(&self.config);
         let (file_type, dependencies, cache_key_map) = {
             let Some(doc) = self.documents.get(uri) else {
                 return Ok(Some(CompletionResponse::Array(vec![])));
@@ -2016,7 +2093,7 @@ impl LanguageServer for DepsyBackend {
             let cache_key_map: HashMap<String, String> = doc
                 .dependencies
                 .iter()
-                .map(|dep| (dep.name.clone(), dep_cache_key(dep, file_type)))
+                .map(|dep| (dep.name.clone(), dep_cache_key(dep, file_type, &registries)))
                 .collect();
             (file_type, dependencies, cache_key_map)
         };
@@ -2025,7 +2102,7 @@ impl LanguageServer for DepsyBackend {
             cache_key_map
                 .get(name)
                 .cloned()
-                .unwrap_or_else(|| file_type.cache_key(name))
+                .unwrap_or_else(|| cache_key_for(&registries, file_type, name, None))
         })
         .await;
 
@@ -3080,5 +3157,178 @@ mod tests {
         })
         .await
         .expect("the aborted pass lost its response");
+    }
+
+    fn registries_with(npm_url: &str, maven_url: &str) -> RegistriesConfig {
+        let mut registries = RegistriesConfig::default();
+        registries.npm.url = npm_url.to_string();
+        registries.maven.url = maven_url.to_string();
+        registries
+    }
+
+    #[test]
+    fn default_registries_keep_their_keys() {
+        let spellings = [
+            registries_with(DEFAULT_NPM_REGISTRY_URL, DEFAULT_MAVEN_REGISTRY_URL),
+            registries_with(
+                "https://registry.npmjs.org/",
+                "https://repo1.maven.org/maven2/",
+            ),
+            registries_with(
+                "HTTPS://Registry.npmjs.org",
+                "https://REPO1.maven.org:443/maven2",
+            ),
+            registries_with("", ""),
+        ];
+        for registries in &spellings {
+            assert_eq!(
+                cache_key_for(registries, FileType::Npm, "lodash", None),
+                "npm:lodash"
+            );
+            assert_eq!(
+                cache_key_for(registries, FileType::Maven, "org.slf4j:slf4j-api", None),
+                "maven:org.slf4j:slf4j-api"
+            );
+        }
+    }
+
+    #[test]
+    fn custom_registries_get_their_own_keys() {
+        let first = registries_with("https://npm.one.example", "https://maven.one.example");
+        let second = registries_with("https://npm.two.example", "https://maven.two.example");
+        for (file_type, name) in [
+            (FileType::Npm, "lodash"),
+            (FileType::Maven, "org.slf4j:slf4j-api"),
+        ] {
+            let public = file_type.cache_key(name);
+            let first_key = cache_key_for(&first, file_type, name, None);
+            let second_key = cache_key_for(&second, file_type, name, None);
+
+            assert_ne!(first_key, public);
+            assert_ne!(first_key, second_key);
+            assert!(first_key.ends_with(&format!("@{public}")));
+        }
+    }
+
+    #[test]
+    fn custom_registry_key_does_not_store_the_url() {
+        let url = "https://user:secret@npm.example.com/token/abc";
+        let key = cache_key_for(&registries_with(url, ""), FileType::Npm, "lodash", None);
+
+        assert!(!key.contains("secret"));
+        assert!(!key.contains("npm.example.com"));
+    }
+
+    #[test]
+    fn crafted_package_name_cannot_reach_a_custom_registry_key() {
+        // Given a manifest naming a package after the URL of a custom registry
+        let url = "https://npm.example.com";
+        let custom = cache_key_for(&registries_with(url, ""), FileType::Npm, "lodash", None);
+        let public = RegistriesConfig::default();
+
+        // Then the public key of that name differs from the custom registry's key
+        for name in [format!("{url}:lodash"), custom.clone()] {
+            assert_ne!(cache_key_for(&public, FileType::Npm, &name, None), custom);
+        }
+    }
+
+    #[test]
+    fn scoped_npm_registry_only_changes_the_keys_of_its_scope() {
+        let mut registries = RegistriesConfig::default();
+        registries.npm.scoped.insert(
+            "@company".to_string(),
+            crate::config::NpmScopedConfig {
+                url: "https://npm.company.example".to_string(),
+                auth: None,
+            },
+        );
+
+        assert_eq!(
+            cache_key_for(&registries, FileType::Npm, "lodash", None),
+            "npm:lodash"
+        );
+        assert_ne!(
+            cache_key_for(&registries, FileType::Npm, "@company/utils", None),
+            "npm:@company/utils"
+        );
+    }
+
+    #[test]
+    fn other_ecosystems_ignore_the_npm_and_maven_registries() {
+        let registries = registries_with("https://npm.example.com", "https://maven.example.com");
+
+        assert_eq!(
+            cache_key_for(&registries, FileType::Python, "requests", None),
+            "pypi:requests"
+        );
+        assert_eq!(
+            cache_key_for(&registries, FileType::Cargo, "serde", None),
+            "crates:serde"
+        );
+        assert_eq!(
+            cache_key_for(&registries, FileType::Cargo, "serde", Some("corp")),
+            "crates:corp:serde"
+        );
+    }
+
+    #[tokio::test]
+    async fn projects_with_different_npm_registries_do_not_read_each_others_rows() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        async fn registry_serving(version: &str) -> MockServer {
+            let registry = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/lodash"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "dist-tags": { "latest": version },
+                    "versions": { version: {} }
+                })))
+                .mount(&registry)
+                .await;
+            registry
+        }
+
+        // Given two projects with their own registry and the one cache of this user
+        let shared = Arc::new(HybridCache::in_memory());
+        let project_using = |url: String| {
+            let shared = Arc::clone(&shared);
+            tower_lsp::LspService::new(move |client| {
+                let mut config = Config::default();
+                config.advisory_cache.enabled = false;
+                config.security.enabled = false;
+                config.registries.npm.url = url;
+                let mut backend =
+                    DepsyBackend::with_parts(client, None, HybridCache::in_memory(), config);
+                backend.version_cache = shared;
+                backend
+            })
+        };
+        let (first_registry, second_registry) = (
+            registry_serving("1.0.0").await,
+            registry_serving("2.0.0").await,
+        );
+        let (first, _first_socket) = project_using(first_registry.uri());
+        let (second, _second_socket) = project_using(second_registry.uri());
+
+        // When both look up the same package
+        let first_info = first
+            .inner()
+            .get_version_info(FileType::Npm, "lodash", None)
+            .await;
+        let second_info = second
+            .inner()
+            .get_version_info(FileType::Npm, "lodash", None)
+            .await;
+
+        // Then each one sees what its own registry answered, and the public key stays empty
+        assert_eq!(first_info.unwrap().latest.as_deref(), Some("1.0.0"));
+        assert_eq!(second_info.unwrap().latest.as_deref(), Some("2.0.0"));
+        assert!(
+            shared
+                .get_stale(&FileType::Npm.cache_key("lodash"))
+                .await
+                .is_none()
+        );
     }
 }

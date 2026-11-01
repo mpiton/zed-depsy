@@ -21,7 +21,8 @@ use tokio::time::Instant;
 use tower_lsp::lsp_types::{Url, request};
 
 use super::{
-    DepsyBackend, FETCH_CONCURRENCY, FetchTarget, ProcessingContext, VulnBgContext, dep_cache_key,
+    DepsyBackend, FETCH_CONCURRENCY, FetchTarget, ProcessingContext, VulnBgContext,
+    configured_registries, dep_cache_key,
 };
 use crate::cache::ReadCache;
 use crate::config::is_package_ignored;
@@ -104,6 +105,7 @@ impl ProcessingContext {
             .map(|c| c.ignore.clone())
             .unwrap_or_default();
 
+        let registries = configured_registries(&self.config);
         let mut targets: HashMap<String, RefreshTarget> = HashMap::new();
         for doc in self.documents.iter() {
             for dep in &doc.dependencies {
@@ -111,9 +113,9 @@ impl ProcessingContext {
                     continue;
                 }
                 targets
-                    .entry_ref(dep_cache_key(dep, doc.file_type).as_str())
+                    .entry_ref(dep_cache_key(dep, doc.file_type, &registries).as_str())
                     .or_insert_with(|| RefreshTarget {
-                        fetch: FetchTarget::of(dep, doc.file_type),
+                        fetch: FetchTarget::of(dep, doc.file_type, &registries),
                         users: BTreeSet::new(),
                     })
                     .users
@@ -439,6 +441,42 @@ mod tests {
         })
         .await
         .unwrap_or_else(|_| panic!("{key} was never cached"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn document_passes_and_refreshes_use_the_key_of_the_configured_registry() {
+        // Given a project whose npm registry is not the public one
+        let registry = MockServer::start().await;
+        mock_package(&registry, "lodash", ok_package("2.0.0")).await;
+        let url = registry.uri();
+        let (service, _socket) = LspService::new(|client| {
+            let mut config = crate::config::Config::default();
+            config.advisory_cache.enabled = false;
+            config.security.enabled = false;
+            config.registries.npm.url = url;
+            DepsyBackend::with_parts(client, None, crate::cache::HybridCache::in_memory(), config)
+        });
+        let backend = service.inner();
+        let ctx = backend.create_processing_context().await;
+        let dir = tempfile::tempdir().unwrap();
+        let uri = Url::from_file_path(dir.path().join("package.json")).unwrap();
+
+        // When a manifest using a package of that registry is processed
+        ctx.process_document(&uri, r#"{"dependencies": {"lodash": "1.0.0"}}"#)
+            .await;
+
+        // Then the row and the refresh target share a key that is not the public one
+        let targets = ctx.collect_refresh_targets();
+        let keys: Vec<&String> = targets.keys().collect();
+        assert_eq!(keys.len(), 1);
+        assert_ne!(*keys[0], FileType::Npm.cache_key("lodash"));
+        assert!(backend.version_cache.contains(keys[0]).await);
+        assert!(
+            !backend
+                .version_cache
+                .contains(&FileType::Npm.cache_key("lodash"))
+                .await
+        );
     }
 
     #[test]

@@ -61,10 +61,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   those of `bar`. The finding is still listed under `foo`, the name in the
   manifest, and diagnostics, inlay hints and hover now show it in the editor. The
   registry data of the unrelated `foo` is no longer shown on an alias. With
-  `yarn.lock` and a `pnpm-lock.yaml` holding its edges under `packages:`, the
-  transitive dependencies of `bar` are scanned too; pnpm v9 keeps them under
-  `snapshots:`, which are not read. `npm:^1.0.0`, with a range only, and the
-  `npm:latest` tag keep meaning `foo`.
+  `yarn.lock` and `pnpm-lock.yaml`, the transitive dependencies of `bar` are
+  scanned too. `npm:^1.0.0`, with a range only, and the `npm:latest` tag keep
+  meaning `foo`.
 - A pnpm `catalog:` entry holding an npm alias, such as `foo: npm:bar@^1.0.0` in
   `pnpm-workspace.yaml`, is now checked under the real package, `bar`, in `scan`
   and in the editor, with or without a lockfile. A catalog entry declaring a local
@@ -78,6 +77,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Yarn `patch:` entry, resolves to that version.
 - A `pnpm-lock.yaml` holding pnpm's own environment document is now read from its
   main document, so the pnpm tool package is no longer counted as a dependency.
+- `scan` now finds transitive dependencies in a pnpm v9 `pnpm-lock.yaml`, which
+  records edges under `snapshots:`. Before, only `packages:` was read, so a v9
+  project reported advisories for its direct dependencies alone. Keys that differ
+  only by peer suffix merge into one package, in v6 lockfiles too, and an alias
+  edge such as `foo: bar@1.2.0` follows `bar`. `optionalDependencies` count as
+  edges, as they do for Yarn.
+- OSV queries no longer carry a version that is a local path, URL or protocol
+  source, such as `file:packages/x` or a tarball URL holding a token. A direct
+  dependency on such a source used to be sent as is. Those packages get no
+  advisory. With `pnpm-lock.yaml`, their own dependencies are still scanned.
+- `scan` and the editor now split OSV requests at OSV's limit of 1000 queries per
+  batch, so a project with more packages no longer loses all its results.
 - A manifest parse that finishes after a newer parse has started no longer
   overwrites the newer parse or its transitive vulnerability findings.
   Before, a slow registry fetch could keep the hints and diagnostics of

@@ -18,6 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pass certificate verification).
 - Bumped `tokio` from 1.53.2 to 1.54.1 to clear the RUSTSEC-2026-0386
   unsoundness warning.
+- Applied the same `rustls`, `rustls-webpki` and `webpki-root-certs` bumps to
+  the fuzz crate lockfile, which still carried the six advisories above.
 - npm and Maven data fetched from a custom registry no longer lands under the
   key of the public registry in the user-wide `cache.db`. A `.zed/settings.json`
   setting `registries.npm.url`, a scoped npm registry or `registries.maven.url`
@@ -121,6 +123,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The registry data fetched for a manifest is written to the disk cache in one
   SQLite transaction instead of one per package
+- Bumped `rusqlite` from 0.40 to 0.41, `aws-lc-rs` from 1.18.2 to 1.19.0 and the
+  dev-only `codspeed-criterion-compat` from 5 to 6
 
 ## [2.1.1] - 2026-10-05
 

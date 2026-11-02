@@ -479,6 +479,16 @@ pub fn parse_pnpm_lock_graph(content: &str) -> LockfileGraph {
     let mut in_deps = false;
 
     for line in content.lines() {
+        // A lockfile with a `packageManager` entry writes pnpm's own environment as a first
+        // document. Only the last document describes the project.
+        if line == "---" {
+            graph.packages.clear();
+            current = None;
+            in_packages = false;
+            in_deps = false;
+            continue;
+        }
+
         // Exit packages section on any new top-level key (e.g. "snapshots:", "settings:", etc.)
         if in_packages
             && !line.is_empty()
@@ -562,32 +572,60 @@ pub fn parse_pnpm_lock_graph(content: &str) -> LockfileGraph {
 
 /// Map each `name@specifier` of a `pnpm-lock.yaml` to its locked version.
 ///
-/// Reads the `specifier:`/`version:` pairs written before the `packages:`
-/// section. If two importers lock the same spec differently, the first wins.
+/// Reads the `specifier:`/`version:` pairs of the last YAML document, written
+/// before its `packages:` section. If two importers lock the same spec
+/// differently, the spec is left out: the name alone cannot tell them apart.
 fn parse_pnpm_locked_specs(content: &str) -> HashMap<String, String> {
     let mut locked_specs = HashMap::new();
     let mut name = "";
     let mut specifier = None;
+    let mut past_importers = false;
 
     for line in content.lines() {
+        if line == "---" {
+            locked_specs.clear();
+            specifier = None;
+            past_importers = false;
+            continue;
+        }
         if matches!(line, "packages:" | "snapshots:") {
-            break;
+            past_importers = true;
+        }
+        if past_importers {
+            continue;
         }
         let trimmed = line.trim();
         if let Some(value) = trimmed.strip_prefix("specifier: ") {
             specifier = Some(value.trim_matches(['\'', '"']));
         } else if let Some(value) = trimmed.strip_prefix("version: ") {
             if let (Some(spec), Some(version)) = (specifier.take(), pnpm_locked_version(value)) {
-                let key = format!("{name}@{spec}");
-                locked_specs
-                    .entry_ref(key.as_str())
-                    .or_insert_with(|| version.to_string());
+                record_locked_spec(&mut locked_specs, &format!("{name}@{spec}"), version);
             }
         } else if let Some(key) = trimmed.strip_suffix(':') {
             name = key.trim_matches(['\'', '"']);
         }
     }
-    locked_specs
+    settled_locked_specs(locked_specs)
+}
+
+/// Record `version` for the spec `key`, or `None` once versions disagree.
+fn record_locked_spec(specs: &mut HashMap<String, Option<String>>, key: &str, version: &str) {
+    specs
+        .entry_ref(key)
+        .and_modify(|locked| {
+            if locked.as_deref() != Some(version) {
+                *locked = None;
+            }
+        })
+        .or_insert_with(|| Some(version.to_string()));
+}
+
+/// Keep only the specs [`record_locked_spec`] saw at a single version.
+fn settled_locked_specs(specs: HashMap<String, Option<String>>) -> HashMap<String, String> {
+    specs
+        .into_iter()
+        .filter_map(|(key, version)| Some((key, version?)))
+        .collect()
 }
 
 /// Read the version from a pnpm dependency's `version:` value.
@@ -635,6 +673,7 @@ pub fn parse_yarn_lock_graph(content: &str) -> LockfileGraph {
     let mut graph = LockfileGraph::default();
     let mut current: Option<LockfilePackage> = None;
     let mut specs: Vec<&str> = Vec::new();
+    let mut locked_specs = HashMap::new();
     let mut in_deps = false;
 
     for line in content.lines() {
@@ -647,7 +686,7 @@ pub fn parse_yarn_lock_graph(content: &str) -> LockfileGraph {
             && let Some(header) = line.strip_prefix("? ").or_else(|| line.strip_suffix(':'))
         {
             if let Some(finished) = current.take() {
-                push_yarn_entry(&mut graph, finished, &specs);
+                push_yarn_entry(&mut graph, &mut locked_specs, finished, &specs);
             }
             specs = header
                 .split(',')
@@ -676,11 +715,7 @@ pub fn parse_yarn_lock_graph(content: &str) -> LockfileGraph {
                     if !name.is_empty() {
                         // An aliased package is listed under its real name, so the edge
                         // must use it too.
-                        let target = value
-                            .trim()
-                            .trim_matches('"')
-                            .strip_prefix("npm:")
-                            .and_then(split_name_version)
+                        let target = npm_alias_with_range(value.trim().trim_matches('"'))
                             .map_or(name, |(real_name, _)| real_name);
                         cur.dependencies.push(target.to_string());
                     }
@@ -709,17 +744,21 @@ pub fn parse_yarn_lock_graph(content: &str) -> LockfileGraph {
     }
 
     if let Some(finished) = current {
-        push_yarn_entry(&mut graph, finished, &specs);
+        push_yarn_entry(&mut graph, &mut locked_specs, finished, &specs);
     }
+    graph.locked_specs = settled_locked_specs(locked_specs);
     graph
 }
 
-/// Add a finished `yarn.lock` entry and the specs of its header to `graph`.
-fn push_yarn_entry(graph: &mut LockfileGraph, package: LockfilePackage, specs: &[&str]) {
+/// Add a finished `yarn.lock` entry to `graph` and record the specs of its header.
+fn push_yarn_entry(
+    graph: &mut LockfileGraph,
+    locked_specs: &mut HashMap<String, Option<String>>,
+    package: LockfilePackage,
+    specs: &[&str],
+) {
     for spec in specs {
-        graph
-            .locked_specs
-            .insert((*spec).to_string(), package.version.clone());
+        record_locked_spec(locked_specs, spec, &package.version);
     }
     graph.packages.push(package);
 }
@@ -740,23 +779,34 @@ fn yarn_header_name(header: &str) -> Option<&str> {
     // Classic writes `foo@:` for an empty range.
     first_key.strip_suffix('@').or_else(|| {
         let (name, range) = split_name_version(first_key)?;
-        let real_name = range
-            .strip_prefix("npm:")
-            .and_then(split_name_version)
-            .map(|(real_name, _)| real_name);
+        let real_name = npm_alias_with_range(range).map(|(real_name, _)| real_name);
         Some(real_name.unwrap_or(name))
     })
 }
 
 /// Real package and range behind an `npm:` alias in a manifest, or `None` for any other spec.
 ///
-/// An alias with no range accepts any version, so it reads as `*`.
+/// An alias with no range accepts any version, so it reads as `*`. A range or
+/// version after `npm:` names no other package, and neither does an empty target.
 ///
 /// - `npm:bar@^1.0.0` → `Some(("bar", "^1.0.0"))`
 /// - `npm:@scope/bar` → `Some(("@scope/bar", "*"))`
+/// - `npm:^1.0.0` → `None`
 pub fn npm_alias_target(spec: &str) -> Option<(&str, &str)> {
+    if let Some(alias) = npm_alias_with_range(spec.trim()) {
+        return Some(alias);
+    }
     let target = spec.trim().strip_prefix("npm:")?;
-    Some(split_name_version(target).unwrap_or((target, "*")))
+    let first = target.chars().next()?;
+    (!first.is_ascii_digit() && !"^~<>=*".contains(first)).then_some((target, "*"))
+}
+
+/// Real package and range of an `npm:name@range` spec.
+///
+/// Lockfile parsers use this form only: Yarn Berry reads `npm:latest` as a tag
+/// of the package itself, not as an alias.
+fn npm_alias_with_range(spec: &str) -> Option<(&str, &str)> {
+    split_name_version(spec.strip_prefix("npm:")?)
 }
 
 /// Split a `name@version` spec into `(name, version)`, handling scoped packages.
@@ -787,7 +837,8 @@ fn split_name_version(spec: &str) -> Option<(&str, &str)> {
 /// Reads the version the lockfile records for the declared range, then accepts
 /// an exact pin or the only version locked for the name. Returns `None` when
 /// several versions are locked and none matches, as in a stale lockfile: picking
-/// one would be a guess.
+/// one would be a guess. A stale alias also gets `None` when the graph lists real
+/// names, because the entries under its local name are another package.
 pub fn select_npm_version(dep: &Dependency, graph: &LockfileGraph) -> Option<String> {
     let manifest_spec = dep.version.trim();
     // A `catalog:` marker holds no range: the catalog's range is in `resolved_version`.
@@ -811,14 +862,19 @@ pub fn select_npm_version(dep: &Dependency, graph: &LockfileGraph) -> Option<Str
         }
     }
 
-    let candidates = graph.find_all(&dep.name);
-    match candidates.as_slice() {
-        [only] => Some(only.version.clone()),
-        _ => candidates
-            .iter()
-            .find(|p| p.version == declared)
-            .map(|p| p.version.clone()),
+    if npm_alias_target(declared).is_some() && !graph.locked_specs.is_empty() {
+        return None;
     }
+
+    let candidates = graph.find_all(&dep.name);
+    let (first, rest) = candidates.split_first()?;
+    if rest.iter().all(|p| p.version == first.version) {
+        return Some(first.version.clone());
+    }
+    candidates
+        .iter()
+        .find(|p| p.version == declared)
+        .map(|p| p.version.clone())
 }
 
 /// Resolves versions from npm/yarn/pnpm/bun lockfiles. Sub-format is captured at selection time.
@@ -1998,6 +2054,77 @@ __metadata:
         }
     }
 
+    /// The lockfile's `foo` is a real package with that name, not the alias.
+    #[test]
+    fn test_stale_yarn_alias_does_not_take_the_local_name_version() {
+        let classic =
+            "foo@^3.0.0:\n  version \"3.0.0\"\n\n\"foo@npm:bar@^1.0.0\":\n  version \"1.2.0\"\n";
+        let berry = "\"foo@npm:^3.0.0\":\n  version: 3.0.0\n  resolution: \"foo@npm:3.0.0\"\n\n\"foo@npm:bar@^1.0.0\":\n  version: 1.2.0\n  resolution: \"bar@npm:1.2.0\"\n";
+        for lock in [classic, berry] {
+            assert_eq!(
+                resolve_from_lock(NpmLockfileType::YarnLock, lock, "foo", "npm:bar@^2.0.0"),
+                None,
+                "{lock}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_npm_alias_target_tells_packages_from_ranges() {
+        for (spec, expected) in [
+            ("npm:bar@^1.0.0", Some(("bar", "^1.0.0"))),
+            ("npm:@scope/bar@1.2.0", Some(("@scope/bar", "1.2.0"))),
+            ("npm:bar", Some(("bar", "*"))),
+            ("npm:@scope/bar", Some(("@scope/bar", "*"))),
+            ("npm:^1.0.0", None),
+            ("npm:~1.0.0", None),
+            ("npm:>=1.0.0", None),
+            ("npm:*", None),
+            ("npm:1.2.3", None),
+            ("npm:", None),
+            ("^1.0.0", None),
+        ] {
+            assert_eq!(npm_alias_target(spec), expected, "{spec}");
+        }
+    }
+
+    /// Berry's `npm:latest` is a tag of the package itself, so the edge keeps its name.
+    #[test]
+    fn test_yarn_berry_tag_edge_is_not_an_alias() {
+        let lock = "\"x@npm:^1.0.0\":\n  version: 1.0.0\n  resolution: \"x@npm:1.0.0\"\n  dependencies:\n    foo: \"npm:latest\"\n    baz: \"npm:real@^2.0.0\"\n";
+        let graph = parse_yarn_lock_graph(lock);
+        assert_eq!(graph.packages[0].dependencies, ["foo", "real"]);
+    }
+
+    /// A `patch:` entry repeats the version of the entry it patches.
+    #[test]
+    fn test_yarn_berry_patch_entry_counts_as_one_locked_version() {
+        let lock = "\"typescript@npm:^5.3.3\":\n  version: 5.3.3\n  resolution: \"typescript@npm:5.3.3\"\n\n\"typescript@patch:typescript@^5.3.3#builtin\":\n  version: 5.3.3\n  resolution: \"typescript@patch:typescript@npm%3A5.3.3#builtin\"\n";
+        assert_eq!(
+            resolve_from_lock(NpmLockfileType::YarnLock, lock, "typescript", "^5.4.0").as_deref(),
+            Some("5.3.3")
+        );
+    }
+
+    /// pnpm keeps one entry per peer set, all at the same version.
+    #[test]
+    fn test_pnpm_peer_variants_count_as_one_locked_version() {
+        let lock = r#"lockfileVersion: '6.0'
+
+packages:
+
+  /foo@1.2.0(peer@1.0.0):
+    resolution: {integrity: sha512-a}
+
+  /foo@1.2.0(peer@2.0.0):
+    resolution: {integrity: sha512-a}
+"#;
+        assert_eq!(
+            resolve_from_lock(NpmLockfileType::PnpmLock, lock, "foo", "^1.5.0").as_deref(),
+            Some("1.2.0")
+        );
+    }
+
     /// Local packages are dropped from the graph; their keys must go with them.
     #[test]
     fn test_yarn_berry_local_entry_keys_do_not_resolve() {
@@ -2110,6 +2237,114 @@ packages:
                 resolve_from_lock(NpmLockfileType::PnpmLock, PNPM_V9_LOCK, name, spec).as_deref(),
                 expected,
                 "{name}@{spec}"
+            );
+        }
+    }
+
+    /// Keeps the importers of `foo` for the conflict tests, each locking `^1.0.0`.
+    fn pnpm_lock_with_importer_versions(versions: &[&str]) -> String {
+        let mut lock = String::from("lockfileVersion: '9.0'\n\nimporters:\n\n");
+        for (index, version) in versions.iter().enumerate() {
+            lock.push_str(&format!(
+                "  packages/p{index}:\n    dependencies:\n      foo:\n        specifier: ^1.0.0\n        version: {version}\n\n"
+            ));
+        }
+        lock.push_str(
+            "packages:\n\n  foo@1.2.0:\n    resolution: {integrity: sha512-a}\n\n  foo@1.6.0:\n    resolution: {integrity: sha512-b}\n",
+        );
+        lock
+    }
+
+    /// The resolver does not know which importer a manifest belongs to, so a
+    /// spec its importers lock differently has no single answer.
+    #[test]
+    fn test_pnpm_importers_locking_a_spec_differently_choose_no_version() {
+        for versions in [["1.2.0", "1.6.0", "1.6.0"], ["1.2.0", "1.6.0", "1.2.0"]] {
+            let lock = pnpm_lock_with_importer_versions(&versions);
+            assert_eq!(
+                resolve_from_lock(NpmLockfileType::PnpmLock, &lock, "foo", "^1.0.0"),
+                None,
+                "{versions:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_pnpm_importers_agreeing_on_a_spec_keep_its_version() {
+        let lock = pnpm_lock_with_importer_versions(&["1.6.0", "1.6.0(react@18.3.1)"]);
+        assert_eq!(
+            resolve_from_lock(NpmLockfileType::PnpmLock, &lock, "foo", "^1.0.0").as_deref(),
+            Some("1.6.0")
+        );
+    }
+
+    /// pnpm writes an environment document before the main one. Only the main
+    /// document describes the project: its own `pnpm` entry must not be mixed
+    /// with the one that runs the package manager.
+    #[test]
+    fn test_pnpm_multi_document_lock_reads_the_main_document() {
+        let lock = r#"---
+lockfileVersion: '9.0'
+
+importers:
+
+  .:
+    packageManagerDependencies:
+      pnpm:
+        specifier: ^10.0.0
+        version: 10.5.0
+
+packages:
+
+  pnpm@10.5.0:
+    resolution: {integrity: sha512-a}
+
+snapshots:
+
+  pnpm@10.5.0: {}
+
+---
+lockfileVersion: '9.0'
+
+importers:
+
+  .:
+    devDependencies:
+      pnpm:
+        specifier: ^10.0.0
+        version: 10.4.0
+
+packages:
+
+  pnpm@10.4.0:
+    resolution: {integrity: sha512-b}
+
+snapshots:
+
+  pnpm@10.4.0: {}
+"#;
+        assert_eq!(
+            resolve_from_lock(NpmLockfileType::PnpmLock, lock, "pnpm", "^10.0.0").as_deref(),
+            Some("10.4.0")
+        );
+        let graph = parse_pnpm_lock_graph(lock);
+        assert_eq!(graph.find_all("pnpm").len(), 1);
+    }
+
+    #[test]
+    fn test_yarn_duplicate_descriptors_keep_a_version_only_when_they_agree() {
+        for (second, third, expected) in [
+            ("1.6.0", "1.6.0", None),
+            ("1.6.0", "1.2.0", None),
+            ("1.2.0", "1.2.0", Some("1.2.0")),
+        ] {
+            let lock = format!(
+                "foo@^1.0.0:\n  version \"1.2.0\"\n\nfoo@^1.0.0:\n  version \"{second}\"\n\nfoo@^1.0.0:\n  version \"{third}\"\n\nfoo@^1.5.0:\n  version \"1.6.0\"\n"
+            );
+            assert_eq!(
+                resolve_from_lock(NpmLockfileType::YarnLock, &lock, "foo", "^1.0.0").as_deref(),
+                expected,
+                "{second}, {third}"
             );
         }
     }

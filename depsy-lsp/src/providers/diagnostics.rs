@@ -29,7 +29,7 @@ use crate::providers::inlay_hints::{VersionStatus, compare_versions, is_local_de
 use crate::registries::{TransitiveVuln, VersionInfo, Vulnerability, VulnerabilitySeverity};
 use crate::utils::fmt_truncate_string;
 use crate::vulnerabilities::cache::VulnerabilityCache;
-use crate::vulnerabilities::cached_version_info;
+use crate::vulnerabilities::{cached_version_info, npm_alias_package};
 
 /// Vulnerability data kept outside the name-keyed version cache.
 #[derive(Clone, Copy)]
@@ -82,8 +82,11 @@ pub async fn create_diagnostics(
             continue;
         }
 
-        // Show informational diagnostic for local/path dependencies
-        if is_local_dependency(&dep.version) {
+        // Show informational diagnostic for local/path dependencies. An npm alias is
+        // a registry package whose advisories come from OSV, so it continues below.
+        if is_local_dependency(&dep.version)
+            && npm_alias_package(file_type.to_ecosystem(), dep).is_none()
+        {
             diagnostics.push(create_local_dependency_diagnostic(dep));
             continue;
         }
@@ -584,6 +587,45 @@ mod tests {
             );
         }
         osv_results
+    }
+
+    #[tokio::test]
+    async fn npm_alias_reports_its_osv_result_without_a_registry_entry() {
+        let alias = Dependency {
+            resolved_version: Some("1.2.0".to_string()),
+            ..create_test_dependency("foo", "npm:bar@^1.0.0", 0)
+        };
+        let osv_results = VulnerabilityCache::with_ttl(3600);
+        osv_results.insert(
+            VulnCacheKey::for_dependency(FileType::Npm.to_ecosystem(), &alias),
+            QueryResult {
+                vulnerabilities: vec![Vulnerability {
+                    id: "GHSA-bar".to_string(),
+                    severity: VulnerabilitySeverity::High,
+                    description: "bar advisory".to_string(),
+                    url: None,
+                }],
+                deprecated: false,
+            },
+        );
+        let transitive = hashbrown::HashMap::new();
+
+        let diagnostics = create_diagnostics(
+            std::slice::from_ref(&alias),
+            &MemoryCache::new(),
+            |name| format!("npm:{name}"),
+            None,
+            FileType::Npm,
+            VulnSources {
+                osv_results: &osv_results,
+                transitive: &transitive,
+            },
+            &[],
+        )
+        .await;
+
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        assert_eq!(diagnostics[0].severity, Some(DiagnosticSeverity::ERROR));
     }
 
     fn create_test_dependency(name: &str, version: &str, line: u32) -> Dependency {

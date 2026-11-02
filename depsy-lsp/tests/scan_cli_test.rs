@@ -604,6 +604,128 @@ async fn test_scan_queries_the_real_package_of_an_npm_alias() {
     assert_eq!(queried, vec![("bar".to_string(), "1.2.0".to_string())]);
 }
 
+/// OSV answers about `bar`, yet the report names the dependency as the manifest
+/// does. The real `foo`, reached through `x`, is still scanned as a transitive.
+#[tokio::test]
+async fn test_scan_lists_an_alias_finding_under_its_manifest_name() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/querybatch"))
+        .respond_with(|request: &wiremock::Request| {
+            let body: serde_json::Value = request
+                .body_json()
+                .expect("querybatch request body should be valid JSON");
+            let results: Vec<serde_json::Value> = body["queries"]
+                .as_array()
+                .expect("querybatch.queries should be an array")
+                .iter()
+                .map(|query| {
+                    let id = match query["package"]["name"].as_str() {
+                        Some("bar") => "CVE-ALIAS-BAR",
+                        Some("foo") => "CVE-REAL-FOO",
+                        _ => return serde_json::json!({ "vulns": [] }),
+                    };
+                    serde_json::json!({
+                        "vulns": [{ "id": id, "modified": "2024-01-01T00:00:00Z" }]
+                    })
+                })
+                .collect();
+
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": results
+            }))
+        })
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/vulns/.+"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": "CVE-ALIAS",
+            "summary": "advisory",
+            "details": "test details",
+            "severity": [{ "type": "CVSS_V3", "score": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H" }],
+            "references": []
+        })))
+        .mount(&server)
+        .await;
+
+    let tmp = tempfile::tempdir().expect("failed to create temp dir");
+    let manifest_path = tmp.path().join("package.json");
+    std::fs::write(
+        &manifest_path,
+        r#"{"name":"app","dependencies":{"foo":"npm:bar@^1.0.0","x":"^1.0.0"}}"#,
+    )
+    .expect("failed to write package.json");
+    std::fs::write(
+        tmp.path().join("yarn.lock"),
+        r#"# yarn lockfile v1
+
+"foo@npm:bar@^1.0.0":
+  version "1.2.0"
+  dependencies:
+    baz "^1.0.0"
+
+baz@^1.0.0:
+  version "1.0.0"
+
+x@^1.0.0:
+  version "1.0.0"
+  dependencies:
+    foo "^3.0.0"
+
+foo@^3.0.0:
+  version "3.0.0"
+"#,
+    )
+    .expect("failed to write yarn.lock");
+
+    let output = Command::new(depsy_lsp_bin())
+        .env("OSV_ENDPOINT", server.uri())
+        .args(["scan", "--output", "json", "--file"])
+        .arg(&manifest_path)
+        .output()
+        .expect("failed to run depsy-lsp");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let report: serde_json::Value =
+        serde_json::from_str(&stdout).expect("scan output should be JSON");
+
+    let direct = report["direct"]
+        .as_array()
+        .expect("direct should be an array");
+    assert_eq!(direct.len(), 1, "{stdout}");
+    assert_eq!(direct[0]["package"], "foo", "{stdout}");
+    assert_eq!(direct[0]["version"], "1.2.0", "{stdout}");
+
+    let transitive = report["transitive"]
+        .as_array()
+        .expect("transitive should be an array");
+    assert_eq!(transitive.len(), 1, "{stdout}");
+    assert_eq!(transitive[0]["package"], "foo", "{stdout}");
+    assert_eq!(transitive[0]["version"], "3.0.0", "{stdout}");
+    assert_eq!(transitive[0]["via_direct"], "x", "{stdout}");
+
+    let requests = server
+        .received_requests()
+        .await
+        .expect("failed to collect mock server requests");
+    let querybatch_body: serde_json::Value = requests
+        .iter()
+        .find(|request| request.url.path() == "/querybatch")
+        .expect("expected POST /querybatch")
+        .body_json()
+        .expect("querybatch body should be valid JSON");
+    assert!(
+        querybatch_body["queries"]
+            .as_array()
+            .expect("querybatch.queries should be an array")
+            .iter()
+            .any(|query| query["package"]["name"] == "baz"),
+        "the alias's own dependencies should seed the walk: {querybatch_body}"
+    );
+}
+
 #[tokio::test]
 async fn test_scan_pnpm_workspace_catalogs_queries_versions_locked_per_catalog() {
     let server = MockServer::start().await;

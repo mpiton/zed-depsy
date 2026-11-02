@@ -186,7 +186,7 @@ Local dependencies show `→ Local` hint.
 }
 ```
 
-Aliases are resolved to the actual package.
+Vulnerabilities are checked against the actual package (`lodash` here) and reported under the name in the manifest. The inlay hint stays `→ Local` unless OSV reports something on it, and no update check runs for an alias. `npm:^1.0.0`, with a range only, is not an alias: it refers to the package under its own name.
 
 ### Deprecated Packages
 

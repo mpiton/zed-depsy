@@ -26,6 +26,7 @@ use tower_lsp::lsp_types::{InlayHint, InlayHintKind, InlayHintLabel, Position};
 use crate::file_types::FileType;
 use crate::registries::{VersionInfo, VulnerabilitySeverity};
 use crate::utils::fmt_truncate_string;
+use crate::vulnerabilities::npm_alias_package;
 use crate::{parsers::Dependency, registries::Vulnerability};
 
 /// Outcome of comparing a dependency's declared version against the latest available.
@@ -126,8 +127,12 @@ fn create_hint_label_and_tooltip(
 ) -> (String, Option<String>) {
     let dep_name = &*dep.name;
 
+    // An npm alias keeps the local hint unless OSV has something to report on it.
+    let alias_has_finding = npm_alias_package(file_type.to_ecosystem(), dep).is_some()
+        && (vuln_count > 0 || version_info.is_some_and(|info| info.deprecated));
+
     // Handle local dependencies first (highest priority - no registry lookup needed)
-    if is_local_dependency(&dep.version) {
+    if is_local_dependency(&dep.version) && !alias_has_finding {
         let tooltip = format!(
             "**Local Dependency**\n\n\
             \"{dep_name}\" is a local/path dependency.\n\n\
@@ -1350,6 +1355,33 @@ mod tests {
         assert!(!is_local_dependency(">=1.0, <2.0"));
         assert!(!is_local_dependency("*"));
         assert!(!is_local_dependency("latest"));
+    }
+
+    #[test]
+    fn test_npm_alias_hint_shows_osv_findings_and_stays_local_otherwise() {
+        let alias = make_test_dep("foo", "npm:bar@^1.0.0");
+        let label =
+            |info: &VersionInfo| match create_inlay_hint(&alias, Some(info), FileType::Npm).label {
+                InlayHintLabel::String(label) => label,
+                other => panic!("unexpected label: {other:?}"),
+            };
+
+        assert_eq!(label(&VersionInfo::default()).trim(), "→ Local");
+        let vulnerable = VersionInfo {
+            vulnerabilities: vec![Vulnerability {
+                id: "GHSA-bar".to_string(),
+                severity: VulnerabilitySeverity::High,
+                description: String::new(),
+                url: None,
+            }],
+            ..Default::default()
+        };
+        assert!(label(&vulnerable).contains("1 vuln"));
+        let deprecated = VersionInfo {
+            deprecated: true,
+            ..Default::default()
+        };
+        assert!(label(&deprecated).contains("Deprecated"));
     }
 
     #[test]

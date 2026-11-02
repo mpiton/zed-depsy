@@ -59,7 +59,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   checked for vulnerabilities under the real package, `bar`. Before, OSV was asked
   about the unrelated `foo` package, which could report its advisories and miss
   those of `bar`. The finding is still listed under `foo`, the name in the
-  manifest.
+  manifest, and diagnostics, inlay hints and hover now show it in the editor. The
+  registry data of the unrelated `foo` is no longer shown on an alias. With
+  `yarn.lock` and `pnpm-lock.yaml`, the transitive dependencies of `bar` are
+  scanned too. `npm:^1.0.0`, with a range only, keeps meaning `foo`.
+- An npm spec locked at several versions, such as by two pnpm importers or two
+  Yarn entries, now counts as unresolved instead of taking the first or last one.
+  A package locked several times at one version, as with pnpm peer variants or a
+  Yarn `patch:` entry, resolves to that version.
+- A `pnpm-lock.yaml` holding pnpm's own environment document is now read from its
+  main document, so the pnpm tool package is no longer counted as a dependency.
 - A manifest parse that finishes after a newer parse has started no longer
   overwrites the newer parse or its transitive vulnerability findings.
   Before, a slow registry fetch could keep the hints and diagnostics of

@@ -225,7 +225,7 @@ async fn run_scan(
     };
     use depsy_lsp::vulnerabilities::{
         Ecosystem, VulnerabilityQuery, cache::VulnCacheKey, normalize_version_for_osv,
-        osv::OsvClient,
+        npm_alias_graph_name, osv::OsvClient,
     };
     use hashbrown::{HashMap, HashSet};
     use std::sync::Arc;
@@ -407,26 +407,32 @@ async fn run_scan(
         }
     }
 
+    // Name of each manifest dep in the graph, and the way back to its manifest name.
+    let mut direct_names_vec: Vec<String> = Vec::with_capacity(dependencies.len());
+    let mut normalized_to_raw: HashMap<String, String> = HashMap::new();
+    for d in &dependencies {
+        if let Some(real_name) = npm_alias_graph_name(ecosystem, d, &lockfile_graph) {
+            // A manifest entry under the real name keeps the attribution.
+            direct_names_vec.push(real_name.to_string());
+            normalized_to_raw
+                .entry_ref(real_name)
+                .or_insert_with(|| d.name.clone());
+        } else {
+            let canonical = canonical_name(ecosystem, &d.name);
+            direct_names_vec.push(canonical.clone());
+            normalized_to_raw.insert(canonical, d.name.clone());
+        }
+    }
+
     // Flag graph's root packages (matching manifest deps)
-    let direct_names: HashSet<String> = dependencies
-        .iter()
-        .map(|d| canonical_name(ecosystem, &d.name))
-        .collect();
+    let direct_names: HashSet<&str> = direct_names_vec.iter().map(String::as_str).collect();
     for pkg in lockfile_graph.packages.iter_mut() {
-        if direct_names.contains(&pkg.name) {
+        if direct_names.contains(pkg.name.as_str()) {
             pkg.is_root = true;
         }
     }
 
     // Extract transitives (packages in the lockfile but not in the manifest)
-    let direct_names_vec: Vec<String> = dependencies
-        .iter()
-        .map(|d| canonical_name(ecosystem, &d.name))
-        .collect();
-    let normalized_to_raw: HashMap<String, String> = dependencies
-        .iter()
-        .map(|d| (canonical_name(ecosystem, &d.name), d.name.clone()))
-        .collect();
     let transitives: Vec<LockfilePackage> = lockfile_graph
         .transitives_only(&direct_names_vec)
         .into_iter()

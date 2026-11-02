@@ -279,6 +279,19 @@ mod tests {
     }
 
     #[test]
+    fn npm_protocol_range_keeps_the_manifest_name() {
+        for spec in ["npm:^1.0.0", "npm:1.2.0", "npm:"] {
+            let key =
+                VulnCacheKey::for_dependency(Ecosystem::Npm, &dep("foo", spec, Some("1.2.0")));
+            assert_eq!(
+                key,
+                VulnCacheKey::new(Ecosystem::Npm, "foo", "1.2.0"),
+                "{spec}"
+            );
+        }
+    }
+
+    #[test]
     fn alias_syntax_only_counts_for_npm() {
         let other = dep("foo", "npm:bar@^1.0.0", Some("1.2.0"));
         assert_eq!(

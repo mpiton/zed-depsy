@@ -8,6 +8,8 @@ pub mod osv;
 
 use crate::cache::ReadCache;
 use crate::parsers::Dependency;
+use crate::parsers::lockfile_graph::LockfileGraph;
+use crate::parsers::npm_lock::npm_alias_target;
 use crate::registries::VersionInfo;
 use cache::{VulnCacheKey, VulnerabilityCache};
 
@@ -120,6 +122,27 @@ pub fn normalize_version_for_osv(version: &str) -> String {
     }
 }
 
+/// Real package behind `dep` when it is an npm alias.
+pub fn npm_alias_package(ecosystem: Ecosystem, dep: &Dependency) -> Option<&str> {
+    if ecosystem != Ecosystem::Npm {
+        return None;
+    }
+    npm_alias_target(&dep.version).map(|(package, _)| package)
+}
+
+/// Name `graph` lists `dep` under when it is an npm alias with another name there.
+///
+/// `yarn.lock` and `pnpm-lock.yaml`, the formats with `locked_specs`, list the
+/// real package. `package-lock.json` lists an alias under its local name, so it
+/// gets `None`.
+pub fn npm_alias_graph_name<'a>(
+    ecosystem: Ecosystem,
+    dep: &'a Dependency,
+    graph: &LockfileGraph,
+) -> Option<&'a str> {
+    npm_alias_package(ecosystem, dep).filter(|_| !graph.locked_specs.is_empty())
+}
+
 /// Overlays the OSV result for `dep`'s resolved version onto `info`.
 ///
 /// The version cache is keyed by package name only, so it cannot tell two
@@ -149,7 +172,8 @@ pub fn apply_osv_result(
 /// Reads `dep`'s cached version info with its OSV result applied.
 ///
 /// Readers of `vulnerabilities` or `deprecated` go through this helper or
-/// [`apply_osv_result`], so none of them can skip the overlay.
+/// [`apply_osv_result`], so none of them can skip the overlay. An npm alias has
+/// its OSV result only: the cache entry under its local name is another package.
 pub async fn cached_version_info(
     cache: &impl ReadCache,
     cache_key: &str,
@@ -157,7 +181,11 @@ pub async fn cached_version_info(
     ecosystem: Ecosystem,
     dep: &Dependency,
 ) -> Option<VersionInfo> {
-    let mut info = cache.get_stale(cache_key).await?;
+    let mut info = if npm_alias_package(ecosystem, dep).is_some() {
+        VersionInfo::default()
+    } else {
+        cache.get_stale(cache_key).await?
+    };
     apply_osv_result(&mut info, osv_results, ecosystem, dep);
     Some(info)
 }
@@ -204,6 +232,37 @@ mod tests {
         let cache = VulnerabilityCache::with_ttl(3600);
         cache.insert(VulnCacheKey::for_dependency(Ecosystem::Npm, dep), result);
         cache
+    }
+
+    /// The cache entry under an alias's local name describes another package.
+    #[tokio::test]
+    async fn alias_reads_only_its_osv_result() {
+        let alias = dep("foo", "npm:bar@1.2.0");
+        let cache = MemoryCache::new();
+        cache
+            .insert(
+                "npm:foo".to_string(),
+                VersionInfo {
+                    latest: Some("9.0.0".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await;
+        let osv_results = osv_results_with(
+            &alias,
+            QueryResult {
+                vulnerabilities: vec![advisory("GHSA-bar")],
+                deprecated: false,
+            },
+        );
+
+        for key in ["npm:foo", "npm:unpublished"] {
+            let info = cached_version_info(&cache, key, &osv_results, Ecosystem::Npm, &alias)
+                .await
+                .expect("an alias needs no registry entry");
+            assert_eq!(info.latest, None);
+            assert_eq!(info.vulnerabilities.len(), 1);
+        }
     }
 
     #[test]

@@ -82,7 +82,8 @@ pub struct LockfileGraph {
     /// Locked version for each `name@range` spec the lockfile records.
     ///
     /// Filled only by lockfile formats that keep this mapping (`yarn.lock`,
-    /// `pnpm-lock.yaml`). Empty for every other format.
+    /// `pnpm-lock.yaml`). Empty for every other format. A spec locked at several
+    /// versions is left out, since the name cannot tell them apart.
     pub locked_specs: HashMap<String, String>,
 }
 

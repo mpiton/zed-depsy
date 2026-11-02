@@ -91,6 +91,7 @@ use crate::vulnerabilities::cache::{VulnCacheKey, VulnerabilityCache};
 use crate::vulnerabilities::osv::OsvClient;
 use crate::vulnerabilities::{
     VulnerabilityQuery, apply_osv_result, cached_version_info, normalize_version_for_osv,
+    npm_alias_graph_name, npm_alias_package,
 };
 use crate::{
     auth::{EnvTokenProvider, TokenProviderManager, cargo_credentials, fmt_redact_token},
@@ -1037,8 +1038,18 @@ impl DepsyBackend {
                     FileType::Ruby => crate::parsers::gemfile_lock::normalize_gem_name(&d.name),
                     _ => d.name.clone(),
                 };
-                names.push(canonical.clone());
-                map.insert(canonical, d.name.clone());
+                let alias = bg_ctx
+                    .lockfile_graph
+                    .as_deref()
+                    .and_then(|graph| npm_alias_graph_name(file_type.to_ecosystem(), d, graph));
+                if let Some(real_name) = alias {
+                    // A manifest entry under the real name keeps the attribution.
+                    names.push(real_name.to_string());
+                    map.entry_ref(real_name).or_insert_with(|| d.name.clone());
+                } else {
+                    names.push(canonical.clone());
+                    map.insert(canonical, d.name.clone());
+                }
             }
             (names, map)
         };
@@ -2021,8 +2032,9 @@ impl LanguageServer for DepsyBackend {
         drop(doc);
 
         // Get version info
+        let registry_name = npm_alias_package(file_type.to_ecosystem(), &dep).unwrap_or(dep_name);
         let mut version_info = self
-            .get_version_info(file_type, dep_name, dep.registry.as_deref())
+            .get_version_info(file_type, registry_name, dep.registry.as_deref())
             .await;
         if let Some(info) = version_info.as_mut() {
             apply_osv_result(info, &self.vuln_cache, file_type.to_ecosystem(), &dep);
@@ -2565,6 +2577,50 @@ mod tests {
         assert_eq!(
             vulnerable_lines(&[vulnerable, patched], &vuln_cache).await,
             vec![0]
+        );
+    }
+
+    #[tokio::test]
+    async fn npm_alias_is_queried_and_cached_under_the_real_package() {
+        // Given a manifest declaring `foo` as an alias of `bar` locked at 1.2.0
+        // When the background vulnerability check runs
+        // Then OSV is asked about `bar` and the answer is stored under `bar`
+        let server = osv_server_flagging_1_2_5().await;
+        let (service, _socket) = tower_lsp::LspService::new(UninitializedServer);
+        let client = service.inner().0.clone();
+        let vuln_cache = Arc::new(VulnerabilityCache::new());
+
+        DepsyBackend::fetch_vulnerabilities_background(
+            vec![make_dep("foo", "npm:bar@^1.0.0", Some("1.2.0"))],
+            FileType::Npm,
+            Arc::new(OsvClient::with_endpoint(server.uri()).unwrap()),
+            Arc::clone(&vuln_cache),
+            client,
+            VulnBgContext::owning(
+                Arc::new(DashMap::new()),
+                Url::parse("file:///a/package.json").unwrap(),
+                None,
+            ),
+        )
+        .await;
+
+        let requests = server.received_requests().await.unwrap();
+        let body: serde_json::Value = requests
+            .iter()
+            .find(|request| request.url.path() == "/querybatch")
+            .unwrap()
+            .body_json()
+            .unwrap();
+        assert_eq!(body["queries"][0]["package"]["name"], "bar");
+        assert_eq!(body["queries"][0]["version"], "1.2.0");
+        assert!(
+            vuln_cache
+                .get(&VulnCacheKey::new(
+                    FileType::Npm.to_ecosystem(),
+                    "bar",
+                    "1.2.0"
+                ))
+                .is_some()
         );
     }
 

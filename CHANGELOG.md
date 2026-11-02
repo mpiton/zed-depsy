@@ -63,6 +63,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   registry data of the unrelated `foo` is no longer shown on an alias. With
   `yarn.lock` and `pnpm-lock.yaml`, the transitive dependencies of `bar` are
   scanned too. `npm:^1.0.0`, with a range only, keeps meaning `foo`.
+- A pnpm `catalog:` entry holding an npm alias, such as `foo: npm:bar@^1.0.0` in
+  `pnpm-workspace.yaml`, is now checked under the real package, `bar`, in `scan`
+  and in the editor, with or without a lockfile. A catalog entry declaring a local
+  source such as `workspace:*` or `github:` now counts as local too, so the
+  `catalog:` reference to it gets the local hint and is no longer looked up in the
+  registry under its own name.
 - An npm range locked at several versions, such as by two pnpm importers or two
   Yarn entries, now counts as unresolved instead of taking the first or last one;
   an exact pin still uses its matching candidate when present.

@@ -203,6 +203,7 @@ fn parse_requirement_line(line: &str, line_num: u32, dev: bool) -> Option<Depend
         registry: None,
         resolved_version: None,
         has_additional_version_constraints: parsed.has_additional_version_constraints,
+        catalog_spec: None,
     })
 }
 
@@ -363,6 +364,7 @@ fn parse_pep621_deps(dom: &Node, line_ranges: &[TextRange], deps: &mut Vec<Depen
             registry: None,
             resolved_version: None,
             has_additional_version_constraints,
+            catalog_spec: None,
         });
     }
 }
@@ -403,6 +405,7 @@ fn parse_pep621_optional(dom: &Node, line_ranges: &[TextRange], deps: &mut Vec<D
                 registry: None,
                 resolved_version: None,
                 has_additional_version_constraints,
+                catalog_spec: None,
             });
         }
     }
@@ -444,6 +447,7 @@ fn parse_poetry_main(dom: &Node, line_ranges: &[TextRange], deps: &mut Vec<Depen
             registry: None,
             resolved_version: None,
             has_additional_version_constraints: false,
+            catalog_spec: None,
         });
     }
 }
@@ -480,6 +484,7 @@ fn parse_poetry_dev_legacy(dom: &Node, line_ranges: &[TextRange], deps: &mut Vec
             registry: None,
             resolved_version: None,
             has_additional_version_constraints: false,
+            catalog_spec: None,
         });
     }
 }
@@ -530,6 +535,7 @@ fn parse_poetry_groups(dom: &Node, line_ranges: &[TextRange], deps: &mut Vec<Dep
                 registry: None,
                 resolved_version: None,
                 has_additional_version_constraints: false,
+                catalog_spec: None,
             });
         }
     }
@@ -571,6 +577,7 @@ fn parse_pep735_groups(dom: &Node, line_ranges: &[TextRange], deps: &mut Vec<Dep
                 registry: None,
                 resolved_version: None,
                 has_additional_version_constraints,
+                catalog_spec: None,
             });
         }
     }
@@ -617,6 +624,7 @@ fn parse_hatch_envs(envs_node: &Node, line_ranges: &[TextRange], deps: &mut Vec<
                     registry: None,
                     resolved_version: None,
                     has_additional_version_constraints,
+                    catalog_spec: None,
                 });
             }
         }

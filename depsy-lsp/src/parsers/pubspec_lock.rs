@@ -163,6 +163,7 @@ mod tests {
             registry: None,
             resolved_version: None,
             has_additional_version_constraints: false,
+            catalog_spec: None,
         };
         assert_eq!(
             resolver.resolve_version(&dep, &graph),

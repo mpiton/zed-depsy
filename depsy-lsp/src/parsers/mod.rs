@@ -60,6 +60,12 @@ pub struct Dependency {
     /// Providers use this source-shape metadata to avoid edits that would
     /// update only one anchor of a compound declaration.
     pub has_additional_version_constraints: bool,
+    /// Spec the pnpm catalog declares for a `catalog:` reference.
+    ///
+    /// [`Self::version`] then only holds the reference, and a lockfile can
+    /// overwrite [`Self::resolved_version`], so this field keeps what the
+    /// catalog entry really asks for. `None` for any other dependency.
+    pub catalog_spec: Option<String>,
 }
 
 /// A half-open byte range within a single source line.
@@ -112,11 +118,20 @@ impl Dependency {
     ///     registry: None,
     ///     resolved_version: Some("1.0.196".into()),
     ///     has_additional_version_constraints: false,
+    ///     catalog_spec: None,
     /// };
     /// assert_eq!(dep.effective_version(), "1.0.196");
     /// ```
     pub fn effective_version(&self) -> &str {
         self.resolved_version.as_deref().unwrap_or(&self.version)
+    }
+
+    /// Returns the spec this dependency really declares.
+    ///
+    /// That is the catalog entry for a resolved `catalog:` reference, otherwise
+    /// the manifest's own [`Self::version`].
+    pub fn declared_spec(&self) -> &str {
+        self.catalog_spec.as_deref().unwrap_or(&self.version)
     }
 }
 

@@ -195,6 +195,7 @@ fn parse_dependency(
                 registry: None,
                 resolved_version: None,
                 has_additional_version_constraints: false,
+                catalog_spec: None,
             })
         }
         Node::Table(table) => {
@@ -236,6 +237,7 @@ fn parse_dependency(
                 registry,
                 resolved_version: None,
                 has_additional_version_constraints: false,
+                catalog_spec: None,
             })
         }
         _ => None,

@@ -84,7 +84,7 @@ pub async fn create_diagnostics(
 
         // Show informational diagnostic for local/path dependencies. An npm alias is
         // a registry package whose advisories come from OSV, so it continues below.
-        if is_local_dependency(&dep.version)
+        if is_local_dependency(dep.declared_spec())
             && npm_alias_package(file_type.to_ecosystem(), dep).is_none()
         {
             diagnostics.push(create_local_dependency_diagnostic(dep));
@@ -647,6 +647,7 @@ mod tests {
             registry: None,
             resolved_version: None,
             has_additional_version_constraints: false,
+            catalog_spec: None,
         }
     }
 

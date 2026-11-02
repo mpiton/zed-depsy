@@ -638,7 +638,7 @@ fn store_locked_specs(graph: &mut LockfileGraph, specs: HashMap<String, Option<S
 ///
 /// Handles a peer suffix (`1.2.0(peer@1.0.0)`) and an alias target (`bar@1.2.0`,
 /// `/bar@1.2.0`). Returns `None` for local and URL values such as `link:../foo`.
-fn pnpm_locked_version(value: &str) -> Option<&str> {
+pub(crate) fn pnpm_locked_version(value: &str) -> Option<&str> {
     let base = value.trim_matches(['\'', '"']).split('(').next()?;
     let version = base.rsplit('@').next()?;
     semver::Version::parse(version).is_ok().then_some(version)
@@ -866,16 +866,18 @@ fn split_name_version(spec: &str) -> Option<(&str, &str)> {
 /// names, because the entries under its local name are another package.
 pub fn select_npm_version(dep: &Dependency, graph: &LockfileGraph) -> Option<String> {
     let manifest_spec = dep.version.trim();
-    // A `catalog:` marker holds no range: the catalog's range is in `resolved_version`.
+    // A `catalog:` marker holds no range: the catalog's own spec is in `catalog_spec`.
     // pnpm records the marker as the specifier, Yarn records the range in its key.
-    let catalog_range = dep
-        .resolved_version
-        .as_deref()
-        .filter(|_| manifest_spec.starts_with("catalog:"))
-        .map(str::trim);
-    let declared = catalog_range.unwrap_or(manifest_spec);
+    let declared = dep.declared_spec().trim();
+    let aliases_another_package =
+        npm_alias_target(declared).is_some_and(|(package, _)| package != dep.name);
 
     for spec in [manifest_spec, declared] {
+        // The marker stays recorded after the catalog entry changes, so it cannot
+        // vouch for an alias. pnpm's `catalogs` section records the alias spec itself.
+        if aliases_another_package && spec != declared {
+            continue;
+        }
         let locked = [
             format!("{}@{spec}", dep.name),
             format!("{}@npm:{spec}", dep.name),
@@ -887,8 +889,6 @@ pub fn select_npm_version(dep: &Dependency, graph: &LockfileGraph) -> Option<Str
         }
     }
 
-    let aliases_another_package =
-        npm_alias_target(declared).is_some_and(|(package, _)| package != dep.name);
     if aliases_another_package && graph.records_specs() {
         return None;
     }
@@ -2216,6 +2216,84 @@ packages:
         let deps = NpmParser::new().parse(r#"{"dependencies": {"foo": "^1.0.0"}}"#);
         assert_eq!(
             select_npm_version(&deps[0], &parse_yarn_lock_graph(lock)).as_deref(),
+            Some("1.2.0")
+        );
+    }
+
+    /// A pnpm lockfile holding the catalog entry `foo: npm:bar@^1.0.0`.
+    const PNPM_CATALOG_ALIAS_LOCK: &str = r#"lockfileVersion: '9.0'
+
+catalogs:
+  default:
+    foo:
+      specifier: npm:bar@^1.0.0
+      version: 1.2.0
+  legacy:
+    foo:
+      specifier: npm:bar@^0.9.0
+      version: 0.9.5
+
+importers:
+
+  .:
+    dependencies:
+      foo:
+        specifier: 'catalog:'
+        version: bar@1.2.0
+
+packages:
+
+  bar@0.9.5:
+    resolution: {integrity: sha512-a}
+
+  bar@1.2.0:
+    resolution: {integrity: sha512-b}
+"#;
+
+    fn catalog_dep(reference: &str, workspace: &str) -> Dependency {
+        let manifest = format!(r#"{{"dependencies": {{"foo": "{reference}"}}}}"#);
+        let mut deps = crate::parsers::pnpm_workspace::resolve_catalog_references(
+            NpmParser::new().parse(&manifest),
+            Some(workspace),
+        );
+        deps.remove(0)
+    }
+
+    #[test]
+    fn test_select_npm_version_reads_a_catalog_alias_from_the_pnpm_catalogs_section() {
+        let workspace =
+            "catalog:\n  foo: npm:bar@^1.0.0\ncatalogs:\n  legacy:\n    foo: npm:bar@^0.9.0\n";
+        let graph = parse_pnpm_lock_graph(PNPM_CATALOG_ALIAS_LOCK);
+
+        assert_eq!(
+            select_npm_version(&catalog_dep("catalog:", workspace), &graph).as_deref(),
+            Some("1.2.0")
+        );
+        assert_eq!(
+            select_npm_version(&catalog_dep("catalog:legacy", workspace), &graph).as_deref(),
+            Some("0.9.5")
+        );
+    }
+
+    /// `foo@catalog:` stays recorded after the catalog entry changes, so it says
+    /// nothing about the alias now declared.
+    #[test]
+    fn test_select_npm_version_rejects_a_catalog_alias_the_lockfile_predates() {
+        let dep = catalog_dep("catalog:", "catalog:\n  foo: npm:baz@^2.0.0\n");
+
+        assert_eq!(
+            select_npm_version(&dep, &parse_pnpm_lock_graph(PNPM_CATALOG_ALIAS_LOCK)),
+            None
+        );
+    }
+
+    #[test]
+    fn test_select_npm_version_reads_a_catalog_alias_from_yarn_keys() {
+        let lock = "\"foo@npm:bar@^1.0.0\":\n  version: 1.2.0\n  resolution: \"bar@npm:1.2.0\"\n";
+        let dep = catalog_dep("catalog:", "catalog:\n  foo: npm:bar@^1.0.0\n");
+
+        assert_eq!(
+            select_npm_version(&dep, &parse_yarn_lock_graph(lock)).as_deref(),
             Some("1.2.0")
         );
     }

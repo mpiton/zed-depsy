@@ -128,7 +128,7 @@ pub fn npm_alias_package(ecosystem: Ecosystem, dep: &Dependency) -> Option<&str>
     if ecosystem != Ecosystem::Npm {
         return None;
     }
-    npm_alias_target(&dep.version).map(|(package, _)| package)
+    npm_alias_target(dep.declared_spec()).map(|(package, _)| package)
 }
 
 /// Name `graph` lists `dep` under when it is an npm alias with another name there.
@@ -142,7 +142,8 @@ pub fn npm_alias_graph_name<'a>(
     graph: &LockfileGraph,
 ) -> Option<&'a str> {
     npm_alias_package(ecosystem, dep).filter(|package| {
-        *package != dep.name && graph.records_spec(&format!("{}@{}", dep.name, dep.version.trim()))
+        *package != dep.name
+            && graph.records_spec(&format!("{}@{}", dep.name, dep.declared_spec().trim()))
     })
 }
 
@@ -272,7 +273,7 @@ mod tests {
     use super::osv::QueryResult;
     use super::{
         DirectRoots, Ecosystem, apply_osv_result, cached_version_info, normalize_version_for_osv,
-        npm_alias_graph_name,
+        npm_alias_graph_name, npm_alias_package,
     };
     use crate::cache::{MemoryCache, WriteCache};
     use crate::parsers::lockfile_graph::{LockfileGraph, LockfilePackage};
@@ -296,6 +297,7 @@ mod tests {
             registry: None,
             resolved_version: None,
             has_additional_version_constraints: false,
+            catalog_spec: None,
         }
     }
 
@@ -395,6 +397,22 @@ mod tests {
             .locked_specs
             .insert("foo@npm:foo@1.2.0".to_string(), "1.2.0".to_string());
         assert_eq!(npm_alias_graph_name(Ecosystem::Npm, &alias, &graph), None);
+    }
+
+    #[test]
+    fn catalog_alias_is_found_in_the_graph_by_its_catalog_spec() {
+        let mut alias = dep("foo", "catalog:");
+        alias.catalog_spec = Some("npm:bar@^1.0.0".to_string());
+        let mut graph = LockfileGraph::default();
+        graph
+            .locked_specs
+            .insert("foo@npm:bar@^1.0.0".to_string(), "1.2.0".to_string());
+
+        assert_eq!(npm_alias_package(Ecosystem::Npm, &alias), Some("bar"));
+        assert_eq!(
+            npm_alias_graph_name(Ecosystem::Npm, &alias, &graph),
+            Some("bar")
+        );
     }
 
     #[test]

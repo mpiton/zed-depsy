@@ -72,6 +72,7 @@ pub enum VersionStatus {
 ///     version_span: Span { line: 5, line_start: 9, line_end: 14 },
 ///     dev: false, optional: false, registry: None, resolved_version: None,
 ///     has_additional_version_constraints: false,
+///     catalog_spec: None,
 /// };
 /// let info = VersionInfo { latest: Some("1.0.0".to_string()), ..Default::default() };
 /// let hint = create_inlay_hint(&dep, Some(&info), FileType::Cargo);
@@ -132,7 +133,7 @@ fn create_hint_label_and_tooltip(
         && (vuln_count > 0 || version_info.is_some_and(|info| info.deprecated));
 
     // Handle local dependencies first (highest priority - no registry lookup needed)
-    if is_local_dependency(&dep.version) && !alias_has_finding {
+    if is_local_dependency(dep.declared_spec()) && !alias_has_finding {
         let tooltip = format!(
             "**Local Dependency**\n\n\
             \"{dep_name}\" is a local/path dependency.\n\n\
@@ -727,6 +728,7 @@ mod tests {
             registry: None,
             resolved_version: None,
             has_additional_version_constraints: false,
+            catalog_spec: None,
         }
     }
 
@@ -1385,6 +1387,19 @@ mod tests {
     }
 
     #[test]
+    fn test_catalog_alias_hint_stays_local_without_a_finding() {
+        let mut alias = make_test_dep("foo", "catalog:");
+        alias.resolved_version = Some("^1.0.0".to_string());
+        alias.catalog_spec = Some("npm:bar@^1.0.0".to_string());
+
+        let hint = create_inlay_hint(&alias, Some(&VersionInfo::default()), FileType::Npm);
+        let InlayHintLabel::String(label) = hint.label else {
+            panic!("unexpected label: {:?}", hint.label);
+        };
+        assert_eq!(label.trim(), "→ Local");
+    }
+
+    #[test]
     fn test_npm_local_deps_detection() {
         use crate::parsers::{Parser, npm::NpmParser};
 
@@ -1526,6 +1541,7 @@ mod tests {
             registry: None,
             resolved_version: Some(resolved.to_string()),
             has_additional_version_constraints: false,
+            catalog_spec: None,
         }
     }
 

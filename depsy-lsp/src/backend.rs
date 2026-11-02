@@ -2215,6 +2215,7 @@ mod tests {
             registry: None,
             resolved_version: resolved.map(str::to_string),
             has_additional_version_constraints: false,
+            catalog_spec: None,
         }
     }
 
@@ -2610,6 +2611,54 @@ mod tests {
                     FileType::Npm.to_ecosystem(),
                     "bar",
                     "1.2.0"
+                ))
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn catalog_alias_is_queried_and_cached_under_the_real_package() {
+        // Given `foo: catalog:` whose catalog entry aliases `bar`, with no lockfile
+        // When the background vulnerability check runs
+        // Then OSV is asked about `bar` at the catalog's range and the answer is stored there
+        let server = osv_server_flagging_1_2_5().await;
+        let (service, _socket) = tower_lsp::LspService::new(UninitializedServer);
+        let client = service.inner().0.clone();
+        let vuln_cache = Arc::new(VulnerabilityCache::new());
+        let deps = crate::parsers::pnpm_workspace::resolve_catalog_references(
+            vec![make_dep("foo", "catalog:", None)],
+            Some("catalog:\n  foo: npm:bar@^1.0.0\n"),
+        );
+
+        DepsyBackend::fetch_vulnerabilities_background(
+            deps,
+            FileType::Npm,
+            Arc::new(OsvClient::with_endpoint(server.uri()).unwrap()),
+            Arc::clone(&vuln_cache),
+            client,
+            VulnBgContext::owning(
+                Arc::new(DashMap::new()),
+                Url::parse("file:///a/package.json").unwrap(),
+                None,
+            ),
+        )
+        .await;
+
+        let requests = server.received_requests().await.unwrap();
+        let body: serde_json::Value = requests
+            .iter()
+            .find(|request| request.url.path() == "/querybatch")
+            .unwrap()
+            .body_json()
+            .unwrap();
+        assert_eq!(body["queries"][0]["package"]["name"], "bar");
+        assert_eq!(body["queries"][0]["version"], "1.0.0");
+        assert!(
+            vuln_cache
+                .get(&VulnCacheKey::new(
+                    FileType::Npm.to_ecosystem(),
+                    "bar",
+                    "1.0.0"
                 ))
                 .is_some()
         );

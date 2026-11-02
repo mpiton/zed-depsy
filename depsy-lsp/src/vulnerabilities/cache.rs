@@ -45,7 +45,7 @@ impl VulnCacheKey {
     /// package: advisories on the alias's local name are about another package.
     pub fn for_dependency(ecosystem: Ecosystem, dep: &Dependency) -> Self {
         let alias = (ecosystem == Ecosystem::Npm)
-            .then(|| npm_alias_target(&dep.version))
+            .then(|| npm_alias_target(dep.declared_spec()))
             .flatten();
         let (name, version) = match alias {
             Some((target, range)) => (target, dep.resolved_version.as_deref().unwrap_or(range)),
@@ -222,6 +222,21 @@ mod tests {
     use super::*;
     use crate::parsers::Span;
 
+    fn catalog_alias(resolved: Option<&str>) -> Dependency {
+        let mut alias = dep("foo", "catalog:", resolved);
+        alias.catalog_spec = Some("npm:bar@^1.0.0".to_string());
+        alias
+    }
+
+    #[test]
+    fn catalog_alias_is_keyed_under_the_real_package() {
+        let locked = VulnCacheKey::for_dependency(Ecosystem::Npm, &catalog_alias(Some("1.2.0")));
+        assert_eq!(locked, VulnCacheKey::new(Ecosystem::Npm, "bar", "1.2.0"));
+
+        let unlocked = VulnCacheKey::for_dependency(Ecosystem::Npm, &catalog_alias(Some("^1.0.0")));
+        assert_eq!(unlocked, VulnCacheKey::new(Ecosystem::Npm, "bar", "1.0.0"));
+    }
+
     fn dep(name: &str, version: &str, resolved: Option<&str>) -> Dependency {
         const SPAN: Span = Span {
             line: 0,
@@ -238,6 +253,7 @@ mod tests {
             registry: None,
             resolved_version: resolved.map(str::to_string),
             has_additional_version_constraints: false,
+            catalog_spec: None,
         }
     }
 

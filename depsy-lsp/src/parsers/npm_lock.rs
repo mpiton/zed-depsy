@@ -637,7 +637,14 @@ pub fn parse_yarn_lock_graph(content: &str) -> LockfileGraph {
                         .trim_end_matches(':')
                         .trim_matches('"');
                     if !name.is_empty() {
-                        cur.dependencies.push(name.to_string());
+                        // Berry lists an aliased package under its real name, so the edge
+                        // must too. Classic keeps the alias and has no `name: value` form.
+                        let target = trimmed
+                            .split_once(": ")
+                            .and_then(|(_, value)| value.trim_matches('"').strip_prefix("npm:"))
+                            .and_then(split_name_version)
+                            .map_or(name, |(real_name, _)| real_name);
+                        cur.dependencies.push(target.to_string());
                     }
                 }
                 continue;
@@ -651,7 +658,7 @@ pub fn parse_yarn_lock_graph(content: &str) -> LockfileGraph {
             if let Some(resolution) = trimmed.strip_prefix("resolution: ")
                 && let Some((name, locator)) = split_name_version(resolution.trim_matches('"'))
             {
-                if ["workspace:", "portal:", "link:"]
+                if ["workspace:", "portal:", "link:", "file:", "exec:"]
                     .iter()
                     .any(|protocol| locator.starts_with(protocol))
                 {
@@ -1576,6 +1583,80 @@ __metadata:
         let graph = parse_yarn_lock_graph(lock);
         let names: Vec<&str> = graph.packages.iter().map(|p| p.name.as_str()).collect();
         assert_eq!(names, vec!["rxjs"]);
+    }
+
+    /// `file:` and `exec:` packages are local too, whatever name they carry.
+    #[test]
+    fn test_parse_yarn_lock_graph_berry_skips_file_and_exec_entries() {
+        let lock = r#""lodash@file:./vendor/lodash::locator=root%40workspace%3A.":
+  version: 4.17.21
+  resolution: "lodash@file:./vendor/lodash#./vendor/lodash::hash=abc123&locator=root%40workspace%3A."
+
+"generated@exec:./gen.js::locator=root%40workspace%3A.":
+  version: 1.0.0
+  resolution: "generated@exec:./gen.js#./gen.js::hash=def456&locator=root%40workspace%3A."
+
+"rxjs@npm:~7.8.2":
+  version: 7.8.2
+  resolution: "rxjs@npm:7.8.2"
+"#;
+        let graph = parse_yarn_lock_graph(lock);
+        let names: Vec<&str> = graph.packages.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, vec!["rxjs"]);
+    }
+
+    /// Berry lists an aliased package under its real name, so an edge through the
+    /// alias has to reach it. Scoped targets and plain ranges are covered too.
+    #[test]
+    fn test_parse_yarn_lock_graph_berry_follows_alias_edges() {
+        let lock = r#""@isaacs/cliui@npm:^8.0.2":
+  version: 8.0.2
+  resolution: "@isaacs/cliui@npm:8.0.2"
+  dependencies:
+    string-width: "npm:^5.1.2"
+    string-width-cjs: "npm:string-width@^4.2.0"
+    types-alias: "npm:@types/node@^20.0.0"
+
+"string-width-cjs@npm:string-width@^4.2.0":
+  version: 4.2.3
+  resolution: "string-width@npm:4.2.3"
+
+"string-width@npm:^5.1.2":
+  version: 5.1.2
+  resolution: "string-width@npm:5.1.2"
+
+"types-alias@npm:@types/node@^20.0.0":
+  version: 20.11.5
+  resolution: "@types/node@npm:20.11.5"
+"#;
+        let graph = parse_yarn_lock_graph(lock);
+        assert_eq!(
+            graph.packages[0].dependencies,
+            vec!["string-width", "string-width", "@types/node"]
+        );
+        let reached: Vec<(&str, &str)> = graph
+            .transitive_deps_of("@isaacs/cliui")
+            .into_iter()
+            .map(|p| (p.name.as_str(), p.version.as_str()))
+            .collect();
+        assert!(reached.contains(&("string-width", "4.2.3")));
+        assert!(reached.contains(&("@types/node", "20.11.5")));
+    }
+
+    /// Classic keeps an aliased package under the alias, so its edges must too.
+    #[test]
+    fn test_parse_yarn_lock_graph_classic_keeps_alias_edges() {
+        let lock = r#""@isaacs/cliui@^8.0.2":
+  version "8.0.2"
+  dependencies:
+    string-width-cjs "npm:string-width@^4.2.0"
+
+"string-width-cjs@npm:string-width@^4.2.0":
+  version "4.2.3"
+"#;
+        let graph = parse_yarn_lock_graph(lock);
+        assert_eq!(graph.packages[0].dependencies, vec!["string-width-cjs"]);
+        assert_eq!(graph.packages[1].name, "string-width-cjs");
     }
 
     /// Classic writes `foo@:` for a dependency declared with an empty range.

@@ -37,6 +37,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Yarn 2+ (Berry) lockfiles are now read correctly. Before, every package got
+  an empty locked version, so all dependencies in a `package.json` were reported
+  as out of date ([#424](https://github.com/mpiton/zed-depsy/issues/424)). The
+  dependency graph also holds clean package names now, so the scanner walks
+  transitive dependencies of Berry projects. Aliased packages and the edges to
+  them use the real name, in Yarn Classic too, and `workspace:`, `portal:`,
+  `link:`, `file:` and `exec:` entries stay out. Berry entries with a key over
+  1024 characters, written as `? key`, no longer overwrite the package before
+  them.
+- When an npm lockfile holds several versions of a package, a dependency now
+  resolves to the version matching its declared range instead of the first entry
+  in the file, which could raise a false update hint. With several matches the
+  highest wins, and range syntax the `semver` crate rejects still falls back to
+  the first entry. A `catalog:` dependency uses the range from its pnpm catalog.
+  The `scan` command uses the same selection.
 - A manifest parse that finishes after a newer parse has started no longer
   overwrites the newer parse or its transitive vulnerability findings.
   Before, a slow registry fetch could keep the hints and diagnostics of

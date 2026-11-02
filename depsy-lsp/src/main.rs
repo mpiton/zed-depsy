@@ -393,9 +393,15 @@ async fn run_scan(
 
     if !is_pnpm_workspace {
         for dep in dependencies.iter_mut() {
-            let key = canonical_name(ecosystem, &dep.name);
-            if let Some(v) = version_map.get(&key) {
-                dep.resolved_version = Some(v.clone());
+            let locked = if matches!(ecosystem, Ecosystem::Npm) {
+                npm_lock::select_npm_version(dep, &lockfile_graph)
+            } else {
+                version_map
+                    .get(&canonical_name(ecosystem, &dep.name))
+                    .cloned()
+            };
+            if let Some(v) = locked {
+                dep.resolved_version = Some(v);
             }
         }
     }

@@ -42,8 +42,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   as out of date ([#424](https://github.com/mpiton/zed-depsy/issues/424)). The
   dependency graph also holds clean package names now, so the scanner walks
   transitive dependencies of Berry projects. Aliased packages and the edges to
-  them use the real name, and `workspace:`, `portal:`, `link:`, `file:` and
-  `exec:` entries stay out.
+  them use the real name, in Yarn Classic too, and `workspace:`, `portal:`,
+  `link:`, `file:` and `exec:` entries stay out. Berry entries with a key over
+  1024 characters, written as `? key`, no longer overwrite the package before
+  them.
 - When an npm lockfile holds several versions of a package, a dependency now
   resolves to the version matching its declared range instead of the first entry
   in the file, which could raise a false update hint. With several matches the

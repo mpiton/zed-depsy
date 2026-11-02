@@ -598,23 +598,16 @@ pub fn parse_yarn_lock_graph(content: &str) -> LockfileGraph {
     for line in content.lines() {
         let trimmed = line.trim_start();
 
+        // Berry writes a key over 1024 characters as `? key`, with `:` on the next line.
         if !line.starts_with(' ')
-            && line.contains('@')
-            && line.ends_with(':')
             && !line.starts_with('#')
+            && line.contains('@')
+            && let Some(header) = line.strip_prefix("? ").or_else(|| line.strip_suffix(':'))
         {
             if let Some(finished) = current.take() {
                 graph.packages.push(finished);
             }
-            let header = line.trim_end_matches(':').trim();
-            // Multiple keys comma-separated; take the first
-            let first_key_raw = header.split(',').next().unwrap_or(header).trim();
-            let first_key = first_key_raw.trim_matches('"');
-            // Classic writes `foo@:` for an empty range.
-            let name = first_key
-                .strip_suffix('@')
-                .or_else(|| split_name_version(first_key).map(|(name, _)| name));
-            if let Some(name) = name {
+            if let Some(name) = yarn_header_name(header) {
                 current = Some(LockfilePackage {
                     name: name.to_string(),
                     version: String::new(),
@@ -630,18 +623,17 @@ pub fn parse_yarn_lock_graph(content: &str) -> LockfileGraph {
             // Deeper lines belong to a nested block such as `dependencies:` or `bin:`.
             if line.starts_with("    ") {
                 if in_deps {
-                    let name = trimmed
-                        .split_whitespace()
-                        .next()
-                        .unwrap_or("")
-                        .trim_end_matches(':')
-                        .trim_matches('"');
+                    let (key, value) = trimmed
+                        .split_once(char::is_whitespace)
+                        .unwrap_or((trimmed, ""));
+                    let name = key.trim_end_matches(':').trim_matches('"');
                     if !name.is_empty() {
-                        // Berry lists an aliased package under its real name, so the edge
-                        // must too. Classic keeps the alias and has no `name: value` form.
-                        let target = trimmed
-                            .split_once(": ")
-                            .and_then(|(_, value)| value.trim_matches('"').strip_prefix("npm:"))
+                        // An aliased package is listed under its real name, so the edge
+                        // must use it too.
+                        let target = value
+                            .trim()
+                            .trim_matches('"')
+                            .strip_prefix("npm:")
                             .and_then(split_name_version)
                             .map_or(name, |(real_name, _)| real_name);
                         cur.dependencies.push(target.to_string());
@@ -679,6 +671,26 @@ pub fn parse_yarn_lock_graph(content: &str) -> LockfileGraph {
 // ---------------------------------------------------------------------------
 // Shared helpers
 // ---------------------------------------------------------------------------
+
+/// Read the package name from the first key of a `yarn.lock` entry header.
+///
+/// An alias key gives the real package: `"alias@npm:real@^1.0.0"` → `real`.
+/// Classic has no `resolution:` line to correct it later.
+fn yarn_header_name(header: &str) -> Option<&str> {
+    let header = header.trim();
+    // Multiple keys comma-separated; take the first
+    let first_key_raw = header.split(',').next().unwrap_or(header).trim();
+    let first_key = first_key_raw.trim_matches('"');
+    // Classic writes `foo@:` for an empty range.
+    first_key.strip_suffix('@').or_else(|| {
+        let (name, range) = split_name_version(first_key)?;
+        let real_name = range
+            .strip_prefix("npm:")
+            .and_then(split_name_version)
+            .map(|(real_name, _)| real_name);
+        Some(real_name.unwrap_or(name))
+    })
+}
 
 /// Split a `name@version` spec into `(name, version)`, handling scoped packages.
 ///
@@ -1643,20 +1655,97 @@ __metadata:
         assert!(reached.contains(&("@types/node", "20.11.5")));
     }
 
-    /// Classic keeps an aliased package under the alias, so its edges must too.
+    /// Classic has no `resolution:` line and sorts an alias key first when it shares
+    /// an entry with the real package, so the key and the edge must give the real name.
     #[test]
-    fn test_parse_yarn_lock_graph_classic_keeps_alias_edges() {
+    fn test_parse_yarn_lock_graph_classic_uses_real_name_for_aliases() {
         let lock = r#""@isaacs/cliui@^8.0.2":
   version "8.0.2"
   dependencies:
     string-width-cjs "npm:string-width@^4.2.0"
+    types-alias "npm:@types/node@^20.0.0"
 
-"string-width-cjs@npm:string-width@^4.2.0":
+"string-width-cjs@npm:string-width@^4.2.0", string-width@^4.1.0, string-width@^4.2.3:
   version "4.2.3"
+
+"types-alias@npm:@types/node@^20.0.0":
+  version "20.11.5"
 "#;
         let graph = parse_yarn_lock_graph(lock);
-        assert_eq!(graph.packages[0].dependencies, vec!["string-width-cjs"]);
-        assert_eq!(graph.packages[1].name, "string-width-cjs");
+        assert_eq!(
+            graph.packages[0].dependencies,
+            vec!["string-width", "@types/node"]
+        );
+        assert_eq!(graph.packages[1].name, "string-width");
+        assert_eq!(graph.packages[2].name, "@types/node");
+        let reached: Vec<(&str, &str)> = graph
+            .transitive_deps_of("@isaacs/cliui")
+            .into_iter()
+            .map(|p| (p.name.as_str(), p.version.as_str()))
+            .collect();
+        assert!(reached.contains(&("string-width", "4.2.3")));
+        assert!(reached.contains(&("@types/node", "20.11.5")));
+    }
+
+    /// Berry writes a key over 1024 characters as `? key`, with `:` on its own line.
+    /// Such an entry must not write into the package before it.
+    #[test]
+    fn test_parse_yarn_lock_graph_berry_long_key_entry() {
+        let lock = r#""first@npm:^1.0.0":
+  version: 1.0.0
+  resolution: "first@npm:1.0.0"
+  dependencies:
+    tslib: "npm:^2.0.0"
+
+? "lodash@npm:^4.0.0, lodash@npm:^4.1.0, lodash@npm:^4.2.0"
+:
+  version: 4.17.21
+  resolution: "lodash@npm:4.17.21"
+  dependencies:
+    rxjs: "npm:^7.0.0"
+
+"tslib@npm:^2.0.0":
+  version: 2.6.2
+  resolution: "tslib@npm:2.6.2"
+"#;
+        let graph = parse_yarn_lock_graph(lock);
+        let packages: Vec<(&str, &str, Vec<&str>)> = graph
+            .packages
+            .iter()
+            .map(|p| {
+                (
+                    p.name.as_str(),
+                    p.version.as_str(),
+                    p.dependencies.iter().map(String::as_str).collect(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            packages,
+            vec![
+                ("first", "1.0.0", vec!["tslib"]),
+                ("lodash", "4.17.21", vec!["rxjs"]),
+                ("tslib", "2.6.2", vec![]),
+            ]
+        );
+    }
+
+    /// A local package under a long key is dropped without touching the entry before it.
+    #[test]
+    fn test_parse_yarn_lock_graph_berry_long_key_local_entry() {
+        let lock = r#""first@npm:^1.0.0":
+  version: 1.0.0
+  resolution: "first@npm:1.0.0"
+
+? "@acme/lib@workspace:*, @acme/lib@workspace:packages/lib"
+:
+  version: 0.0.0-use.local
+  resolution: "@acme/lib@workspace:packages/lib"
+"#;
+        let graph = parse_yarn_lock_graph(lock);
+        assert_eq!(graph.packages.len(), 1);
+        assert_eq!(graph.packages[0].name, "first");
+        assert_eq!(graph.packages[0].version, "1.0.0");
     }
 
     /// Classic writes `foo@:` for a dependency declared with an empty range.

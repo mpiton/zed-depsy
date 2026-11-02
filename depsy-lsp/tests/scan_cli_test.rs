@@ -414,6 +414,112 @@ catalogs:
     }
 }
 
+/// Issue #424 on the CLI path. The declared version sits between the first and the
+/// last lockfile entry, so taking either end queries the wrong one.
+#[tokio::test]
+async fn test_scan_yarn_berry_queries_version_in_declared_range() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/querybatch"))
+        .respond_with(|request: &wiremock::Request| {
+            let body: serde_json::Value = request
+                .body_json()
+                .expect("querybatch request body should be valid JSON");
+            let results: Vec<serde_json::Value> = body["queries"]
+                .as_array()
+                .expect("querybatch.queries should be an array")
+                .iter()
+                .map(|_| serde_json::json!({ "vulns": [] }))
+                .collect();
+
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": results
+            }))
+        })
+        .mount(&server)
+        .await;
+
+    let tmp = tempfile::tempdir().expect("failed to create temp dir");
+    let manifest_path = tmp.path().join("package.json");
+    std::fs::write(
+        &manifest_path,
+        r#"{"name":"app","dependencies":{"rxjs":"^6.0.0"}}"#,
+    )
+    .expect("failed to write package.json");
+    std::fs::write(
+        tmp.path().join("yarn.lock"),
+        r#"__metadata:
+  version: 8
+
+"rxjs@npm:^5.0.0":
+  version: 5.5.12
+  resolution: "rxjs@npm:5.5.12"
+
+"rxjs@npm:^6.0.0":
+  version: 6.6.7
+  resolution: "rxjs@npm:6.6.7"
+  dependencies:
+    tslib: "npm:^1.9.0"
+
+"rxjs@npm:^7.0.0":
+  version: 7.8.1
+  resolution: "rxjs@npm:7.8.1"
+
+"tslib@npm:^1.9.0":
+  version: 1.14.1
+  resolution: "tslib@npm:1.14.1"
+"#,
+    )
+    .expect("failed to write yarn.lock");
+
+    let output = Command::new(depsy_lsp_bin())
+        .env("OSV_ENDPOINT", server.uri())
+        .args(["scan", "--output", "json", "--file"])
+        .arg(&manifest_path)
+        .output()
+        .expect("failed to run depsy-lsp");
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "scan of a Berry project should succeed\nstdout=\n{}\nstderr=\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    let requests = server
+        .received_requests()
+        .await
+        .expect("failed to collect mock server requests");
+    let querybatch_body: serde_json::Value = requests
+        .iter()
+        .find(|request| request.url.path() == "/querybatch")
+        .expect("expected POST /querybatch")
+        .body_json()
+        .expect("querybatch body should be valid JSON");
+    let mut queried: Vec<(String, String)> = querybatch_body["queries"]
+        .as_array()
+        .expect("querybatch.queries should be an array")
+        .iter()
+        .map(|query| {
+            (
+                query["package"]["name"].as_str().unwrap_or("").to_string(),
+                query["version"].as_str().unwrap_or("").to_string(),
+            )
+        })
+        .collect();
+    queried.sort();
+
+    assert_eq!(
+        queried,
+        vec![
+            ("rxjs".to_string(), "6.6.7".to_string()),
+            ("tslib".to_string(), "1.14.1".to_string()),
+        ]
+    );
+}
+
 #[tokio::test]
 async fn test_scan_pnpm_workspace_catalogs_queries_versions_locked_per_catalog() {
     let server = MockServer::start().await;

@@ -530,18 +530,16 @@ fn bench_memory_cache(c: &mut Criterion) {
 }
 
 fn bench_sqlite_cache(c: &mut Criterion) {
-    use std::path::PathBuf;
     use tokio::runtime::Runtime;
 
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("cache/sqlite");
 
-    // Use a temporary file for benchmarks since in_memory() is cfg(test) only
-    let temp_dir = std::env::temp_dir();
-    let db_path = temp_dir.join("depsy_bench_cache.db");
-
-    // Clean up any existing benchmark database
-    let _ = std::fs::remove_file(&db_path);
+    // Use a temporary file for benchmarks since in_memory() is cfg(test) only.
+    // CodSpeed re-executes this binary once per benchmark while the parent keeps
+    // its connections open, so each process needs its own database directory.
+    let temp_dir = tempfile::tempdir().expect("Failed to create benchmark temp dir");
+    let db_path = temp_dir.path().join("depsy_bench_cache.db");
 
     let config = SqliteCacheConfig::default();
     let cache = SqliteCache::with_path_and_config(db_path.clone(), config)
@@ -596,11 +594,6 @@ fn bench_sqlite_cache(c: &mut Criterion) {
     }
 
     group.finish();
-
-    // Clean up
-    let _ = std::fs::remove_file(&db_path);
-    let _ = std::fs::remove_file(PathBuf::from(format!("{}-wal", db_path.display())));
-    let _ = std::fs::remove_file(PathBuf::from(format!("{}-shm", db_path.display())));
 }
 
 // =============================================================================

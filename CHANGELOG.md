@@ -76,6 +76,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Yarn `patch:` entry, resolves to that version.
 - A `pnpm-lock.yaml` holding pnpm's own environment document is now read from its
   main document, so the pnpm tool package is no longer counted as a dependency.
+- `scan` now finds transitive dependencies in a pnpm v9 `pnpm-lock.yaml`, which
+  records edges under `snapshots:`. Before, only `packages:` was read, so a v9
+  project reported advisories for its direct dependencies alone. Keys that differ
+  only by peer suffix merge into one package, in v6 lockfiles too, and an alias
+  edge such as `foo: bar@1.2.0` follows `bar`. `optionalDependencies` count as
+  edges, as they do for Yarn.
 - A manifest parse that finishes after a newer parse has started no longer
   overwrites the newer parse or its transitive vulnerability findings.
   Before, a slow registry fetch could keep the hints and diagnostics of

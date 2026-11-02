@@ -674,8 +674,6 @@ fn package_pair(name: &str, version: &str) -> (String, String) {
 }
 
 /// A `catalog:` lockfile for `foo: npm:bar@^1.0.0`, where `bar` depends on `baz`.
-///
-/// The edge sits under `packages:`, the only section the lock graph reads edges from.
 const PNPM_CATALOG_ALIAS_LOCK: &str = r#"lockfileVersion: '9.0'
 
 catalogs:
@@ -696,11 +694,17 @@ packages:
 
   bar@1.2.0:
     resolution: {integrity: sha512-a}
-    dependencies:
-      baz: 1.0.0
 
   baz@1.0.0:
     resolution: {integrity: sha512-b}
+
+snapshots:
+
+  bar@1.2.0:
+    dependencies:
+      baz: 1.0.0
+
+  baz@1.0.0: {}
 "#;
 
 fn write_catalog_alias_project(dir: &std::path::Path) -> PathBuf {
@@ -739,6 +743,94 @@ async fn test_scan_queries_the_real_package_of_a_catalog_alias_without_a_lockfil
     assert_eq!(
         scan_osv_queries(&manifest_path).await,
         vec![package_pair("bar", "1.0.0")]
+    );
+}
+
+/// pnpm v9 lists edges only under `snapshots:`, with peer suffixes in the keys.
+/// `tokens` is an alias: nothing is locked under that name.
+#[tokio::test]
+async fn test_scan_reads_transitives_from_pnpm_v9_snapshots() {
+    let tmp = tempfile::tempdir().expect("failed to create temp dir");
+    let manifest_path = tmp.path().join("package.json");
+    std::fs::write(
+        &manifest_path,
+        r#"{"name":"app","dependencies":{"react":"^18.2.0","react-dom":"^18.2.0"}}"#,
+    )
+    .expect("failed to write package.json");
+    std::fs::write(
+        tmp.path().join("pnpm-lock.yaml"),
+        r#"lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: true
+  excludeLinksFromLockfile: false
+
+importers:
+
+  .:
+    dependencies:
+      react:
+        specifier: ^18.2.0
+        version: 18.2.0
+      react-dom:
+        specifier: ^18.2.0
+        version: 18.2.0(react@18.2.0)
+
+packages:
+
+  js-tokens@4.0.0:
+    resolution: {integrity: sha512-a}
+
+  loose-envify@1.4.0:
+    resolution: {integrity: sha512-b}
+    hasBin: true
+
+  react-dom@18.2.0:
+    resolution: {integrity: sha512-c}
+    peerDependencies:
+      react: ^18.2.0
+
+  react@18.2.0:
+    resolution: {integrity: sha512-d}
+    engines: {node: '>=0.10.0'}
+
+  scheduler@0.23.0:
+    resolution: {integrity: sha512-e}
+
+snapshots:
+
+  js-tokens@4.0.0: {}
+
+  loose-envify@1.4.0:
+    dependencies:
+      tokens: js-tokens@4.0.0
+
+  react-dom@18.2.0(react@18.2.0):
+    dependencies:
+      loose-envify: 1.4.0
+      react: 18.2.0
+      scheduler: 0.23.0
+
+  react@18.2.0:
+    dependencies:
+      loose-envify: 1.4.0
+
+  scheduler@0.23.0:
+    dependencies:
+      loose-envify: 1.4.0
+"#,
+    )
+    .expect("failed to write pnpm-lock.yaml");
+
+    assert_eq!(
+        scan_osv_queries(&manifest_path).await,
+        vec![
+            package_pair("js-tokens", "4.0.0"),
+            package_pair("loose-envify", "1.4.0"),
+            package_pair("react", "18.2.0"),
+            package_pair("react-dom", "18.2.0"),
+            package_pair("scheduler", "0.23.0"),
+        ]
     );
 }
 

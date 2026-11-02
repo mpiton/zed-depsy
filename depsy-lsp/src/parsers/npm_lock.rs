@@ -463,6 +463,10 @@ pub fn parse_package_lock_graph(content: &str) -> LockfileGraph {
 /// v6 (`/name@ver:`) and v9 (`name@ver:`) key formats, including quoted scoped
 /// package names.
 ///
+/// Edges sit under `packages:` in v6 and under `snapshots:` in v9. pnpm writes one
+/// key per peer set in either section, so entries of the same name and version
+/// merge into one package. An alias edge such as `foo: bar@1.2.0` names `bar`.
+///
 /// # Examples
 ///
 /// ```
@@ -474,7 +478,7 @@ pub fn parse_package_lock_graph(content: &str) -> LockfileGraph {
 /// ```
 pub fn parse_pnpm_lock_graph(content: &str) -> LockfileGraph {
     let mut graph = LockfileGraph::default();
-    let mut in_packages = false;
+    let mut in_entries = false;
     let mut current: Option<LockfilePackage> = None;
     let mut in_deps = false;
 
@@ -484,41 +488,35 @@ pub fn parse_pnpm_lock_graph(content: &str) -> LockfileGraph {
         if line == "---" {
             graph.packages.clear();
             current = None;
-            in_packages = false;
+            in_entries = false;
             in_deps = false;
             continue;
         }
 
-        // Exit packages section on any new top-level key (e.g. "snapshots:", "settings:", etc.)
-        if in_packages
-            && !line.is_empty()
-            && !line.starts_with(' ')
-            && !line.starts_with('\t')
-            && line != "packages:"
-        {
-            in_packages = false;
+        // Any top-level key ends the current section (e.g. "settings:", "importers:", etc.)
+        if !line.is_empty() && !line.starts_with(' ') && !line.starts_with('\t') {
             if let Some(finish) = current.take() {
                 graph.packages.push(finish);
             }
+            in_entries = matches!(line, "packages:" | "snapshots:");
+            in_deps = false;
             continue;
         }
-
-        if line == "packages:" {
-            in_packages = true;
+        if !in_entries {
             continue;
         }
-        if !in_packages {
-            continue;
-        }
+        // A snapshot without dependencies is written "  name@ver: {}"
+        let entry_line = line.trim_end();
+        let entry_line = entry_line.strip_suffix(" {}").unwrap_or(entry_line);
         // Package entry: "  /name@ver:" (v6) or "  name@ver:" (v9)
-        let entry_key = if let Some(rest) = line.strip_prefix("  /") {
+        let entry_key = if let Some(rest) = entry_line.strip_prefix("  /") {
             Some(rest)
-        } else if line.starts_with("  ")
-            && !line.starts_with("   ")
-            && line.trim().contains('@')
-            && line.trim_end().ends_with(':')
+        } else if entry_line.starts_with("  ")
+            && !entry_line.starts_with("   ")
+            && entry_line.contains('@')
+            && entry_line.ends_with(':')
         {
-            Some(&line[2..])
+            Some(&entry_line[2..])
         } else {
             None
         };
@@ -541,22 +539,22 @@ pub fn parse_pnpm_lock_graph(content: &str) -> LockfileGraph {
             in_deps = false;
             continue;
         }
-        if line.trim() == "dependencies:" {
+        if matches!(line.trim(), "dependencies:" | "optionalDependencies:") {
             in_deps = true;
             continue;
         }
         if in_deps && line.starts_with("      ") {
             let trimmed = line.trim_start();
-            let dep_name_raw = trimmed
+            let (dep_name_raw, dep_value) = trimmed
                 .split_once(':')
-                .map(|(n, _)| n.trim())
-                .unwrap_or(trimmed.trim());
+                .map_or((trimmed.trim(), ""), |(n, v)| (n.trim(), v));
             // pnpm v9 quotes scoped names like '@emotion/cache'
             let dep_name = dep_name_raw.trim_matches('\'').trim_matches('"');
             if !dep_name.is_empty()
                 && let Some(cur) = current.as_mut()
             {
-                cur.dependencies.push(dep_name.to_string());
+                cur.dependencies
+                    .push(pnpm_edge_target(dep_name, dep_value).to_string());
             }
         } else if !line.starts_with("      ") {
             in_deps = false;
@@ -566,8 +564,46 @@ pub fn parse_pnpm_lock_graph(content: &str) -> LockfileGraph {
     if let Some(finish) = current {
         graph.packages.push(finish);
     }
+    graph.packages = merge_pnpm_entries(std::mem::take(&mut graph.packages));
     store_locked_specs(&mut graph, parse_pnpm_locked_specs(content));
     graph
+}
+
+/// Name the package a pnpm edge `name: value` points at.
+///
+/// `value` names another package for an alias: `bar@1.2.0`, or `/bar@1.2.0` in v6.
+/// Versions, peer suffixes (`1.0.0(peer@1.0.0)`) and URL or local sources such as
+/// `git+ssh://git@github.com/o/r.git` keep `name`.
+fn pnpm_edge_target<'a>(name: &'a str, value: &'a str) -> &'a str {
+    let value = value.trim().trim_matches(['\'', '"']);
+    let base = value.split('(').next().unwrap_or(value);
+    let base = base.strip_prefix('/').unwrap_or(base);
+    match split_name_version(base) {
+        Some((target, _)) if target.starts_with('@') || !target.contains(['/', ':']) => target,
+        _ => name,
+    }
+}
+
+/// Merge entries of the same name and version, keeping first-seen order.
+fn merge_pnpm_entries(entries: Vec<LockfilePackage>) -> Vec<LockfilePackage> {
+    let mut merged: Vec<LockfilePackage> = Vec::with_capacity(entries.len());
+    let mut positions: HashMap<String, usize> = HashMap::with_capacity(entries.len());
+
+    for mut entry in entries {
+        let key = format!("{}@{}", entry.name, entry.version);
+        let position = *positions.entry_ref(key.as_str()).or_insert(merged.len());
+        let dependencies = std::mem::take(&mut entry.dependencies);
+        if position == merged.len() {
+            merged.push(entry);
+        }
+        let edges = &mut merged[position].dependencies;
+        for dependency in dependencies {
+            if !edges.contains(&dependency) {
+                edges.push(dependency);
+            }
+        }
+    }
+    merged
 }
 
 /// Map each `name@specifier` of a `pnpm-lock.yaml` to its locked version.
@@ -1451,29 +1487,206 @@ packages:
     // parse_yarn_lock_graph
     // -----------------------------------------------------------------------
 
+    /// pnpm v9 keeps `resolution:` under `packages:` and the edges under `snapshots:`.
     #[test]
-    fn test_parse_pnpm_lock_graph_exits_packages_section_on_snapshots() {
+    fn test_parse_pnpm_lock_graph_reads_edges_from_snapshots() {
         let content = r#"
 lockfileVersion: '9.0'
 
 packages:
 
-  react@18.2.0:
+  react-dom@18.2.0:
     resolution: {integrity: sha512-xxx}
+
+  react@18.2.0:
+    resolution: {integrity: sha512-yyy}
 
 snapshots:
 
   react-dom@18.2.0(react@18.2.0):
     dependencies:
       react: 18.2.0
+
+  react@18.2.0: {}
 "#;
         let graph = parse_pnpm_lock_graph(content);
+        assert_eq!(graph.packages.len(), 2);
         let names: Vec<&str> = graph.packages.iter().map(|p| p.name.as_str()).collect();
-        // Should include react but NOT react-dom (which lives under snapshots:)
-        assert!(names.contains(&"react"));
         assert!(
             !names.iter().any(|n| n.contains('(')),
             "no entry name should contain a peer-suffix paren, got {names:?}"
+        );
+        assert_eq!(pnpm_edges(&graph, "react-dom", "18.2.0"), ["react"]);
+        assert!(pnpm_edges(&graph, "react", "18.2.0").is_empty());
+    }
+
+    fn pnpm_edges<'a>(graph: &'a LockfileGraph, name: &str, version: &str) -> Vec<&'a str> {
+        graph
+            .packages
+            .iter()
+            .find(|p| p.name == name && p.version == version)
+            .map(|p| p.dependencies.iter().map(String::as_str).collect())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn test_parse_pnpm_lock_graph_merges_snapshots_of_peer_variants() {
+        let content = r#"
+lockfileVersion: '9.0'
+
+packages:
+
+  '@a/b@1.0.0':
+    resolution: {integrity: sha512-a}
+
+snapshots:
+
+  '@a/b@1.0.0(c@1.0.0)':
+    dependencies:
+      c: 1.0.0
+      shared: 1.0.0
+
+  '@a/b@1.0.0(c@2.0.0)':
+    dependencies:
+      c: 2.0.0
+      only-here: 1.0.0
+"#;
+        let graph = parse_pnpm_lock_graph(content);
+        assert_eq!(graph.packages.len(), 1);
+        assert_eq!(
+            pnpm_edges(&graph, "@a/b", "1.0.0"),
+            ["c", "shared", "only-here"]
+        );
+    }
+
+    #[test]
+    fn test_parse_pnpm_lock_graph_keeps_versions_apart_when_merging() {
+        let content = r#"
+lockfileVersion: '9.0'
+
+snapshots:
+
+  a@1.0.0:
+    dependencies:
+      old: 1.0.0
+
+  a@2.0.0:
+    dependencies:
+      new: 1.0.0
+"#;
+        let graph = parse_pnpm_lock_graph(content);
+        assert_eq!(pnpm_edges(&graph, "a", "1.0.0"), ["old"]);
+        assert_eq!(pnpm_edges(&graph, "a", "2.0.0"), ["new"]);
+    }
+
+    /// A leaf written as `name@ver: {}` is an entry of its own, and only
+    /// `dependencies:` blocks hold edges.
+    #[test]
+    fn test_parse_pnpm_lock_graph_leaf_snapshot_ends_the_previous_entry() {
+        let content = r#"
+lockfileVersion: '9.0'
+
+snapshots:
+
+  a@1.0.0:
+    dependencies:
+      leaf: 1.0.0
+
+  leaf@1.0.0: {}
+
+  z@1.0.0:
+    transitivePeerDependencies:
+      - not-an-edge
+"#;
+        let graph = parse_pnpm_lock_graph(content);
+        assert_eq!(graph.packages.len(), 3);
+        assert_eq!(pnpm_edges(&graph, "a", "1.0.0"), ["leaf"]);
+        assert!(pnpm_edges(&graph, "leaf", "1.0.0").is_empty());
+        assert!(pnpm_edges(&graph, "z", "1.0.0").is_empty());
+    }
+
+    #[test]
+    fn test_parse_pnpm_lock_graph_reads_optional_edges_of_snapshots() {
+        let content = r#"
+lockfileVersion: '9.0'
+
+snapshots:
+
+  chokidar@3.6.0:
+    dependencies:
+      braces: 3.0.2
+    optionalDependencies:
+      fsevents: 2.3.3
+"#;
+        let graph = parse_pnpm_lock_graph(content);
+        assert_eq!(
+            pnpm_edges(&graph, "chokidar", "3.6.0"),
+            ["braces", "fsevents"]
+        );
+    }
+
+    #[test]
+    fn test_parse_pnpm_lock_graph_alias_edge_points_at_the_real_package() {
+        let content = r#"
+lockfileVersion: '9.0'
+
+snapshots:
+
+  a@1.0.0:
+    dependencies:
+      foo: bar@1.2.0
+      '@x/scoped': '@y/real@2.0.0'
+      peered: target@3.0.0(peer@1.0.0)
+      plain: 1.0.0
+      with-peer: 1.0.0(peer@1.0.0)
+      from-url: https://codeload.github.com/o/r/tar.gz/abc
+      from-ssh: git+ssh://git@github.com/o/r.git
+      from-link: link:../@local/pkg
+"#;
+        let graph = parse_pnpm_lock_graph(content);
+        assert_eq!(
+            pnpm_edges(&graph, "a", "1.0.0"),
+            [
+                "bar",
+                "@y/real",
+                "target",
+                "plain",
+                "with-peer",
+                "from-url",
+                "from-ssh",
+                "from-link"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_pnpm_lock_graph_v6_keeps_edges_under_packages() {
+        let content = r#"
+lockfileVersion: '6.0'
+
+packages:
+
+  /a@1.0.0(peer@1.0.0):
+    resolution: {integrity: sha512-a}
+    dependencies:
+      foo: /bar@1.2.0
+      '@x/scoped': /@y/real@2.0.0(peer@1.0.0)
+      peer: 1.0.0
+
+  /a@1.0.0(peer@2.0.0):
+    resolution: {integrity: sha512-a}
+    dependencies:
+      peer: 2.0.0
+      other: 1.0.0
+
+  /bar@1.2.0:
+    resolution: {integrity: sha512-b}
+"#;
+        let graph = parse_pnpm_lock_graph(content);
+        assert_eq!(graph.packages.len(), 2);
+        assert_eq!(
+            pnpm_edges(&graph, "a", "1.0.0"),
+            ["bar", "@y/real", "peer", "other"]
         );
     }
 

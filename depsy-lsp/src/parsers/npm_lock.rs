@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use async_trait::async_trait;
 use hashbrown::HashMap;
 
+use crate::parsers::Dependency;
 use crate::parsers::lockfile_graph::{LockfileGraph, LockfilePackage};
 use crate::parsers::lockfile_resolver::LockfileResolver;
 
@@ -575,10 +576,10 @@ fn split_pnpm_key(key: &str) -> Option<(String, String)> {
     Some((base[..at].to_string(), base[at + 1..].to_string()))
 }
 
-/// Parse a `yarn.lock` (Yarn Classic v1 format) into a [`LockfileGraph`].
+/// Parse a `yarn.lock` into a [`LockfileGraph`].
 ///
-/// Yarn Berry v2+ uses a different YAML-based format and is not handled by
-/// this entry point.
+/// Handles both Classic v1 format (`version "X.Y.Z"`) and
+/// Berry v2+ format (`version: X.Y.Z`).
 ///
 /// # Examples
 ///
@@ -609,11 +610,13 @@ pub fn parse_yarn_lock_graph(content: &str) -> LockfileGraph {
             // Multiple keys comma-separated; take the first
             let first_key_raw = header.split(',').next().unwrap_or(header).trim();
             let first_key = first_key_raw.trim_matches('"');
-            if let Some(at_pos) = first_key.rfind('@')
-                && at_pos != 0
-            {
+            // Classic writes `foo@:` for an empty range.
+            let name = first_key
+                .strip_suffix('@')
+                .or_else(|| split_name_version(first_key).map(|(name, _)| name));
+            if let Some(name) = name {
                 current = Some(LockfilePackage {
-                    name: first_key[..at_pos].to_string(),
+                    name: name.to_string(),
                     version: String::new(),
                     dependencies: Vec::new(),
                     is_root: false,
@@ -624,26 +627,38 @@ pub fn parse_yarn_lock_graph(content: &str) -> LockfileGraph {
         }
 
         if let Some(cur) = current.as_mut() {
-            if let Some(v) = trimmed.strip_prefix("version ") {
-                cur.version = v.trim().trim_matches('"').to_string();
-                in_deps = false;
-                continue;
-            }
-            if trimmed == "dependencies:" {
-                in_deps = true;
-                continue;
-            }
-            if in_deps && line.starts_with("    ") {
-                let name = trimmed
-                    .split_whitespace()
-                    .next()
-                    .unwrap_or("")
-                    .trim_matches('"');
-                if !name.is_empty() {
-                    cur.dependencies.push(name.to_string());
+            // Deeper lines belong to a nested block such as `dependencies:` or `bin:`.
+            if line.starts_with("    ") {
+                if in_deps {
+                    let name = trimmed
+                        .split_whitespace()
+                        .next()
+                        .unwrap_or("")
+                        .trim_end_matches(':')
+                        .trim_matches('"');
+                    if !name.is_empty() {
+                        cur.dependencies.push(name.to_string());
+                    }
                 }
-            } else if !line.starts_with("  ") {
-                in_deps = false;
+                continue;
+            }
+            in_deps = matches!(trimmed, "dependencies:" | "optionalDependencies:");
+            if let Some(v) = extract_yarn_version(trimmed) {
+                cur.version = v;
+            }
+            // Berry only: the key can be an alias, and only this line names the real
+            // package. Local packages must not reach registry or OSV lookups.
+            if let Some(resolution) = trimmed.strip_prefix("resolution: ")
+                && let Some((name, locator)) = split_name_version(resolution.trim_matches('"'))
+            {
+                if ["workspace:", "portal:", "link:"]
+                    .iter()
+                    .any(|protocol| locator.starts_with(protocol))
+                {
+                    current = None;
+                } else {
+                    cur.name = name.to_string();
+                }
             }
         }
     }
@@ -679,6 +694,33 @@ fn split_name_version(spec: &str) -> Option<(&str, &str)> {
     }
 
     Some((name, version))
+}
+
+/// Choose the locked version of `dep` when a lockfile holds several.
+///
+/// The graph does not keep the ranges an entry was locked for, so this takes
+/// an exact pin first, then the highest version in the range. It falls back
+/// to the first entry for range syntax the `semver` crate rejects.
+pub fn select_npm_version(dep: &Dependency, graph: &LockfileGraph) -> Option<String> {
+    let candidates: Vec<&str> = graph
+        .find_all(&dep.name)
+        .into_iter()
+        .map(|p| p.version.as_str())
+        .collect();
+    let declared = dep.version.trim();
+    if candidates.contains(&declared) {
+        return Some(declared.to_string());
+    }
+    let highest_in_range = semver::VersionReq::parse(declared).ok().and_then(|req| {
+        candidates
+            .iter()
+            .filter_map(|c| semver::Version::parse(c).ok())
+            .filter(|v| req.matches(v))
+            .max()
+    });
+    highest_in_range
+        .map(|v| v.to_string())
+        .or_else(|| candidates.first().map(|c| (*c).to_string()))
 }
 
 /// Resolves versions from npm/yarn/pnpm/bun lockfiles. Sub-format is captured at selection time.
@@ -719,11 +761,18 @@ impl LockfileResolver for NpmResolver {
             }
         }
     }
+
+    fn resolve_version(&self, dep: &Dependency, graph: &LockfileGraph) -> Option<String> {
+        select_npm_version(dep, graph)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parsers::Parser;
+    use crate::parsers::lockfile_resolver::resolve_versions_from_lockfile;
+    use crate::parsers::npm::NpmParser;
 
     // -----------------------------------------------------------------------
     // split_name_version
@@ -1374,6 +1423,234 @@ packages:
         );
         let react = graph.packages.iter().find(|p| p.name == "react").unwrap();
         assert!(react.dependencies.contains(&"scheduler".to_string()));
+    }
+
+    /// Excerpt of a real Yarn 4 lockfile (Michsior14/ngrx-addons).
+    const YARN_BERRY_LOCK: &str = r#"# This file is generated by running "yarn install" inside your project.
+# Manual changes might be lost - proceed with caution!
+
+__metadata:
+  version: 10
+  cacheKey: 10c0
+
+"@ampproject/remapping@npm:2.3.0, @ampproject/remapping@npm:^2.3.0":
+  version: 2.3.0
+  resolution: "@ampproject/remapping@npm:2.3.0"
+  dependencies:
+    "@jridgewell/gen-mapping": "npm:^0.3.5"
+    "@jridgewell/trace-mapping": "npm:^0.3.24"
+  checksum: 10c0/81d63cca
+  languageName: node
+  linkType: hard
+
+"@angular-devkit/architect@npm:0.2202.5, @angular-devkit/architect@npm:>= 0.2200.0 < 0.2300.0":
+  version: 0.2202.5
+  resolution: "@angular-devkit/architect@npm:0.2202.5"
+  dependencies:
+    "@angular-devkit/core": "npm:22.2.5"
+    rxjs: "npm:7.8.2"
+  bin:
+    architect: bin/cli.js
+  checksum: 10c0/9803e0f5
+  languageName: node
+  linkType: hard
+"#;
+
+    /// Regression (#424): Berry writes `version: X`, Classic writes `version "X"`.
+    #[test]
+    fn test_parse_yarn_lock_graph_berry_reads_versions() {
+        let graph = parse_yarn_lock_graph(YARN_BERRY_LOCK);
+        let version_of = |name: &str| {
+            graph
+                .packages
+                .iter()
+                .find(|p| p.name == name)
+                .map(|p| p.version.as_str())
+        };
+        assert_eq!(version_of("@ampproject/remapping"), Some("2.3.0"));
+        assert_eq!(version_of("@angular-devkit/architect"), Some("0.2202.5"));
+    }
+
+    /// Berry keys are `name: "npm:range"`; `bin:` entries are not dependencies.
+    #[test]
+    fn test_parse_yarn_lock_graph_berry_reads_dependency_names() {
+        let graph = parse_yarn_lock_graph(YARN_BERRY_LOCK);
+        let deps_of = |name: &str| {
+            graph
+                .packages
+                .iter()
+                .find(|p| p.name == name)
+                .map(|p| p.dependencies.clone())
+        };
+        assert_eq!(
+            deps_of("@angular-devkit/architect"),
+            Some(vec!["@angular-devkit/core".to_string(), "rxjs".to_string()])
+        );
+        assert_eq!(
+            deps_of("@ampproject/remapping"),
+            Some(vec![
+                "@jridgewell/gen-mapping".to_string(),
+                "@jridgewell/trace-mapping".to_string()
+            ])
+        );
+    }
+
+    /// Classic lists optional dependencies in a block of their own: the scanner must walk them.
+    #[test]
+    fn test_parse_yarn_lock_graph_classic_keeps_optional_dependencies() {
+        let lock = "foo@^1.0.0:\n  version \"1.2.3\"\n  dependencies:\n    bar \"^1.0.0\"\n  optionalDependencies:\n    baz \"^2.0.0\"\n";
+        let graph = parse_yarn_lock_graph(lock);
+        assert_eq!(graph.packages[0].dependencies, vec!["bar", "baz"]);
+    }
+
+    /// A dependency called `version` must not overwrite the package version.
+    #[test]
+    fn test_parse_yarn_lock_graph_dependency_named_version() {
+        let berry =
+            "\"foo@npm:^1.0.0\":\n  version: 1.2.3\n  dependencies:\n    version: \"npm:^9.0.0\"\n";
+        let classic = "foo@^1.0.0:\n  version \"1.2.3\"\n  dependencies:\n    version \"^9.0.0\"\n";
+        for lock in [berry, classic] {
+            let graph = parse_yarn_lock_graph(lock);
+            assert_eq!(graph.packages.len(), 1);
+            assert_eq!(graph.packages[0].version, "1.2.3");
+            assert_eq!(graph.packages[0].dependencies, vec!["version".to_string()]);
+        }
+    }
+
+    /// Workspace entries are local packages: they must not reach registry or OSV lookups.
+    #[test]
+    fn test_parse_yarn_lock_graph_berry_skips_workspace_entries() {
+        let lock = r#""@acme/root@workspace:.":
+  version: 0.0.0-use.local
+  resolution: "@acme/root@workspace:."
+  dependencies:
+    rxjs: "npm:~7.8.2"
+  languageName: unknown
+  linkType: soft
+
+"rxjs@npm:~7.8.2":
+  version: 7.8.2
+  resolution: "rxjs@npm:7.8.2"
+"#;
+        let graph = parse_yarn_lock_graph(lock);
+        let names: Vec<&str> = graph.packages.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, vec!["rxjs"]);
+    }
+
+    /// Patch and alias keys can hide the real package: `resolution:` names it.
+    #[test]
+    fn test_parse_yarn_lock_graph_berry_patch_and_alias_names() {
+        let lock = r#""typescript@patch:typescript@npm%3A~5.8.0#optional!builtin<compat/typescript>":
+  version: 5.8.3
+  resolution: "typescript@patch:typescript@npm%3A5.8.3#optional!builtin<compat/typescript>::version=5.8.3&hash=5786d5"
+
+"my-alias@npm:lodash@^4.17.0":
+  version: 4.17.21
+  resolution: "lodash@npm:4.17.21"
+"#;
+        let graph = parse_yarn_lock_graph(lock);
+        let names: Vec<&str> = graph.packages.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, vec!["typescript", "lodash"]);
+    }
+
+    /// A local package stays out even when its first header key looks like a registry one.
+    #[test]
+    fn test_parse_yarn_lock_graph_berry_skips_local_entries_under_any_key() {
+        let lock = r#""@acme/lib@npm:^1.0.0, @acme/lib@workspace:packages/lib":
+  version: 0.0.0-use.local
+  resolution: "@acme/lib@workspace:packages/lib"
+
+"@acme/portal@portal:../portal::locator=root%40workspace%3A.":
+  version: 0.0.0-use.local
+  resolution: "@acme/portal@portal:../portal::locator=root%40workspace%3A."
+
+"rxjs@npm:~7.8.2":
+  version: 7.8.2
+  resolution: "rxjs@npm:7.8.2"
+"#;
+        let graph = parse_yarn_lock_graph(lock);
+        let names: Vec<&str> = graph.packages.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, vec!["rxjs"]);
+    }
+
+    /// Classic writes `foo@:` for a dependency declared with an empty range.
+    #[test]
+    fn test_parse_yarn_lock_graph_classic_empty_range_key() {
+        let graph = parse_yarn_lock_graph("foo@:\n  version \"1.2.3\"\n");
+        assert_eq!(graph.packages[0].name, "foo");
+        assert_eq!(graph.packages[0].version, "1.2.3");
+    }
+
+    /// Issue #424 end to end: a Berry lockfile feeds `resolved_version`.
+    #[tokio::test]
+    async fn test_npm_resolver_resolves_berry_versions() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let lock_path = dir.path().join("yarn.lock");
+        tokio::fs::write(&lock_path, YARN_BERRY_LOCK).await?;
+        let resolver = Box::new(NpmResolver {
+            lock_path,
+            sub: NpmLockfileType::YarnLock,
+        });
+        let manifest = r#"{"dependencies": {"@ampproject/remapping": "^2.3.0"}}"#;
+        let mut deps = NpmParser::new().parse(manifest);
+        resolve_versions_from_lockfile(&mut deps, resolver, &dir.path().join("package.json")).await;
+        assert_eq!(deps[0].resolved_version.as_deref(), Some("2.3.0"));
+        Ok(())
+    }
+
+    /// Resolve `spec` for `name` against a lockfile locking several versions of it.
+    fn resolve_among_versions(name: &str, spec: &str, versions: &[&str]) -> Option<String> {
+        let packages = versions
+            .iter()
+            .map(|version| LockfilePackage {
+                name: name.to_string(),
+                version: (*version).to_string(),
+                dependencies: Vec::new(),
+                is_root: false,
+            })
+            .collect();
+        let resolver = NpmResolver {
+            lock_path: PathBuf::from("yarn.lock"),
+            sub: NpmLockfileType::YarnLock,
+        };
+        let manifest = format!(r#"{{"dependencies": {{"{name}": "{spec}"}}}}"#);
+        let deps = NpmParser::new().parse(&manifest);
+        resolver.resolve_version(&deps[0], &LockfileGraph { packages })
+    }
+
+    /// The first entry for a name can be locked for another dependent's range.
+    #[test]
+    fn test_npm_resolver_skips_versions_outside_the_declared_range() {
+        assert_eq!(
+            resolve_among_versions("autoprefixer", "^10.6.1", &["10.6.0", "10.6.1"]).as_deref(),
+            Some("10.6.1")
+        );
+    }
+
+    #[test]
+    fn test_npm_resolver_takes_highest_version_in_the_declared_range() {
+        assert_eq!(
+            resolve_among_versions("postcss", "~8.5.28", &["8.5.28", "8.5.32"]).as_deref(),
+            Some("8.5.32")
+        );
+    }
+
+    /// A bare npm version is an exact pin, unlike a bare semver requirement.
+    #[test]
+    fn test_npm_resolver_honors_exact_pin() {
+        assert_eq!(
+            resolve_among_versions("autoprefixer", "10.6.0", &["10.6.0", "10.6.1"]).as_deref(),
+            Some("10.6.0")
+        );
+    }
+
+    /// npm range syntax the `semver` crate rejects falls back to the first entry.
+    #[test]
+    fn test_npm_resolver_falls_back_on_unparsable_range() {
+        assert_eq!(
+            resolve_among_versions("foo", "1.0.0 || 2.0.0", &["1.0.0", "2.0.0"]).as_deref(),
+            Some("1.0.0")
+        );
     }
 
     /// Regression: parse_package_lock_graph must not surface nested node_modules

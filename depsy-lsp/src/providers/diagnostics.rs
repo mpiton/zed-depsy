@@ -125,7 +125,8 @@ pub async fn create_diagnostics(
                     dep.name,
                     dep.version
                 );
-                diagnostics.push(create_deprecation_diagnostic(dep, &version_info));
+                let package = npm_alias_package(file_type.to_ecosystem(), dep).unwrap_or(&dep.name);
+                diagnostics.push(create_deprecation_diagnostic(dep, package, &version_info));
             } else {
                 // Add vulnerability diagnostic (summary) only if not deprecated or yanked.
                 // Per-document transitive vulns are sourced from vulns.transitive to avoid
@@ -241,11 +242,13 @@ fn create_local_dependency_diagnostic(dep: &Dependency) -> Diagnostic {
 }
 
 /// Create a diagnostic for a deprecated package
-fn create_deprecation_diagnostic(dep: &Dependency, version_info: &VersionInfo) -> Diagnostic {
-    let mut message = format!(
-        "The package '{}' is deprecated. Consider migrating to an alternative.",
-        dep.name
-    );
+fn create_deprecation_diagnostic(
+    dep: &Dependency,
+    package: &str,
+    version_info: &VersionInfo,
+) -> Diagnostic {
+    let mut message =
+        format!("The package '{package}' is deprecated. Consider migrating to an alternative.");
 
     if let Some(latest) = version_info.latest.as_deref() {
         message.push_str(&format!(
@@ -626,6 +629,40 @@ mod tests {
 
         assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
         assert_eq!(diagnostics[0].severity, Some(DiagnosticSeverity::ERROR));
+    }
+
+    #[tokio::test]
+    async fn npm_alias_deprecation_names_the_real_package() {
+        let alias = Dependency {
+            resolved_version: Some("1.2.0".to_string()),
+            ..create_test_dependency("foo", "npm:bar@^1.0.0", 0)
+        };
+        let osv_results = VulnerabilityCache::with_ttl(3600);
+        osv_results.insert(
+            VulnCacheKey::for_dependency(FileType::Npm.to_ecosystem(), &alias),
+            QueryResult {
+                vulnerabilities: Vec::new(),
+                deprecated: true,
+            },
+        );
+        let transitive = hashbrown::HashMap::new();
+
+        let diagnostics = create_diagnostics(
+            std::slice::from_ref(&alias),
+            &MemoryCache::new(),
+            |name| format!("npm:{name}"),
+            None,
+            FileType::Npm,
+            VulnSources {
+                osv_results: &osv_results,
+                transitive: &transitive,
+            },
+            &[],
+        )
+        .await;
+
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        assert!(diagnostics[0].message.contains("'bar'"), "{diagnostics:?}");
     }
 
     fn create_test_dependency(name: &str, version: &str, line: u32) -> Dependency {

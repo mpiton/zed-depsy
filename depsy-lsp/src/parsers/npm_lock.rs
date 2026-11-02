@@ -793,18 +793,21 @@ fn yarn_header_name(header: &str) -> Option<&str> {
 /// Real package and range behind an `npm:` alias in a manifest, or `None` for any other spec.
 ///
 /// An alias with no range accepts any version, so it reads as `*`. A range or
-/// version after `npm:` names no other package, and neither does an empty target.
+/// version after `npm:` names no other package, and neither does an empty target
+/// or `latest`, the tag Yarn Berry reads there. Any other bare word reads as a
+/// package, as npm and pnpm do, since it cannot be told apart from a custom tag.
 ///
 /// - `npm:bar@^1.0.0` → `Some(("bar", "^1.0.0"))`
 /// - `npm:@scope/bar` → `Some(("@scope/bar", "*"))`
 /// - `npm:7zip-bin` → `Some(("7zip-bin", "*"))`
 /// - `npm:^1.0.0` → `None`
+/// - `npm:latest` → `None`
 pub fn npm_alias_target(spec: &str) -> Option<(&str, &str)> {
     if let Some(alias) = npm_alias_with_range(spec.trim()) {
         return Some(alias);
     }
     let target = spec.trim().strip_prefix("npm:")?;
-    (!target.is_empty() && !is_version_range(target)).then_some((target, "*"))
+    (!target.is_empty() && target != "latest" && !is_version_range(target)).then_some((target, "*"))
 }
 
 /// Whether the text after `npm:` is a version or range rather than a package name.
@@ -2134,6 +2137,7 @@ __metadata:
             ("npm:*", None),
             ("npm:1.2.3", None),
             ("npm:", None),
+            ("npm:latest", None),
             ("^1.0.0", None),
         ] {
             assert_eq!(npm_alias_target(spec), expected, "{spec}");

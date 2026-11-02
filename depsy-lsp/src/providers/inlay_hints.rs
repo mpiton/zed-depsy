@@ -174,7 +174,8 @@ fn create_hint_label_and_tooltip(
         && info.deprecated
     {
         let dep_label = "⚠ Deprecated";
-        let dep_tooltip = fmt_deprecation_tooltip(dep, info);
+        let package = npm_alias_package(file_type.to_ecosystem(), dep).unwrap_or(dep_name);
+        let dep_tooltip = fmt_deprecation_tooltip(package, info);
 
         // Combine with update info if available
         return match status {
@@ -296,14 +297,13 @@ fn fmt_vulnerability_tooltip(info: &VersionInfo) -> impl fmt::Display + fmt::Deb
 
 /// Format deprecation warning for tooltip
 #[must_use = "returns a type implementing Display and Debug, which does not have any effects unless they are used"]
-fn fmt_deprecation_tooltip(dep: &Dependency, info: &VersionInfo) -> impl fmt::Display + fmt::Debug {
-    let dep_name = &*dep.name;
+fn fmt_deprecation_tooltip(package: &str, info: &VersionInfo) -> impl fmt::Display + fmt::Debug {
     fmt::from_fn(move |f| {
         writeln!(
             f,
             "**⚠ PACKAGE DEPRECATED**\n\
              \n\
-             The package \"{dep_name}\" is deprecated.\n\
+             The package \"{package}\" is deprecated.\n\
              \n\
              **Why was it deprecated?**\n\
              • Superseded by a better alternative\n\
@@ -1384,6 +1384,22 @@ mod tests {
             ..Default::default()
         };
         assert!(label(&deprecated).contains("Deprecated"));
+    }
+
+    #[test]
+    fn test_npm_alias_deprecation_tooltip_names_the_real_package() {
+        let alias = make_test_dep("foo", "npm:bar@^1.0.0");
+        let deprecated = VersionInfo {
+            deprecated: true,
+            ..Default::default()
+        };
+
+        let hint = create_inlay_hint(&alias, Some(&deprecated), FileType::Npm);
+        let Some(tower_lsp::lsp_types::InlayHintTooltip::String(tooltip)) = hint.tooltip else {
+            panic!("unexpected tooltip: {:?}", hint.tooltip);
+        };
+        assert!(tooltip.contains("\"bar\""), "{tooltip}");
+        assert!(!tooltip.contains("\"foo\""), "{tooltip}");
     }
 
     #[test]

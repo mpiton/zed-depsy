@@ -854,6 +854,7 @@ foo@^3.0.0:
     assert_eq!(direct.len(), 1, "{stdout}");
     assert_eq!(direct[0]["package"], "foo", "{stdout}");
     assert_eq!(direct[0]["version"], "1.2.0", "{stdout}");
+    assert_eq!(direct[0]["id"], "CVE-ALIAS-BAR", "{stdout}");
 
     let transitive = report["transitive"]
         .as_array()
@@ -862,6 +863,7 @@ foo@^3.0.0:
     assert_eq!(transitive[0]["package"], "foo", "{stdout}");
     assert_eq!(transitive[0]["version"], "3.0.0", "{stdout}");
     assert_eq!(transitive[0]["via_direct"], "x", "{stdout}");
+    assert_eq!(transitive[0]["id"], "CVE-REAL-FOO", "{stdout}");
 
     let requests = server
         .received_requests()

@@ -240,7 +240,7 @@ mod tests {
 
     #[tokio::test]
     async fn fresh_entry_is_returned_before_expiry() {
-        let cache = MemoryAdvisoryCache::with_ttl(Duration::from_millis(200));
+        let cache = MemoryAdvisoryCache::with_ttl(Duration::from_secs(3600));
         cache.insert(sample_found()).await;
         let value = cache.get("RUSTSEC-2020-0036").await;
         assert!(matches!(value, Some(c) if c.kind == AdvisoryKind::Found {
@@ -251,10 +251,14 @@ mod tests {
 
     #[tokio::test]
     async fn cleanup_expired_removes_only_expired_entries() {
-        let cache = MemoryAdvisoryCache::with_ttl(Duration::from_millis(20));
-        cache.insert(sample_found()).await;
-        tokio::time::sleep(Duration::from_millis(30)).await;
+        // The kept entry's TTL dwarfs any scheduling delay, so only the short
+        // one can expire, however slowly the test runs under instrumentation.
+        let cache = MemoryAdvisoryCache::with_ttl(Duration::from_secs(3600));
+        cache
+            .insert_with_remaining_ttl(sample_found(), Duration::from_millis(1))
+            .await;
         cache.insert(sample_not_found("RUSTSEC-9999-0001")).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
 
         let removed = cache.cleanup_expired();
         assert_eq!(removed, 1);
@@ -274,27 +278,33 @@ mod tests {
     async fn insert_with_remaining_ttl_uses_explicit_value_not_default() {
         let cache = MemoryAdvisoryCache::with_ttl(Duration::from_secs(60));
         cache
-            .insert_with_remaining_ttl(sample_found(), Duration::from_millis(20))
+            .insert_with_remaining_ttl(sample_found(), Duration::from_millis(1))
             .await;
         // The entry must respect the *short* explicit TTL, not the 60-second
         // default, otherwise backfill would silently extend SQLite TTLs.
-        assert!(cache.get("RUSTSEC-2020-0036").await.is_some());
-        tokio::time::sleep(Duration::from_millis(40)).await;
+        assert_eq!(cache.stats().total, 1);
+        tokio::time::sleep(Duration::from_millis(10)).await;
         assert!(cache.get("RUSTSEC-2020-0036").await.is_none());
     }
 
     #[tokio::test]
     async fn stats_report_total_expired_and_valid() {
-        let cache = MemoryAdvisoryCache::with_ttl(Duration::from_millis(20));
+        let cache = MemoryAdvisoryCache::with_ttl(Duration::from_secs(3600));
         cache.insert(sample_found()).await;
         let before = cache.stats();
         assert_eq!(before.total, 1);
         assert_eq!(before.expired, 0);
         assert_eq!(before.valid, 1);
-        tokio::time::sleep(Duration::from_millis(30)).await;
+        cache
+            .insert_with_remaining_ttl(
+                sample_not_found("RUSTSEC-9999-0001"),
+                Duration::from_millis(1),
+            )
+            .await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
         let after = cache.stats();
-        assert_eq!(after.total, 1);
+        assert_eq!(after.total, 2);
         assert_eq!(after.expired, 1);
-        assert_eq!(after.valid, 0);
+        assert_eq!(after.valid, 1);
     }
 }

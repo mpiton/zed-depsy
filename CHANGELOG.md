@@ -61,10 +61,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   those of `bar`. The finding is still listed under `foo`, the name in the
   manifest, and diagnostics, inlay hints and hover now show it in the editor. The
   registry data of the unrelated `foo` is no longer shown on an alias. With
-  `yarn.lock` and a `pnpm-lock.yaml` holding its edges under `packages:`, the
-  transitive dependencies of `bar` are scanned too; pnpm v9 keeps them under
-  `snapshots:`, which are not read. `npm:^1.0.0`, with a range only, and the
-  `npm:latest` tag keep meaning `foo`.
+  `yarn.lock` and `pnpm-lock.yaml`, the transitive dependencies of `bar` are
+  scanned too. `npm:^1.0.0`, with a range only, and the `npm:latest` tag keep
+  meaning `foo`.
 - A pnpm `catalog:` entry holding an npm alias, such as `foo: npm:bar@^1.0.0` in
   `pnpm-workspace.yaml`, is now checked under the real package, `bar`, in `scan`
   and in the editor, with or without a lockfile. A catalog entry declaring a local

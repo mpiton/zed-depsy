@@ -233,10 +233,7 @@ version = "0.0.1"
             self.lock_path.clone()
         }
         fn parse_graph(&self, _content: &str) -> LockfileGraph {
-            LockfileGraph {
-                packages: self.graph.packages.clone(),
-                ..Default::default()
-            }
+            self.graph.clone()
         }
     }
 

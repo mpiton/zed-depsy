@@ -566,7 +566,7 @@ pub fn parse_pnpm_lock_graph(content: &str) -> LockfileGraph {
     if let Some(finish) = current {
         graph.packages.push(finish);
     }
-    graph.locked_specs = parse_pnpm_locked_specs(content);
+    store_locked_specs(&mut graph, parse_pnpm_locked_specs(content));
     graph
 }
 
@@ -574,8 +574,8 @@ pub fn parse_pnpm_lock_graph(content: &str) -> LockfileGraph {
 ///
 /// Reads the `specifier:`/`version:` pairs of the last YAML document, written
 /// before its `packages:` section. If two importers lock the same spec
-/// differently, the spec is left out: the name alone cannot tell them apart.
-fn parse_pnpm_locked_specs(content: &str) -> HashMap<String, String> {
+/// differently, the spec maps to `None`: the name alone cannot tell them apart.
+fn parse_pnpm_locked_specs(content: &str) -> HashMap<String, Option<String>> {
     let mut locked_specs = HashMap::new();
     let mut name = "";
     let mut specifier = None;
@@ -605,7 +605,7 @@ fn parse_pnpm_locked_specs(content: &str) -> HashMap<String, String> {
             name = key.trim_matches(['\'', '"']);
         }
     }
-    settled_locked_specs(locked_specs)
+    locked_specs
 }
 
 /// Record `version` for the spec `key`, or `None` once versions disagree.
@@ -620,12 +620,18 @@ fn record_locked_spec(specs: &mut HashMap<String, Option<String>>, key: &str, ve
         .or_insert_with(|| Some(version.to_string()));
 }
 
-/// Keep only the specs [`record_locked_spec`] saw at a single version.
-fn settled_locked_specs(specs: HashMap<String, Option<String>>) -> HashMap<String, String> {
-    specs
-        .into_iter()
-        .filter_map(|(key, version)| Some((key, version?)))
-        .collect()
+/// Store what [`record_locked_spec`] saw, keeping specs at several versions apart.
+fn store_locked_specs(graph: &mut LockfileGraph, specs: HashMap<String, Option<String>>) {
+    for (key, version) in specs {
+        match version {
+            Some(version) => {
+                graph.locked_specs.insert(key, version);
+            }
+            None => {
+                graph.ambiguous_specs.insert(key);
+            }
+        }
+    }
 }
 
 /// Read the version from a pnpm dependency's `version:` value.
@@ -746,7 +752,7 @@ pub fn parse_yarn_lock_graph(content: &str) -> LockfileGraph {
     if let Some(finished) = current {
         push_yarn_entry(&mut graph, &mut locked_specs, finished, &specs);
     }
-    graph.locked_specs = settled_locked_specs(locked_specs);
+    store_locked_specs(&mut graph, locked_specs);
     graph
 }
 
@@ -791,14 +797,33 @@ fn yarn_header_name(header: &str) -> Option<&str> {
 ///
 /// - `npm:bar@^1.0.0` → `Some(("bar", "^1.0.0"))`
 /// - `npm:@scope/bar` → `Some(("@scope/bar", "*"))`
+/// - `npm:7zip-bin` → `Some(("7zip-bin", "*"))`
 /// - `npm:^1.0.0` → `None`
 pub fn npm_alias_target(spec: &str) -> Option<(&str, &str)> {
     if let Some(alias) = npm_alias_with_range(spec.trim()) {
         return Some(alias);
     }
     let target = spec.trim().strip_prefix("npm:")?;
-    let first = target.chars().next()?;
-    (!first.is_ascii_digit() && !"^~<>=*".contains(first)).then_some((target, "*"))
+    (!target.is_empty() && !is_version_range(target)).then_some((target, "*"))
+}
+
+/// Whether the text after `npm:` is a version or range rather than a package name.
+///
+/// A package name may start with a digit, as `7zip-bin` does. A version holds
+/// only digits, dots and wildcards up to its first separator, and a prerelease
+/// or build suffix needs all three numbers before it.
+fn is_version_range(target: &str) -> bool {
+    if target.starts_with(['^', '~', '<', '>', '=', '*']) {
+        return true;
+    }
+    if !target.starts_with(|c: char| c.is_ascii_digit()) {
+        return false;
+    }
+    let end = target.find(['-', '+', ' ', '|']).unwrap_or(target.len());
+    let (core, rest) = target.split_at(end);
+    core.chars()
+        .all(|c| c.is_ascii_digit() || matches!(c, '.' | 'x' | 'X' | '*'))
+        && (!rest.starts_with(['-', '+']) || core.split('.').count() == 3)
 }
 
 /// Real package and range of an `npm:name@range` spec.
@@ -862,7 +887,9 @@ pub fn select_npm_version(dep: &Dependency, graph: &LockfileGraph) -> Option<Str
         }
     }
 
-    if npm_alias_target(declared).is_some() && !graph.locked_specs.is_empty() {
+    let aliases_another_package =
+        npm_alias_target(declared).is_some_and(|(package, _)| package != dep.name);
+    if aliases_another_package && graph.records_specs() {
         return None;
     }
 
@@ -2056,6 +2083,24 @@ __metadata:
 
     /// The lockfile's `foo` is a real package with that name, not the alias.
     #[test]
+    fn test_stale_alias_to_its_own_name_takes_the_only_version() {
+        let lock = "\"foo@npm:^1.0.0\":\n  version: 1.2.0\n";
+        let version = resolve_from_lock(NpmLockfileType::YarnLock, lock, "foo", "npm:foo@^2.0.0");
+        assert_eq!(version.as_deref(), Some("1.2.0"));
+    }
+
+    #[test]
+    fn test_yarn_keeps_a_conflicting_spec_as_ambiguous() {
+        let lock = concat!(
+            "\"foo@npm:bar@^1.0.0\":\n  version: 1.0.0\n\n",
+            "\"foo@npm:bar@^1.0.0\", \"baz@^1.0.0\":\n  version: 1.1.0\n",
+        );
+        let graph = parse_yarn_lock_graph(lock);
+        assert!(!graph.locked_specs.contains_key("foo@npm:bar@^1.0.0"));
+        assert!(graph.records_spec("foo@npm:bar@^1.0.0"));
+    }
+
+    #[test]
     fn test_stale_yarn_alias_does_not_take_the_local_name_version() {
         let classic =
             "foo@^3.0.0:\n  version \"3.0.0\"\n\n\"foo@npm:bar@^1.0.0\":\n  version \"1.2.0\"\n";
@@ -2072,6 +2117,13 @@ __metadata:
     #[test]
     fn test_npm_alias_target_tells_packages_from_ranges() {
         for (spec, expected) in [
+            ("npm:7zip-bin", Some(("7zip-bin", "*"))),
+            ("npm:2-thumbs", Some(("2-thumbs", "*"))),
+            ("npm:1", None),
+            ("npm:1.x", None),
+            ("npm:1.2.3-beta.1", None),
+            ("npm:1 - 2", None),
+            ("npm:1 || 2", None),
             ("npm:bar@^1.0.0", Some(("bar", "^1.0.0"))),
             ("npm:@scope/bar@1.2.0", Some(("@scope/bar", "1.2.0"))),
             ("npm:bar", Some(("bar", "*"))),

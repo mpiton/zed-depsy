@@ -63,8 +63,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   registry data of the unrelated `foo` is no longer shown on an alias. With
   `yarn.lock` and `pnpm-lock.yaml`, the transitive dependencies of `bar` are
   scanned too. `npm:^1.0.0`, with a range only, keeps meaning `foo`.
-- An npm spec locked at several versions, such as by two pnpm importers or two
-  Yarn entries, now counts as unresolved instead of taking the first or last one.
+- An npm range locked at several versions, such as by two pnpm importers or two
+  Yarn entries, now counts as unresolved instead of taking the first or last one;
+  an exact pin still uses its matching candidate when present.
   A package locked several times at one version, as with pnpm peer variants or a
   Yarn `patch:` entry, resolves to that version.
 - A `pnpm-lock.yaml` holding pnpm's own environment document is now read from its

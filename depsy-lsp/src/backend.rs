@@ -90,8 +90,8 @@ use crate::reports::{VulnerabilityReportEntry, VulnerabilitySummary};
 use crate::vulnerabilities::cache::{VulnCacheKey, VulnerabilityCache};
 use crate::vulnerabilities::osv::OsvClient;
 use crate::vulnerabilities::{
-    VulnerabilityQuery, apply_osv_result, cached_version_info, normalize_version_for_osv,
-    npm_alias_graph_name, npm_alias_package,
+    DirectRoots, VulnerabilityQuery, apply_osv_result, cached_version_info,
+    normalize_version_for_osv, npm_alias_package,
 };
 use crate::{
     auth::{EnvTokenProvider, TokenProviderManager, cargo_credentials, fmt_redact_token},
@@ -1026,42 +1026,21 @@ impl DepsyBackend {
         // Names are canonicalized to match the lockfile graph keys (Python/PHP/Ruby normalize).
         // Also build a reverse map so that normalized parent names from reverse_index can be
         // translated back to the raw manifest name used as keys in diagnostics/hover lookups.
-        let (direct_names, normalized_to_raw): (Vec<String>, HashMap<String, String>) = {
-            let mut names = Vec::with_capacity(dependencies.len());
-            let mut map: HashMap<String, String> = HashMap::new();
-            for d in dependencies.iter() {
-                let canonical = match file_type {
-                    FileType::Python => crate::parsers::python_lock::normalize_python_name(&d.name),
-                    FileType::Php => {
-                        crate::parsers::composer_lock::normalize_composer_name(&d.name)
-                    }
-                    FileType::Ruby => crate::parsers::gemfile_lock::normalize_gem_name(&d.name),
-                    _ => d.name.clone(),
-                };
-                let alias = bg_ctx
-                    .lockfile_graph
-                    .as_deref()
-                    .and_then(|graph| npm_alias_graph_name(file_type.to_ecosystem(), d, graph));
-                if let Some(real_name) = alias {
-                    // A manifest entry under the real name keeps the attribution.
-                    names.push(real_name.to_string());
-                    map.entry_ref(real_name).or_insert_with(|| d.name.clone());
-                } else {
-                    names.push(canonical.clone());
-                    map.insert(canonical, d.name.clone());
-                }
-            }
-            (names, map)
-        };
+        let direct_roots = DirectRoots::new(
+            &dependencies,
+            ecosystem,
+            bg_ctx.lockfile_graph.as_deref(),
+            |name| match file_type {
+                FileType::Python => crate::parsers::python_lock::normalize_python_name(name),
+                FileType::Php => crate::parsers::composer_lock::normalize_composer_name(name),
+                FileType::Ruby => crate::parsers::gemfile_lock::normalize_gem_name(name),
+                _ => name.to_string(),
+            },
+        );
         let transitives: Vec<crate::parsers::lockfile_graph::LockfilePackage> = bg_ctx
             .lockfile_graph
             .as_deref()
-            .map(|g| {
-                g.transitives_only(&direct_names)
-                    .into_iter()
-                    .cloned()
-                    .collect()
-            })
+            .map(|g| direct_roots.transitives(g).into_iter().cloned().collect())
             .unwrap_or_default();
 
         // Build queries for direct packages not in vulnerability cache.
@@ -1184,7 +1163,7 @@ impl DepsyBackend {
         if let Some(graph) = bg_ctx.lockfile_graph.as_deref() {
             use crate::registries::TransitiveVuln;
 
-            let inverse = graph.reverse_index(&direct_names);
+            let inverse = graph.reverse_index(&direct_roots.names);
 
             // Build per-document transitive attribution map.
             let mut transitive_vulns_by_direct: hashbrown::HashMap<String, Vec<TransitiveVuln>> =
@@ -1208,29 +1187,31 @@ impl DepsyBackend {
                     }
                 } else {
                     for parent in &parents {
-                        // Translate normalized parent name back to the raw manifest name
+                        // Translate normalized parent name back to the raw manifest names
                         // so that diagnostics/hover lookups using dep.name succeed.
-                        let raw_parent = normalized_to_raw
+                        let raw_parents = direct_roots
+                            .manifest_names
                             .get(parent.as_str())
-                            .cloned()
-                            .unwrap_or_else(|| parent.clone());
-                        for v in vulns {
-                            transitive_vulns_by_direct
-                                .entry_ref(raw_parent.as_str())
-                                .or_default()
-                                .push(TransitiveVuln {
-                                    package_name: tpkg.name.clone(),
-                                    package_version: tpkg.version.clone(),
-                                    vulnerability: v.clone(),
-                                });
+                            .map_or(std::slice::from_ref(parent), Vec::as_slice);
+                        for raw_parent in raw_parents {
+                            for v in vulns {
+                                transitive_vulns_by_direct
+                                    .entry_ref(raw_parent.as_str())
+                                    .or_default()
+                                    .push(TransitiveVuln {
+                                        package_name: tpkg.name.clone(),
+                                        package_version: tpkg.version.clone(),
+                                        vulnerability: v.clone(),
+                                    });
+                            }
+                            tracing::debug!(
+                                "Background: Attributed {} transitive vulns from {}@{} to direct dep {}",
+                                vulns.len(),
+                                tpkg.name,
+                                tpkg.version,
+                                raw_parent
+                            );
                         }
-                        tracing::debug!(
-                            "Background: Attributed {} transitive vulns from {}@{} to direct dep {}",
-                            vulns.len(),
-                            tpkg.name,
-                            tpkg.version,
-                            raw_parent
-                        );
                     }
                 }
             }
@@ -1466,7 +1447,9 @@ fn format_hover_content(
         }
 
         if dep.registry.is_none() {
-            let registry_url = file_type.fmt_registry_package_url(dep_name);
+            let registry_name =
+                npm_alias_package(file_type.to_ecosystem(), dep).unwrap_or(dep_name);
+            let registry_url = file_type.fmt_registry_package_url(registry_name);
             writeln!(f, "[View on {}]({registry_url})", file_type.registry_name())?;
         }
 
@@ -2348,6 +2331,14 @@ mod tests {
             content.contains("2025-01-15") || content.contains("ago"),
             "Release date should be found via effective_version lookup, got:\n{content}"
         );
+    }
+
+    #[test]
+    fn test_hover_links_an_alias_to_its_real_package() {
+        let dep = make_dep("foo", "npm:bar@^1.0.0", Some("1.2.0"));
+        let content = format_hover_content(&dep, FileType::Npm, &VersionInfo::default(), &[]);
+        assert!(content.contains("https://www.npmjs.com/package/bar"));
+        assert!(!content.contains("https://www.npmjs.com/package/foo"));
     }
 
     #[test]

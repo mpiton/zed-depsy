@@ -8,10 +8,11 @@ pub mod osv;
 
 use crate::cache::ReadCache;
 use crate::parsers::Dependency;
-use crate::parsers::lockfile_graph::LockfileGraph;
+use crate::parsers::lockfile_graph::{LockfileGraph, LockfilePackage};
 use crate::parsers::npm_lock::npm_alias_target;
 use crate::registries::VersionInfo;
 use cache::{VulnCacheKey, VulnerabilityCache};
+use hashbrown::{HashMap, HashSet};
 
 /// Ecosystem identifiers for vulnerability sources
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -132,15 +133,83 @@ pub fn npm_alias_package(ecosystem: Ecosystem, dep: &Dependency) -> Option<&str>
 
 /// Name `graph` lists `dep` under when it is an npm alias with another name there.
 ///
-/// `yarn.lock` and `pnpm-lock.yaml`, the formats with `locked_specs`, list the
-/// real package. `package-lock.json` lists an alias under its local name, so it
-/// gets `None`.
+/// `yarn.lock` and `pnpm-lock.yaml` record the alias spec and list the real
+/// package. `package-lock.json` records no spec and lists an alias under its
+/// local name, and a stale alias has no spec either, so both get `None`.
 pub fn npm_alias_graph_name<'a>(
     ecosystem: Ecosystem,
     dep: &'a Dependency,
     graph: &LockfileGraph,
 ) -> Option<&'a str> {
-    npm_alias_package(ecosystem, dep).filter(|_| !graph.locked_specs.is_empty())
+    npm_alias_package(ecosystem, dep).filter(|package| {
+        *package != dep.name && graph.records_spec(&format!("{}@{}", dep.name, dep.version.trim()))
+    })
+}
+
+/// How the dependencies of a manifest appear in its lockfile graph.
+#[derive(Debug, Default)]
+pub struct DirectRoots {
+    /// Graph name of each dependency, where a walk of the graph starts.
+    pub names: Vec<String>,
+    /// Manifest names behind each graph name, a direct declaration first.
+    pub manifest_names: HashMap<String, Vec<String>>,
+    /// Graph names declared in the manifest under their own name.
+    declared: HashSet<String>,
+    /// Locked versions an alias selects, for each real package.
+    alias_versions: HashMap<String, Vec<String>>,
+}
+
+impl DirectRoots {
+    /// Reads the roots of `dependencies`, resolved against `graph`.
+    ///
+    /// `canonical` normalizes a manifest name to its form in the graph.
+    pub fn new(
+        dependencies: &[Dependency],
+        ecosystem: Ecosystem,
+        graph: Option<&LockfileGraph>,
+        canonical: impl Fn(&str) -> String,
+    ) -> Self {
+        let mut roots = Self::default();
+        for dep in dependencies {
+            let alias = graph.and_then(|graph| npm_alias_graph_name(ecosystem, dep, graph));
+            let name = alias.map_or_else(|| canonical(&dep.name), str::to_string);
+            if alias.is_none() {
+                roots.declared.insert(name.clone());
+            } else if let Some(version) = &dep.resolved_version {
+                roots
+                    .alias_versions
+                    .entry_ref(name.as_str())
+                    .or_default()
+                    .push(version.clone());
+            }
+            let manifest_names = roots.manifest_names.entry_ref(name.as_str()).or_default();
+            if !manifest_names.contains(&dep.name) {
+                let position = if alias.is_none() {
+                    0
+                } else {
+                    manifest_names.len()
+                };
+                manifest_names.insert(position, dep.name.clone());
+            }
+            roots.names.push(name);
+        }
+        roots
+    }
+
+    /// Packages of `graph` reachable from the roots that the manifest does not declare.
+    ///
+    /// A package declared under its own name is direct at all its versions. An
+    /// alias is direct only at the version it selects, so another version of its
+    /// real package, reached through another dependency, stays transitive.
+    pub fn transitives<'g>(&self, graph: &'g LockfileGraph) -> Vec<&'g LockfilePackage> {
+        graph.transitives_excluding(&self.names, |pkg| {
+            self.declared.contains(&pkg.name)
+                || self
+                    .alias_versions
+                    .get(&pkg.name)
+                    .is_some_and(|versions| versions.contains(&pkg.version))
+        })
+    }
 }
 
 /// Overlays the OSV result for `dep`'s resolved version onto `info`.
@@ -172,8 +241,9 @@ pub fn apply_osv_result(
 /// Reads `dep`'s cached version info with its OSV result applied.
 ///
 /// Readers of `vulnerabilities` or `deprecated` go through this helper or
-/// [`apply_osv_result`], so none of them can skip the overlay. An npm alias has
-/// its OSV result only: the cache entry under its local name is another package.
+/// [`apply_osv_result`], so none of them can skip the overlay. An npm alias to
+/// another package has its OSV result only: the cache entry under its local name
+/// describes something else. An alias to its own name keeps that entry.
 pub async fn cached_version_info(
     cache: &impl ReadCache,
     cache_key: &str,
@@ -181,10 +251,16 @@ pub async fn cached_version_info(
     ecosystem: Ecosystem,
     dep: &Dependency,
 ) -> Option<VersionInfo> {
-    let mut info = if npm_alias_package(ecosystem, dep).is_some() {
-        VersionInfo::default()
+    let alias = npm_alias_package(ecosystem, dep);
+    let cached = if alias.is_some_and(|package| package != dep.name) {
+        None
     } else {
-        cache.get_stale(cache_key).await?
+        cache.get_stale(cache_key).await
+    };
+    let mut info = match cached {
+        Some(info) => info,
+        None if alias.is_some() => VersionInfo::default(),
+        None => return None,
     };
     apply_osv_result(&mut info, osv_results, ecosystem, dep);
     Some(info)
@@ -194,8 +270,12 @@ pub async fn cached_version_info(
 mod tests {
     use super::cache::{VulnCacheKey, VulnerabilityCache};
     use super::osv::QueryResult;
-    use super::{Ecosystem, apply_osv_result, cached_version_info, normalize_version_for_osv};
+    use super::{
+        DirectRoots, Ecosystem, apply_osv_result, cached_version_info, normalize_version_for_osv,
+        npm_alias_graph_name,
+    };
     use crate::cache::{MemoryCache, WriteCache};
+    use crate::parsers::lockfile_graph::{LockfileGraph, LockfilePackage};
     use crate::parsers::{Dependency, Span};
     use crate::registries::{VersionInfo, Vulnerability, VulnerabilitySeverity};
 
@@ -232,6 +312,132 @@ mod tests {
         let cache = VulnerabilityCache::with_ttl(3600);
         cache.insert(VulnCacheKey::for_dependency(Ecosystem::Npm, dep), result);
         cache
+    }
+
+    #[tokio::test]
+    async fn alias_to_its_own_name_keeps_the_registry_entry() {
+        let alias = dep("foo", "npm:foo@1.2.0");
+        let cache = MemoryCache::new();
+        cache
+            .insert(
+                "npm:foo".to_string(),
+                VersionInfo {
+                    latest: Some("9.0.0".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await;
+        let osv_results = osv_results_with(
+            &alias,
+            QueryResult {
+                vulnerabilities: vec![advisory("GHSA-foo")],
+                deprecated: false,
+            },
+        );
+
+        let info = cached_version_info(&cache, "npm:foo", &osv_results, Ecosystem::Npm, &alias)
+            .await
+            .expect("the entry exists");
+        assert_eq!(info.latest.as_deref(), Some("9.0.0"));
+        assert_eq!(info.vulnerabilities.len(), 1);
+
+        let info = cached_version_info(&cache, "npm:other", &osv_results, Ecosystem::Npm, &alias)
+            .await
+            .expect("an alias needs no registry entry");
+        assert_eq!(info.vulnerabilities.len(), 1);
+    }
+
+    fn package(name: &str, version: &str, dependencies: &[&str]) -> LockfilePackage {
+        LockfilePackage {
+            name: name.to_string(),
+            version: version.to_string(),
+            dependencies: dependencies.iter().map(ToString::to_string).collect(),
+            is_root: false,
+        }
+    }
+
+    #[test]
+    fn alias_uses_the_graph_name_only_when_its_spec_is_recorded() {
+        let alias = dep("foo", "npm:bar@^1.0.0");
+        let graph_name = |graph: &LockfileGraph| {
+            npm_alias_graph_name(Ecosystem::Npm, &alias, graph).map(str::to_string)
+        };
+
+        // package-lock.json records no spec
+        assert_eq!(graph_name(&LockfileGraph::default()), None);
+
+        // A stale alias: the lockfile records other specs
+        let mut stale = LockfileGraph::default();
+        stale
+            .locked_specs
+            .insert("foo@npm:bar@^0.9.0".to_string(), "0.9.0".to_string());
+        assert_eq!(graph_name(&stale), None);
+
+        let mut locked = LockfileGraph::default();
+        locked
+            .locked_specs
+            .insert("foo@npm:bar@^1.0.0".to_string(), "1.2.0".to_string());
+        assert_eq!(graph_name(&locked).as_deref(), Some("bar"));
+
+        // A spec locked at several versions still names the real package
+        let mut conflicting = LockfileGraph::default();
+        conflicting
+            .ambiguous_specs
+            .insert("foo@npm:bar@^1.0.0".to_string());
+        assert_eq!(graph_name(&conflicting).as_deref(), Some("bar"));
+    }
+
+    #[test]
+    fn alias_to_its_own_name_has_no_other_graph_name() {
+        let alias = dep("foo", "npm:foo@1.2.0");
+        let mut graph = LockfileGraph::default();
+        graph
+            .locked_specs
+            .insert("foo@npm:foo@1.2.0".to_string(), "1.2.0".to_string());
+        assert_eq!(npm_alias_graph_name(Ecosystem::Npm, &alias, &graph), None);
+    }
+
+    #[test]
+    fn alias_and_direct_entry_of_one_package_keep_both_manifest_names() {
+        let deps = [dep("foo", "npm:bar@^1.0.0"), dep("bar", "^1.0.0")];
+        let mut graph = LockfileGraph::default();
+        graph
+            .locked_specs
+            .insert("foo@npm:bar@^1.0.0".to_string(), "1.2.0".to_string());
+
+        let roots = DirectRoots::new(&deps, Ecosystem::Npm, Some(&graph), str::to_string);
+
+        assert_eq!(roots.names, ["bar", "bar"]);
+        assert_eq!(roots.manifest_names["bar"], ["bar", "foo"]);
+    }
+
+    #[test]
+    fn alias_leaves_other_versions_of_its_package_transitive() {
+        let mut alias = dep("foo", "npm:bar@^1.0.0");
+        alias.resolved_version = Some("1.2.0".to_string());
+        let deps = [alias, dep("baz", "^1.0.0")];
+        let mut graph = LockfileGraph {
+            packages: vec![
+                package("bar", "1.2.0", &["qux"]),
+                package("bar", "2.0.0", &[]),
+                package("baz", "1.0.0", &["bar"]),
+                package("qux", "1.0.0", &[]),
+            ],
+            ..Default::default()
+        };
+        graph
+            .locked_specs
+            .insert("foo@npm:bar@^1.0.0".to_string(), "1.2.0".to_string());
+
+        let roots = DirectRoots::new(&deps, Ecosystem::Npm, Some(&graph), str::to_string);
+        let mut found: Vec<(&str, &str)> = roots
+            .transitives(&graph)
+            .iter()
+            .map(|pkg| (pkg.name.as_str(), pkg.version.as_str()))
+            .collect();
+        found.sort_unstable();
+
+        assert_eq!(found, [("bar", "2.0.0"), ("qux", "1.0.0")]);
     }
 
     /// The cache entry under an alias's local name describes another package.

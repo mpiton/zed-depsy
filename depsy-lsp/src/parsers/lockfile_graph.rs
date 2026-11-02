@@ -83,11 +83,24 @@ pub struct LockfileGraph {
     ///
     /// Filled only by lockfile formats that keep this mapping (`yarn.lock`,
     /// `pnpm-lock.yaml`). Empty for every other format. A spec locked at several
-    /// versions is left out, since the name cannot tell them apart.
+    /// versions is in [`Self::ambiguous_specs`] instead, since the name cannot
+    /// tell them apart.
     pub locked_specs: HashMap<String, String>,
+    /// `name@range` specs the lockfile records at several versions.
+    pub ambiguous_specs: HashSet<String>,
 }
 
 impl LockfileGraph {
+    /// Whether this lockfile format records `name@range` specs and has any.
+    pub fn records_specs(&self) -> bool {
+        !self.locked_specs.is_empty() || !self.ambiguous_specs.is_empty()
+    }
+
+    /// Whether the lockfile records `spec`, at one version or at several.
+    pub fn records_spec(&self, spec: &str) -> bool {
+        self.locked_specs.contains_key(spec) || self.ambiguous_specs.contains(spec)
+    }
+
     /// Return all packages in the graph that match `name` (0 or more).
     ///
     /// Some lockfiles pin multiple versions of the same crate — e.g. Cargo's
@@ -164,18 +177,26 @@ impl LockfileGraph {
     pub fn transitives_only(&self, manifest_deps: &[String]) -> Vec<&LockfilePackage> {
         // Build the set of direct package names
         let direct_set: HashSet<&str> = manifest_deps.iter().map(String::as_str).collect();
+        self.transitives_excluding(manifest_deps, |pkg| direct_set.contains(pkg.name.as_str()))
+    }
 
+    /// Packages reachable from `roots`, except those `is_direct` accepts.
+    pub fn transitives_excluding(
+        &self,
+        roots: &[String],
+        is_direct: impl Fn(&LockfilePackage) -> bool,
+    ) -> Vec<&LockfilePackage> {
         // Collect packages reachable from any direct dep. We de-dup by (name, version)
         // to avoid returning the same package multiple times when several direct deps
         // reach it.
         let mut seen: HashSet<(&str, &str)> = HashSet::new();
         let mut out: Vec<&LockfilePackage> = Vec::new();
 
-        for direct in manifest_deps {
+        for direct in roots {
             for pkg in self.transitive_deps_of(direct) {
-                // Skip packages whose name is itself in the manifest — they are
+                // Skip packages that are themselves in the manifest — they are
                 // direct deps, not transitives.
-                if direct_set.contains(pkg.name.as_str()) {
+                if is_direct(pkg) {
                     continue;
                 }
                 let key = (pkg.name.as_str(), pkg.version.as_str());

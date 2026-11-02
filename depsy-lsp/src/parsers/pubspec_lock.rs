@@ -109,6 +109,7 @@ impl LockfileResolver for DartResolver {
                     is_root: false,
                 })
                 .collect(),
+            ..Default::default()
         }
     }
 }

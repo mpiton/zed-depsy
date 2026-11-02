@@ -1064,7 +1064,7 @@ impl DepsyBackend {
             }
             direct_queries.push(VulnerabilityQuery {
                 ecosystem,
-                package_name: dep.name.clone(),
+                package_name: vuln_key.package_name.clone(),
                 version: vuln_key.version.clone(),
             });
             direct_query_keys.push(vuln_key);
@@ -2622,6 +2622,7 @@ mod tests {
                     is_root: false,
                 },
             ],
+            ..Default::default()
         })
     }
 

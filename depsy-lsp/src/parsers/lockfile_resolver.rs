@@ -235,6 +235,7 @@ version = "0.0.1"
         fn parse_graph(&self, _content: &str) -> LockfileGraph {
             LockfileGraph {
                 packages: self.graph.packages.clone(),
+                ..Default::default()
             }
         }
     }
@@ -274,7 +275,10 @@ version = "0.0.1"
     async fn helper_returns_none_when_resolver_finds_no_lockfile() {
         let resolver: Box<dyn LockfileResolver> = Box::new(StubResolver {
             lock_path: None,
-            graph: LockfileGraph { packages: vec![] },
+            graph: LockfileGraph {
+                packages: vec![],
+                ..Default::default()
+            },
         });
         let mut deps = vec![test_dep("serde", "1.0.0")];
         let result =
@@ -294,7 +298,10 @@ version = "0.0.1"
                 None
             }
             fn parse_graph(&self, _: &str) -> LockfileGraph {
-                LockfileGraph { packages: vec![] }
+                LockfileGraph {
+                    packages: vec![],
+                    ..Default::default()
+                }
             }
             fn normalize_name(&self, name: &str) -> String {
                 name.to_lowercase()
@@ -305,6 +312,7 @@ version = "0.0.1"
         let graph = LockfileGraph {
             // Graph stores name un-normalized (mixed case).
             packages: vec![test_pkg("Newtonsoft.Json", "13.0.1")],
+            ..Default::default()
         };
         let dep = test_dep("newtonsoft.json", "13.0");
         assert_eq!(
@@ -326,6 +334,7 @@ version = "0.0.1"
             lock_path: Some(lock_path.clone()),
             graph: LockfileGraph {
                 packages: vec![test_pkg("serde", "1.0.230"), test_pkg("tokio", "1.50.0")],
+                ..Default::default()
             },
         });
         let mut deps = vec![

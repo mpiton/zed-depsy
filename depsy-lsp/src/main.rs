@@ -224,7 +224,8 @@ async fn run_scan(
         fmt_html_report,
     };
     use depsy_lsp::vulnerabilities::{
-        Ecosystem, VulnerabilityQuery, normalize_version_for_osv, osv::OsvClient,
+        Ecosystem, VulnerabilityQuery, cache::VulnCacheKey, normalize_version_for_osv,
+        osv::OsvClient,
     };
     use hashbrown::{HashMap, HashSet};
     use std::sync::Arc;
@@ -435,10 +436,13 @@ async fn run_scan(
     // Build queries: direct first, then transitive. Remember the split index.
     let mut queries: Vec<VulnerabilityQuery> = dependencies
         .iter()
-        .map(|dep| VulnerabilityQuery {
-            ecosystem,
-            package_name: dep.name.clone(),
-            version: normalize_version_for_osv(dep.effective_version()),
+        .map(|dep| {
+            let key = VulnCacheKey::for_dependency(ecosystem, dep);
+            VulnerabilityQuery {
+                ecosystem,
+                package_name: key.package_name,
+                version: key.version,
+            }
         })
         .collect();
     let direct_count = queries.len();

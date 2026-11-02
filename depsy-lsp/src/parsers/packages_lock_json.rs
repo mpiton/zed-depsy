@@ -136,6 +136,7 @@ impl LockfileResolver for CsharpResolver {
                     is_root: false,
                 })
                 .collect(),
+            ..Default::default()
         }
     }
 

@@ -556,7 +556,48 @@ pub fn parse_pnpm_lock_graph(content: &str) -> LockfileGraph {
     if let Some(finish) = current {
         graph.packages.push(finish);
     }
+    graph.locked_specs = parse_pnpm_locked_specs(content);
     graph
+}
+
+/// Map each `name@specifier` of a `pnpm-lock.yaml` to its locked version.
+///
+/// Reads the `specifier:`/`version:` pairs written before the `packages:`
+/// section. If two importers lock the same spec differently, the first wins.
+fn parse_pnpm_locked_specs(content: &str) -> HashMap<String, String> {
+    let mut locked_specs = HashMap::new();
+    let mut name = "";
+    let mut specifier = None;
+
+    for line in content.lines() {
+        if matches!(line, "packages:" | "snapshots:") {
+            break;
+        }
+        let trimmed = line.trim();
+        if let Some(value) = trimmed.strip_prefix("specifier: ") {
+            specifier = Some(value.trim_matches(['\'', '"']));
+        } else if let Some(value) = trimmed.strip_prefix("version: ") {
+            if let (Some(spec), Some(version)) = (specifier.take(), pnpm_locked_version(value)) {
+                let key = format!("{name}@{spec}");
+                locked_specs
+                    .entry_ref(key.as_str())
+                    .or_insert_with(|| version.to_string());
+            }
+        } else if let Some(key) = trimmed.strip_suffix(':') {
+            name = key.trim_matches(['\'', '"']);
+        }
+    }
+    locked_specs
+}
+
+/// Read the version from a pnpm dependency's `version:` value.
+///
+/// Handles a peer suffix (`1.2.0(peer@1.0.0)`) and an alias target (`bar@1.2.0`,
+/// `/bar@1.2.0`). Returns `None` for local and URL values such as `link:../foo`.
+fn pnpm_locked_version(value: &str) -> Option<&str> {
+    let base = value.trim_matches(['\'', '"']).split('(').next()?;
+    let version = base.rsplit('@').next()?;
+    semver::Version::parse(version).is_ok().then_some(version)
 }
 
 /// Split a pnpm key like "react@18.2.0" or "@babel/core@7.0.0" into (name, version).
@@ -593,6 +634,7 @@ fn split_pnpm_key(key: &str) -> Option<(String, String)> {
 pub fn parse_yarn_lock_graph(content: &str) -> LockfileGraph {
     let mut graph = LockfileGraph::default();
     let mut current: Option<LockfilePackage> = None;
+    let mut specs: Vec<&str> = Vec::new();
     let mut in_deps = false;
 
     for line in content.lines() {
@@ -605,8 +647,12 @@ pub fn parse_yarn_lock_graph(content: &str) -> LockfileGraph {
             && let Some(header) = line.strip_prefix("? ").or_else(|| line.strip_suffix(':'))
         {
             if let Some(finished) = current.take() {
-                graph.packages.push(finished);
+                push_yarn_entry(&mut graph, finished, &specs);
             }
+            specs = header
+                .split(',')
+                .map(|spec| spec.trim().trim_matches('"'))
+                .collect();
             if let Some(name) = yarn_header_name(header) {
                 current = Some(LockfilePackage {
                     name: name.to_string(),
@@ -663,9 +709,19 @@ pub fn parse_yarn_lock_graph(content: &str) -> LockfileGraph {
     }
 
     if let Some(finished) = current {
-        graph.packages.push(finished);
+        push_yarn_entry(&mut graph, finished, &specs);
     }
     graph
+}
+
+/// Add a finished `yarn.lock` entry and the specs of its header to `graph`.
+fn push_yarn_entry(graph: &mut LockfileGraph, package: LockfilePackage, specs: &[&str]) {
+    for spec in specs {
+        graph
+            .locked_specs
+            .insert((*spec).to_string(), package.version.clone());
+    }
+    graph.packages.push(package);
 }
 
 // ---------------------------------------------------------------------------
@@ -692,6 +748,17 @@ fn yarn_header_name(header: &str) -> Option<&str> {
     })
 }
 
+/// Real package and range behind an `npm:` alias in a manifest, or `None` for any other spec.
+///
+/// An alias with no range accepts any version, so it reads as `*`.
+///
+/// - `npm:bar@^1.0.0` → `Some(("bar", "^1.0.0"))`
+/// - `npm:@scope/bar` → `Some(("@scope/bar", "*"))`
+pub fn npm_alias_target(spec: &str) -> Option<(&str, &str)> {
+    let target = spec.trim().strip_prefix("npm:")?;
+    Some(split_name_version(target).unwrap_or((target, "*")))
+}
+
 /// Split a `name@version` spec into `(name, version)`, handling scoped packages.
 ///
 /// - `express@4.18.2` → `Some(("express", "4.18.2"))`
@@ -715,36 +782,43 @@ fn split_name_version(spec: &str) -> Option<(&str, &str)> {
     Some((name, version))
 }
 
-/// Choose the locked version of `dep` when a lockfile holds several.
+/// Choose the locked version of `dep`.
 ///
-/// The graph does not keep the ranges an entry was locked for, so this takes
-/// an exact pin first, then the highest version in the range. It falls back
-/// to the first entry for range syntax the `semver` crate rejects.
+/// Reads the version the lockfile records for the declared range, then accepts
+/// an exact pin or the only version locked for the name. Returns `None` when
+/// several versions are locked and none matches, as in a stale lockfile: picking
+/// one would be a guess.
 pub fn select_npm_version(dep: &Dependency, graph: &LockfileGraph) -> Option<String> {
-    let candidates: Vec<&str> = graph
-        .find_all(&dep.name)
-        .into_iter()
-        .map(|p| p.version.as_str())
-        .collect();
+    let manifest_spec = dep.version.trim();
     // A `catalog:` marker holds no range: the catalog's range is in `resolved_version`.
-    let declared = match dep.resolved_version.as_deref() {
-        Some(catalog_range) if dep.version.starts_with("catalog:") => catalog_range,
-        _ => dep.version.as_str(),
+    // pnpm records the marker as the specifier, Yarn records the range in its key.
+    let catalog_range = dep
+        .resolved_version
+        .as_deref()
+        .filter(|_| manifest_spec.starts_with("catalog:"))
+        .map(str::trim);
+    let declared = catalog_range.unwrap_or(manifest_spec);
+
+    for spec in [manifest_spec, declared] {
+        let locked = [
+            format!("{}@{spec}", dep.name),
+            format!("{}@npm:{spec}", dep.name),
+        ]
+        .iter()
+        .find_map(|key| graph.locked_specs.get(key.as_str()).cloned());
+        if locked.is_some() {
+            return locked;
+        }
     }
-    .trim();
-    if candidates.contains(&declared) {
-        return Some(declared.to_string());
-    }
-    let highest_in_range = semver::VersionReq::parse(declared).ok().and_then(|req| {
-        candidates
+
+    let candidates = graph.find_all(&dep.name);
+    match candidates.as_slice() {
+        [only] => Some(only.version.clone()),
+        _ => candidates
             .iter()
-            .filter_map(|c| semver::Version::parse(c).ok())
-            .filter(|v| req.matches(v))
-            .max()
-    });
-    highest_in_range
-        .map(|v| v.to_string())
-        .or_else(|| candidates.first().map(|c| (*c).to_string()))
+            .find(|p| p.version == declared)
+            .map(|p| p.version.clone()),
+    }
 }
 
 /// Resolves versions from npm/yarn/pnpm/bun lockfiles. Sub-format is captured at selection time.
@@ -781,6 +855,7 @@ impl LockfileResolver for NpmResolver {
                             is_root: false,
                         })
                         .collect(),
+                    ..Default::default()
                 }
             }
         }
@@ -1790,50 +1865,331 @@ __metadata:
         };
         let manifest = format!(r#"{{"dependencies": {{"{name}": "{spec}"}}}}"#);
         let deps = NpmParser::new().parse(&manifest);
-        resolver.resolve_version(&deps[0], &LockfileGraph { packages })
+        resolver.resolve_version(
+            &deps[0],
+            &LockfileGraph {
+                packages,
+                ..Default::default()
+            },
+        )
     }
 
-    /// `catalog:` holds no range: the range comes from the pnpm catalog.
+    /// Resolve `spec` for `name` through `NpmResolver`, from lockfile text.
+    fn resolve_from_lock(
+        sub: NpmLockfileType,
+        lock: &str,
+        name: &str,
+        spec: &str,
+    ) -> Option<String> {
+        let resolver = NpmResolver {
+            lock_path: PathBuf::from("lockfile"),
+            sub,
+        };
+        let manifest = format!(r#"{{"dependencies": {{"{name}": "{spec}"}}}}"#);
+        let deps = NpmParser::new().parse(&manifest);
+        resolver.resolve_version(&deps[0], &resolver.parse_graph(lock))
+    }
+
+    /// Lock one `foo` version per range, in both yarn.lock formats, then resolve `spec`.
+    fn resolve_in_both_yarn_formats(ranges: &[(&str, &str)], spec: &str) -> [Option<String>; 2] {
+        let mut classic = String::from("# yarn lockfile v1\n\n");
+        let mut berry = String::from("__metadata:\n  version: 8\n\n");
+        for (range, version) in ranges {
+            classic.push_str(&format!("\"foo@{range}\":\n  version \"{version}\"\n\n"));
+            berry.push_str(&format!(
+                "\"foo@npm:{range}\":\n  version: {version}\n  resolution: \"foo@npm:{version}\"\n\n"
+            ));
+        }
+        [classic, berry]
+            .map(|lock| resolve_from_lock(NpmLockfileType::YarnLock, &lock, "foo", spec))
+    }
+
+    fn both_yarn_formats_lock(version: &str) -> [Option<String>; 2] {
+        [Some(version.to_string()), Some(version.to_string())]
+    }
+
+    /// npm reads `1.2` as `1.2.x`, where the `semver` crate reads it as `^1.2`.
     #[test]
-    fn test_select_npm_version_uses_the_catalog_range() {
+    fn test_yarn_partial_version_is_not_a_caret_range() {
+        assert_eq!(
+            resolve_in_both_yarn_formats(&[("1.2", "1.2.5"), ("^1.3.0", "1.3.0")], "1.2"),
+            both_yarn_formats_lock("1.2.5")
+        );
+    }
+
+    /// Another dependent's newer version in the range must not hide an update.
+    #[test]
+    fn test_yarn_ignores_newer_version_locked_for_another_range() {
+        assert_eq!(
+            resolve_in_both_yarn_formats(&[("^1.5.0", "1.6.0"), ("^1.0.0", "1.2.0")], "^1.0.0"),
+            both_yarn_formats_lock("1.2.0")
+        );
+    }
+
+    #[test]
+    fn test_yarn_space_separated_range_is_not_the_first_entry() {
+        assert_eq!(
+            resolve_in_both_yarn_formats(&[("^3.0.0", "3.0.0"), (">=1 <2", "1.5.0")], ">=1 <2"),
+            both_yarn_formats_lock("1.5.0")
+        );
+    }
+
+    #[test]
+    fn test_yarn_or_range_is_not_the_first_entry() {
+        assert_eq!(
+            resolve_in_both_yarn_formats(
+                &[("^3.0.0", "3.0.0"), ("^1.0.0 || ^2.0.0", "2.4.0")],
+                "^1.0.0 || ^2.0.0"
+            ),
+            both_yarn_formats_lock("2.4.0")
+        );
+    }
+
+    /// Every range of a multi-range key maps to the entry's version.
+    #[test]
+    fn test_yarn_multi_range_key_maps_every_range() {
+        let classic = "\"foo@^3.0.0\":\n  version \"3.0.0\"\n\nfoo@^1.0.0, foo@^1.1.0:\n  version \"1.2.0\"\n";
+        let berry = "\"foo@npm:^3.0.0\":\n  version: 3.0.0\n  resolution: \"foo@npm:3.0.0\"\n\n\"foo@npm:^1.0.0, foo@npm:^1.1.0\":\n  version: 1.2.0\n  resolution: \"foo@npm:1.2.0\"\n";
+        for lock in [classic, berry] {
+            for spec in ["^1.0.0", "^1.1.0"] {
+                assert_eq!(
+                    resolve_from_lock(NpmLockfileType::YarnLock, lock, "foo", spec).as_deref(),
+                    Some("1.2.0"),
+                    "{spec} in {lock}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_yarn_berry_explicit_npm_protocol_and_scoped_name() {
+        let lock = "\"@scope/foo@npm:^2.0.0\":\n  version: 2.1.0\n  resolution: \"@scope/foo@npm:2.1.0\"\n\n\"@scope/foo@npm:^1.0.0\":\n  version: 1.2.0\n  resolution: \"@scope/foo@npm:1.2.0\"\n";
+        for spec in ["^1.0.0", "npm:^1.0.0"] {
+            assert_eq!(
+                resolve_from_lock(NpmLockfileType::YarnLock, lock, "@scope/foo", spec).as_deref(),
+                Some("1.2.0"),
+                "{spec}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_yarn_berry_long_key_maps_its_ranges() {
+        let lock = "\"foo@npm:^3.0.0\":\n  version: 3.0.0\n  resolution: \"foo@npm:3.0.0\"\n\n? \"foo@npm:^1.0.0, foo@npm:^1.1.0\"\n:\n  version: 1.2.0\n  resolution: \"foo@npm:1.2.0\"\n";
+        assert_eq!(
+            resolve_from_lock(NpmLockfileType::YarnLock, lock, "foo", "^1.1.0").as_deref(),
+            Some("1.2.0")
+        );
+    }
+
+    /// The graph lists an aliased package under its real name; only the key
+    /// ties it to the name in the manifest.
+    #[test]
+    fn test_yarn_alias_resolves_through_its_key() {
+        let classic = "\"bar@^2.0.0\":\n  version \"2.0.0\"\n\n\"foo@npm:bar@^1.0.0\":\n  version \"1.2.0\"\n";
+        let berry = "\"bar@npm:^2.0.0\":\n  version: 2.0.0\n  resolution: \"bar@npm:2.0.0\"\n\n\"foo@npm:bar@^1.0.0\":\n  version: 1.2.0\n  resolution: \"bar@npm:1.2.0\"\n";
+        for lock in [classic, berry] {
+            assert_eq!(
+                resolve_from_lock(NpmLockfileType::YarnLock, lock, "foo", "npm:bar@^1.0.0")
+                    .as_deref(),
+                Some("1.2.0"),
+                "{lock}"
+            );
+        }
+    }
+
+    /// Local packages are dropped from the graph; their keys must go with them.
+    #[test]
+    fn test_yarn_berry_local_entry_keys_do_not_resolve() {
+        let lock = "\"foo@workspace:packages/foo\":\n  version: 0.0.0-use.local\n  resolution: \"foo@workspace:packages/foo\"\n";
+        assert_eq!(
+            resolve_from_lock(
+                NpmLockfileType::YarnLock,
+                lock,
+                "foo",
+                "workspace:packages/foo"
+            ),
+            None
+        );
+    }
+
+    /// A range no key holds means a stale lockfile: choosing a version would be a guess.
+    #[test]
+    fn test_stale_yarn_lock_does_not_guess_among_versions() {
+        assert_eq!(
+            resolve_in_both_yarn_formats(&[("^1.0.0", "1.2.0"), ("^2.0.0", "2.1.0")], "^2.5.0"),
+            [None, None]
+        );
+    }
+
+    #[test]
+    fn test_stale_yarn_lock_keeps_the_only_locked_version() {
+        assert_eq!(
+            resolve_in_both_yarn_formats(&[("^1.0.0", "1.2.0")], "^1.1.0"),
+            both_yarn_formats_lock("1.2.0")
+        );
+    }
+
+    /// `main.rs` calls `select_npm_version` directly with the parsed graph.
+    #[test]
+    fn test_select_npm_version_reads_yarn_keys() {
+        let lock = "\"foo@npm:^1.5.0\":\n  version: 1.6.0\n  resolution: \"foo@npm:1.6.0\"\n\n\"foo@npm:^1.0.0\":\n  version: 1.2.0\n  resolution: \"foo@npm:1.2.0\"\n";
+        let deps = NpmParser::new().parse(r#"{"dependencies": {"foo": "^1.0.0"}}"#);
+        assert_eq!(
+            select_npm_version(&deps[0], &parse_yarn_lock_graph(lock)).as_deref(),
+            Some("1.2.0")
+        );
+    }
+
+    /// Yarn catalogs write the catalog's range in the key, not the `catalog:` marker.
+    #[test]
+    fn test_select_npm_version_uses_the_catalog_range_in_yarn_keys() {
+        let lock = "\"react@npm:^17.0.0\":\n  version: 17.0.2\n  resolution: \"react@npm:17.0.2\"\n\n\"react@npm:^18.2.0\":\n  version: 18.3.1\n  resolution: \"react@npm:18.3.1\"\n";
+        let deps = crate::parsers::pnpm_workspace::resolve_catalog_references(
+            NpmParser::new().parse(r#"{"dependencies": {"react": "catalog:"}}"#),
+            Some("catalog:\n  react: ^18.2.0\n"),
+        );
+        assert_eq!(
+            select_npm_version(&deps[0], &parse_yarn_lock_graph(lock)).as_deref(),
+            Some("18.3.1")
+        );
+    }
+
+    const PNPM_V9_LOCK: &str = r#"lockfileVersion: '9.0'
+
+importers:
+
+  .:
+    dependencies:
+      '@scope/foo':
+        specifier: ^1.0.0
+        version: 1.2.0
+      foo:
+        specifier: '>=1 <2'
+        version: 1.2.0(react@18.2.0)
+      aliased:
+        specifier: npm:foo@^1.0.0
+        version: foo@1.2.0
+      react:
+        specifier: 'catalog:'
+        version: 18.3.1
+      local:
+        specifier: workspace:*
+        version: link:../local
+
+packages:
+
+  '@scope/foo@1.2.0':
+    resolution: {integrity: sha512-a}
+
+  '@scope/foo@1.6.0':
+    resolution: {integrity: sha512-b}
+
+  foo@1.2.0:
+    resolution: {integrity: sha512-c}
+
+  foo@1.6.0:
+    resolution: {integrity: sha512-d}
+
+  react@17.0.2:
+    resolution: {integrity: sha512-e}
+
+  react@18.3.1:
+    resolution: {integrity: sha512-f}
+"#;
+
+    #[test]
+    fn test_pnpm_v9_importers_map_specifiers_to_versions() {
+        for (name, spec, expected) in [
+            ("@scope/foo", "^1.0.0", Some("1.2.0")),
+            ("foo", ">=1 <2", Some("1.2.0")),
+            ("aliased", "npm:foo@^1.0.0", Some("1.2.0")),
+            ("local", "workspace:*", None),
+        ] {
+            assert_eq!(
+                resolve_from_lock(NpmLockfileType::PnpmLock, PNPM_V9_LOCK, name, spec).as_deref(),
+                expected,
+                "{name}@{spec}"
+            );
+        }
+    }
+
+    /// pnpm v6 writes the sections at the top level for a single project, and
+    /// a `/` before an aliased version.
+    #[test]
+    fn test_pnpm_v6_top_level_sections_map_specifiers_to_versions() {
+        let lock = r#"lockfileVersion: '6.0'
+
+dependencies:
+  foo:
+    specifier: ^1.0.0
+    version: 1.2.0
+
+devDependencies:
+  aliased:
+    specifier: npm:foo@^1.5.0
+    version: /foo@1.6.0
+
+packages:
+
+  /foo@1.2.0:
+    resolution: {integrity: sha512-a}
+    dev: false
+
+  /foo@1.6.0:
+    resolution: {integrity: sha512-b}
+    dev: true
+"#;
+        for (name, spec, expected) in [
+            ("foo", "^1.0.0", "1.2.0"),
+            ("aliased", "npm:foo@^1.5.0", "1.6.0"),
+        ] {
+            assert_eq!(
+                resolve_from_lock(NpmLockfileType::PnpmLock, lock, name, spec).as_deref(),
+                Some(expected),
+                "{name}@{spec}"
+            );
+        }
+    }
+
+    /// `catalog:` holds no range: pnpm records the marker as the specifier.
+    #[test]
+    fn test_select_npm_version_uses_the_catalog_specifier() {
         let manifest = r#"{"dependencies": {"react": "catalog:"}}"#;
         let deps = crate::parsers::pnpm_workspace::resolve_catalog_references(
             NpmParser::new().parse(manifest),
             Some("catalog:\n  react: ^18.2.0\n"),
         );
-        let graph = LockfileGraph {
-            packages: ["17.0.2", "18.3.1"]
-                .iter()
-                .map(|version| LockfilePackage {
-                    name: "react".to_string(),
-                    version: (*version).to_string(),
-                    dependencies: Vec::new(),
-                    is_root: false,
-                })
-                .collect(),
-        };
 
         assert_eq!(
-            select_npm_version(&deps[0], &graph).as_deref(),
+            select_npm_version(&deps[0], &parse_pnpm_lock_graph(PNPM_V9_LOCK)).as_deref(),
             Some("18.3.1")
         );
     }
 
-    /// The first entry for a name can be locked for another dependent's range.
+    /// package-lock keeps one top-level copy per name, whatever the range says:
+    /// other versions sit under nested `node_modules` paths.
     #[test]
-    fn test_npm_resolver_skips_versions_outside_the_declared_range() {
-        assert_eq!(
-            resolve_among_versions("autoprefixer", "^10.6.1", &["10.6.0", "10.6.1"]).as_deref(),
-            Some("10.6.1")
-        );
-    }
-
-    #[test]
-    fn test_npm_resolver_takes_highest_version_in_the_declared_range() {
-        assert_eq!(
-            resolve_among_versions("postcss", "~8.5.28", &["8.5.28", "8.5.32"]).as_deref(),
-            Some("8.5.32")
-        );
+    fn test_package_lock_uses_the_top_level_copy() {
+        let lock = r#"{
+  "lockfileVersion": 3,
+  "packages": {
+    "": {"dependencies": {"foo": "^1.0.0", "aliased": "npm:foo@^1.5.0"}},
+    "node_modules/foo": {"version": "1.2.0"},
+    "node_modules/aliased": {"name": "foo", "version": "1.6.0"},
+    "node_modules/other/node_modules/foo": {"version": "1.9.0"}
+  }
+}"#;
+        for (name, spec, expected) in [
+            ("foo", "^1.0.0", "1.2.0"),
+            ("aliased", "npm:foo@^1.5.0", "1.6.0"),
+        ] {
+            assert_eq!(
+                resolve_from_lock(NpmLockfileType::PackageLock, lock, name, spec).as_deref(),
+                Some(expected),
+                "{name}@{spec}"
+            );
+        }
     }
 
     /// A bare npm version is an exact pin, unlike a bare semver requirement.
@@ -1845,12 +2201,20 @@ __metadata:
         );
     }
 
-    /// npm range syntax the `semver` crate rejects falls back to the first entry.
+    /// Bun's flat graph holds one version per name and no ranges.
     #[test]
-    fn test_npm_resolver_falls_back_on_unparsable_range() {
+    fn test_npm_resolver_keeps_the_only_candidate_without_ranges() {
         assert_eq!(
-            resolve_among_versions("foo", "1.0.0 || 2.0.0", &["1.0.0", "2.0.0"]).as_deref(),
-            Some("1.0.0")
+            resolve_among_versions("foo", "^1.0.0", &["1.2.0"]).as_deref(),
+            Some("1.2.0")
+        );
+    }
+
+    #[test]
+    fn test_npm_resolver_does_not_guess_without_ranges() {
+        assert_eq!(
+            resolve_among_versions("foo", "^1.0.0", &["1.2.0", "1.6.0"]),
+            None
         );
     }
 

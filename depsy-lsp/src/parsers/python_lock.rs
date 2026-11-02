@@ -478,6 +478,7 @@ impl LockfileResolver for PythonResolver {
                             is_root: false,
                         })
                         .collect(),
+                    ..Default::default()
                 }
             }
         }

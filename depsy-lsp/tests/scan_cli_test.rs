@@ -520,6 +520,90 @@ async fn test_scan_yarn_berry_queries_version_in_declared_range() {
     );
 }
 
+/// `foo` is only the local name of `bar` here, so an advisory on the unrelated
+/// `foo` package must not be looked up at `bar`'s version.
+#[tokio::test]
+async fn test_scan_queries_the_real_package_of_an_npm_alias() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/querybatch"))
+        .respond_with(|request: &wiremock::Request| {
+            let body: serde_json::Value = request
+                .body_json()
+                .expect("querybatch request body should be valid JSON");
+            let results: Vec<serde_json::Value> = body["queries"]
+                .as_array()
+                .expect("querybatch.queries should be an array")
+                .iter()
+                .map(|_| serde_json::json!({ "vulns": [] }))
+                .collect();
+
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": results
+            }))
+        })
+        .mount(&server)
+        .await;
+
+    let tmp = tempfile::tempdir().expect("failed to create temp dir");
+    let manifest_path = tmp.path().join("package.json");
+    std::fs::write(
+        &manifest_path,
+        r#"{"name":"app","dependencies":{"foo":"npm:bar@^1.0.0"}}"#,
+    )
+    .expect("failed to write package.json");
+    std::fs::write(
+        tmp.path().join("yarn.lock"),
+        r#"# yarn lockfile v1
+
+"foo@npm:bar@^1.0.0":
+  version "1.2.0"
+  resolved "https://registry.yarnpkg.com/bar/-/bar-1.2.0.tgz"
+"#,
+    )
+    .expect("failed to write yarn.lock");
+
+    let output = Command::new(depsy_lsp_bin())
+        .env("OSV_ENDPOINT", server.uri())
+        .args(["scan", "--output", "json", "--file"])
+        .arg(&manifest_path)
+        .output()
+        .expect("failed to run depsy-lsp");
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "scan of an aliased dependency should succeed\nstdout=\n{}\nstderr=\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    let requests = server
+        .received_requests()
+        .await
+        .expect("failed to collect mock server requests");
+    let querybatch_body: serde_json::Value = requests
+        .iter()
+        .find(|request| request.url.path() == "/querybatch")
+        .expect("expected POST /querybatch")
+        .body_json()
+        .expect("querybatch body should be valid JSON");
+    let queried: Vec<(String, String)> = querybatch_body["queries"]
+        .as_array()
+        .expect("querybatch.queries should be an array")
+        .iter()
+        .map(|query| {
+            (
+                query["package"]["name"].as_str().unwrap_or("").to_string(),
+                query["version"].as_str().unwrap_or("").to_string(),
+            )
+        })
+        .collect();
+
+    assert_eq!(queried, vec![("bar".to_string(), "1.2.0".to_string())]);
+}
+
 #[tokio::test]
 async fn test_scan_pnpm_workspace_catalogs_queries_versions_locked_per_catalog() {
     let server = MockServer::start().await;

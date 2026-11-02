@@ -12,6 +12,7 @@ use dashmap::DashMap;
 use super::osv::QueryResult;
 use super::{Ecosystem, normalize_version_for_osv};
 use crate::parsers::Dependency;
+use crate::parsers::npm_lock::npm_alias_target;
 
 /// Default TTL for vulnerability cache (6 hours)
 const DEFAULT_VULN_CACHE_TTL: Duration = Duration::from_secs(6 * 3600);
@@ -40,13 +41,17 @@ impl VulnCacheKey {
     /// Creates the key for `dep`'s resolved version.
     ///
     /// The version is normalized the same way as the OSV query, so readers
-    /// and the background fetch agree on the key.
+    /// and the background fetch agree on the key. An npm alias names the real
+    /// package: advisories on the alias's local name are about another package.
     pub fn for_dependency(ecosystem: Ecosystem, dep: &Dependency) -> Self {
-        Self::new(
-            ecosystem,
-            &dep.name,
-            &normalize_version_for_osv(dep.effective_version()),
-        )
+        let alias = (ecosystem == Ecosystem::Npm)
+            .then(|| npm_alias_target(&dep.version))
+            .flatten();
+        let (name, version) = match alias {
+            Some((target, range)) => (target, dep.resolved_version.as_deref().unwrap_or(range)),
+            None => (dep.name.as_str(), dep.effective_version()),
+        };
+        Self::new(ecosystem, name, &normalize_version_for_osv(version))
     }
 }
 
@@ -215,6 +220,72 @@ impl Default for VulnerabilityCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parsers::Span;
+
+    fn dep(name: &str, version: &str, resolved: Option<&str>) -> Dependency {
+        const SPAN: Span = Span {
+            line: 0,
+            line_start: 0,
+            line_end: 0,
+        };
+        Dependency {
+            name: name.to_string(),
+            version: version.to_string(),
+            name_span: SPAN,
+            version_span: SPAN,
+            dev: false,
+            optional: false,
+            registry: None,
+            resolved_version: resolved.map(str::to_string),
+            has_additional_version_constraints: false,
+        }
+    }
+
+    #[test]
+    fn npm_alias_key_targets_the_real_package() {
+        let alias = dep("foo", "npm:bar@^1.0.0", Some("1.2.0"));
+        assert_eq!(
+            VulnCacheKey::for_dependency(Ecosystem::Npm, &alias),
+            VulnCacheKey::new(Ecosystem::Npm, "bar", "1.2.0"),
+        );
+    }
+
+    #[test]
+    fn npm_alias_key_handles_a_scoped_target() {
+        let alias = dep("foo", "npm:@scope/bar@1.2.0", None);
+        assert_eq!(
+            VulnCacheKey::for_dependency(Ecosystem::Npm, &alias),
+            VulnCacheKey::new(Ecosystem::Npm, "@scope/bar", "1.2.0"),
+        );
+    }
+
+    #[test]
+    fn unresolved_npm_alias_key_uses_the_range_of_the_alias() {
+        let alias = dep("foo", "npm:bar@^1.0.0", None);
+        assert_eq!(
+            VulnCacheKey::for_dependency(Ecosystem::Npm, &alias),
+            VulnCacheKey::new(Ecosystem::Npm, "bar", "1.0.0"),
+        );
+    }
+
+    #[test]
+    fn npm_alias_without_a_range_means_any_version() {
+        for (spec, target) in [("npm:bar", "bar"), ("npm:@scope/bar", "@scope/bar")] {
+            assert_eq!(
+                VulnCacheKey::for_dependency(Ecosystem::Npm, &dep("foo", spec, None)),
+                VulnCacheKey::new(Ecosystem::Npm, target, "*"),
+            );
+        }
+    }
+
+    #[test]
+    fn alias_syntax_only_counts_for_npm() {
+        let other = dep("foo", "npm:bar@^1.0.0", Some("1.2.0"));
+        assert_eq!(
+            VulnCacheKey::for_dependency(Ecosystem::PyPI, &other),
+            VulnCacheKey::new(Ecosystem::PyPI, "foo", "1.2.0"),
+        );
+    }
 
     #[test]
     fn test_cache_insert_and_contains() {

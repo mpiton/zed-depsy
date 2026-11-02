@@ -5,7 +5,7 @@
 //! Graph algorithms (DFS, reachability, reverse index) are implemented as methods
 //! on [`LockfileGraph`] and are used for transitive vulnerability attribution.
 
-use hashbrown::HashSet;
+use hashbrown::{HashMap, HashSet};
 use tokio::io::AsyncReadExt;
 
 /// Read a lockfile into a `String`, refusing content larger than 50 MiB.
@@ -79,6 +79,11 @@ pub struct LockfilePackage {
 pub struct LockfileGraph {
     /// All packages present in the lockfile, including transitive dependencies.
     pub packages: Vec<LockfilePackage>,
+    /// Locked version for each `name@range` spec the lockfile records.
+    ///
+    /// Filled only by lockfile formats that keep this mapping (`yarn.lock`,
+    /// `pnpm-lock.yaml`). Empty for every other format.
+    pub locked_specs: HashMap<String, String>,
 }
 
 impl LockfileGraph {
@@ -97,6 +102,7 @@ impl LockfileGraph {
     ///         LockfilePackage { name: "serde".into(), version: "1.0.100".into(), dependencies: vec![], is_root: false },
     ///         LockfilePackage { name: "tokio".into(), version: "1.36.0".into(), dependencies: vec![], is_root: false },
     ///     ],
+    ///     ..Default::default()
     /// };
     /// assert_eq!(graph.find_all("serde").len(), 2);
     /// assert_eq!(graph.find_all("tokio").len(), 1);
@@ -233,6 +239,7 @@ mod tests {
                 pkg("react", &["react-dom"], true),
                 pkg("react-dom", &[], false),
             ],
+            ..Default::default()
         };
         let names: Vec<&str> = graph
             .transitive_deps_of("react")
@@ -250,6 +257,7 @@ mod tests {
                 pkg("react-dom", &["scheduler"], false),
                 pkg("scheduler", &[], false),
             ],
+            ..Default::default()
         };
         let names: Vec<String> = graph
             .transitive_deps_of("react")
@@ -265,6 +273,7 @@ mod tests {
     fn test_transitive_deps_of_cyclic() {
         let graph = LockfileGraph {
             packages: vec![pkg("a", &["b"], true), pkg("b", &["a"], false)],
+            ..Default::default()
         };
         let names: Vec<&str> = graph
             .transitive_deps_of("a")
@@ -276,7 +285,10 @@ mod tests {
 
     #[test]
     fn test_transitive_deps_of_unknown_root() {
-        let graph = LockfileGraph { packages: vec![] };
+        let graph = LockfileGraph {
+            packages: vec![],
+            ..Default::default()
+        };
         assert!(graph.transitive_deps_of("nope").is_empty());
     }
 
@@ -288,6 +300,7 @@ mod tests {
                 pkg("vue", &["scheduler"], true),
                 pkg("scheduler", &[], false),
             ],
+            ..Default::default()
         };
         let idx = graph.reverse_index(&["react".to_string(), "vue".to_string()]);
         let parents = idx.get("scheduler").unwrap();
@@ -306,6 +319,7 @@ mod tests {
                 // reachability rather than a simple name exclusion.
                 pkg("scheduler", &[], false),
             ],
+            ..Default::default()
         };
         let manifest: Vec<String> = vec!["react".to_string()];
         let names: Vec<String> = graph
@@ -345,6 +359,7 @@ mod tests {
                     is_root: false,
                 },
             ],
+            ..Default::default()
         };
         let manifest: Vec<String> = vec!["react".to_string()];
         let names: Vec<&str> = graph
@@ -422,6 +437,7 @@ mod tests {
                     is_root: false,
                 },
             ],
+            ..Default::default()
         };
 
         let transitives = graph.transitive_deps_of("root");
@@ -462,6 +478,7 @@ mod tests {
                     is_root: false,
                 },
             ],
+            ..Default::default()
         };
         assert_eq!(graph.find_all("a").len(), 2);
         assert_eq!(graph.find_all("b").len(), 1);

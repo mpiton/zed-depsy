@@ -106,7 +106,10 @@ impl LockfileResolver for GoResolver {
                 });
             }
         }
-        LockfileGraph { packages }
+        LockfileGraph {
+            packages,
+            ..Default::default()
+        }
     }
 
     fn resolve_version(&self, dep: &Dependency, graph: &LockfileGraph) -> Option<String> {
@@ -354,6 +357,7 @@ github.com/foo/bar v1.0.0
                     is_root: false,
                 },
             ],
+            ..Default::default()
         };
         let dep = crate::parsers::Dependency {
             name: "github.com/foo/bar".to_string(),

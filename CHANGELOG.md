@@ -83,6 +83,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   only by peer suffix merge into one package, in v6 lockfiles too, and an alias
   edge such as `foo: bar@1.2.0` follows `bar`. `optionalDependencies` count as
   edges, as they do for Yarn.
+- OSV queries no longer carry a version that is a local path, URL or protocol
+  source, such as `file:packages/x` or a tarball URL holding a token. A direct
+  dependency on such a source used to be sent as is. Those packages get no
+  advisory; their own dependencies are still scanned.
+- `scan` and the editor now split OSV requests at OSV's limit of 1000 queries per
+  batch, so a project with more packages no longer loses all its results.
 - A manifest parse that finishes after a newer parse has started no longer
   overwrites the newer parse or its transitive vulnerability findings.
   Before, a slow registry fetch could keep the hints and diagnostics of

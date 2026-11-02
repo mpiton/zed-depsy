@@ -834,6 +834,83 @@ snapshots:
     );
 }
 
+/// Local paths and tarball URLs can name internal hosts or hold tokens, so they stay on this machine.
+#[tokio::test]
+async fn test_scan_keeps_non_registry_pnpm_sources_out_of_osv_queries() {
+    let tmp = tempfile::tempdir().expect("failed to create temp dir");
+    let manifest_path = tmp.path().join("package.json");
+    std::fs::write(
+        &manifest_path,
+        r#"{"name":"app","dependencies":{"host":"^1.0.0","@acme/direct":"file:packages/direct"}}"#,
+    )
+    .expect("failed to write package.json");
+    std::fs::write(
+        tmp.path().join("pnpm-lock.yaml"),
+        r#"lockfileVersion: '9.0'
+
+importers:
+
+  .:
+    dependencies:
+      host:
+        specifier: ^1.0.0
+        version: 1.0.0
+      '@acme/direct':
+        specifier: file:packages/direct
+        version: file:packages/direct
+
+packages:
+
+  '@acme/direct@file:packages/direct':
+    resolution: {directory: packages/direct, type: directory}
+
+  '@acme/internal@file:packages/internal':
+    resolution: {directory: packages/internal, type: directory}
+
+  host@1.0.0:
+    resolution: {integrity: sha512-a}
+
+  behind-local@2.0.0:
+    resolution: {integrity: sha512-b}
+
+  vendor-git@git+ssh://git@github.com/acme/vendor-git.git#abc123:
+    resolution: {commit: abc123, repo: 'git@github.com:acme/vendor-git.git', type: git}
+
+  vendor-tool@https://artifacts.corp.example/vendor-tool.tgz?token=SECRET123:
+    resolution: {tarball: 'https://artifacts.corp.example/vendor-tool.tgz?token=SECRET123'}
+
+snapshots:
+
+  '@acme/direct@file:packages/direct': {}
+
+  '@acme/internal@file:packages/internal':
+    dependencies:
+      behind-local: 2.0.0
+
+  behind-local@2.0.0: {}
+
+  host@1.0.0:
+    dependencies:
+      '@acme/internal': file:packages/internal
+      vendor-git: git+ssh://git@github.com/acme/vendor-git.git#abc123
+      vendor-tool: https://artifacts.corp.example/vendor-tool.tgz?token=SECRET123
+
+  vendor-git@git+ssh://git@github.com/acme/vendor-git.git#abc123: {}
+
+  vendor-tool@https://artifacts.corp.example/vendor-tool.tgz?token=SECRET123: {}
+"#,
+    )
+    .expect("failed to write pnpm-lock.yaml");
+
+    assert_eq!(
+        scan_osv_queries(&manifest_path).await,
+        vec![
+            package_pair("behind-local", "2.0.0"),
+            package_pair("host", "1.0.0"),
+        ]
+    );
+}
+
 /// pnpm writes `bar@1.2.0` as the version of some alias entries in `catalogs`.
 #[tokio::test]
 async fn test_scan_of_a_workspace_file_reads_the_version_of_a_locked_catalog_alias() {

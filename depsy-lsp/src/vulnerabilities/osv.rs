@@ -15,6 +15,8 @@ use crate::registries::{Vulnerability, VulnerabilitySeverity};
 
 const OSV_API_BASE: &str = "https://api.osv.dev/v1";
 const RUSTSEC_ADVISORY_LOOKUP_CONCURRENCY: usize = 5;
+/// Most queries OSV accepts in one `/querybatch` request.
+const OSV_MAX_BATCH_QUERIES: usize = 1000;
 
 /// Maximum length for an OSV advisory ID. Real RUSTSEC IDs are 16 characters
 /// (`RUSTSEC-YYYY-NNNN`); 64 is generous head-room for related schemes.
@@ -239,15 +241,59 @@ fn parse_cvss_severity(score: &str) -> VulnerabilitySeverity {
     VulnerabilitySeverity::Medium
 }
 
+/// Tells a registry version or range from a local path, URL or protocol source.
+///
+/// Sources such as `file:packages/x` or `https://host/x.tgz?token=...` can name
+/// internal hosts or hold credentials, and OSV has no advisory for them.
+fn is_registry_version(version: &str) -> bool {
+    !version.contains([':', '/'])
+}
+
 impl OsvClient {
+    /// Queries OSV for each of `queries`, returning one result per query in input order.
+    ///
+    /// Requests hold at most [`OSV_MAX_BATCH_QUERIES`] queries each. A query whose
+    /// version is a local path, URL or protocol source is not sent and gets an empty
+    /// result.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a request fails or OSV answers with an error status.
     pub async fn query_batch(
         &self,
         queries: &[VulnerabilityQuery],
     ) -> anyhow::Result<Vec<QueryResult>> {
-        if queries.is_empty() {
-            return Ok(vec![]);
+        let registry_queries: Vec<&VulnerabilityQuery> = queries
+            .iter()
+            .filter(|q| is_registry_version(&q.version))
+            .collect();
+
+        let mut answers = Vec::with_capacity(registry_queries.len());
+        for chunk in registry_queries.chunks(OSV_MAX_BATCH_QUERIES) {
+            answers.extend(self.query_chunk(chunk).await?);
         }
 
+        let mut answers = answers.into_iter();
+        Ok(queries
+            .iter()
+            .filter_map(|q| {
+                if is_registry_version(&q.version) {
+                    answers.next()
+                } else {
+                    Some(QueryResult {
+                        vulnerabilities: Vec::new(),
+                        deprecated: false,
+                    })
+                }
+            })
+            .collect())
+    }
+
+    /// Sends `queries` to OSV as one `/querybatch` request.
+    async fn query_chunk(
+        &self,
+        queries: &[&VulnerabilityQuery],
+    ) -> anyhow::Result<Vec<QueryResult>> {
         let request = OsvBatchRequest {
             queries: queries
                 .iter()
@@ -750,6 +796,125 @@ mod tests {
                 }
             }]
         })
+    }
+
+    #[tokio::test]
+    async fn query_batch_splits_at_the_osv_limit_and_keeps_input_order() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/querybatch"))
+            .respond_with(|req: &wiremock::Request| {
+                let body: serde_json::Value = req.body_json().expect("querybatch body is JSON");
+                let results: Vec<serde_json::Value> = body["queries"]
+                    .as_array()
+                    .expect("queries is an array")
+                    .iter()
+                    .map(|query| {
+                        let id = format!("OSV-{}", query["package"]["name"].as_str().unwrap_or(""));
+                        serde_json::json!({ "vulns": [{ "id": id }] })
+                    })
+                    .collect();
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "results": results }))
+            })
+            .mount(&server)
+            .await;
+        let client = OsvClient::with_endpoint(server.uri()).expect("with_endpoint builds in test");
+        let queries: Vec<VulnerabilityQuery> = (0..=OSV_MAX_BATCH_QUERIES)
+            .map(|index| VulnerabilityQuery {
+                ecosystem: Ecosystem::Npm,
+                package_name: format!("pkg-{index}"),
+                version: "1.0.0".to_string(),
+            })
+            .collect();
+
+        let results = client.query_batch(&queries).await.expect("batch succeeds");
+
+        let requests = server
+            .received_requests()
+            .await
+            .expect("mock server records requests");
+        let sizes: Vec<usize> = requests
+            .iter()
+            .map(|request| {
+                let body: serde_json::Value = request.body_json().expect("querybatch body is JSON");
+                body["queries"]
+                    .as_array()
+                    .expect("queries is an array")
+                    .len()
+            })
+            .collect();
+        assert_eq!(sizes, vec![OSV_MAX_BATCH_QUERIES, 1]);
+        let ids: Vec<String> = results
+            .iter()
+            .map(|result| result.vulnerabilities[0].id.clone())
+            .collect();
+        let expected: Vec<String> = queries
+            .iter()
+            .map(|query| format!("OSV-{}", query.package_name))
+            .collect();
+        assert_eq!(ids, expected);
+    }
+
+    #[tokio::test]
+    async fn query_batch_never_sends_local_or_url_versions() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/querybatch"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [{ "vulns": [{ "id": "OSV-registry" }] }]
+            })))
+            .mount(&server)
+            .await;
+        let client = OsvClient::with_endpoint(server.uri()).expect("with_endpoint builds in test");
+        let query = |name: &str, version: &str| VulnerabilityQuery {
+            ecosystem: Ecosystem::Npm,
+            package_name: name.to_string(),
+            version: version.to_string(),
+        };
+        let queries = [
+            query("local", "file:packages/local"),
+            query("registry", "1.0.0"),
+            query("tarball", "https://host.example/x.tgz?token=SECRET"),
+            query("github", "acme/repo"),
+        ];
+
+        let results = client.query_batch(&queries).await.expect("batch succeeds");
+
+        let requests = server
+            .received_requests()
+            .await
+            .expect("mock server records requests");
+        assert_eq!(requests.len(), 1);
+        let body: serde_json::Value = requests[0].body_json().expect("querybatch body is JSON");
+        assert_eq!(
+            body["queries"],
+            serde_json::json!([{
+                "package": { "name": "registry", "ecosystem": "npm" },
+                "version": "1.0.0"
+            }])
+        );
+        let found: Vec<usize> = results.iter().map(|r| r.vulnerabilities.len()).collect();
+        assert_eq!(found, vec![0, 1, 0, 0]);
+    }
+
+    #[tokio::test]
+    async fn query_batch_sends_nothing_when_every_version_is_local() {
+        let server = MockServer::start().await;
+        let client = OsvClient::with_endpoint(server.uri()).expect("with_endpoint builds in test");
+        let queries = [VulnerabilityQuery {
+            ecosystem: Ecosystem::Npm,
+            package_name: "local".to_string(),
+            version: "file:packages/local".to_string(),
+        }];
+
+        let results = client.query_batch(&queries).await.expect("batch succeeds");
+
+        assert_eq!(results.len(), 1);
+        let requests = server
+            .received_requests()
+            .await
+            .expect("mock server records requests");
+        assert!(requests.is_empty());
     }
 
     #[tokio::test]

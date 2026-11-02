@@ -690,11 +690,10 @@ fn split_pnpm_key(key: &str) -> Option<(String, String)> {
         Some(idx) => &key[..idx],
         None => key,
     };
-    let at = base.rfind('@')?;
-    if at == 0 {
-        return None; // scoped name starts with '@' — first '@' is not the separator
-    }
-    Some((base[..at].to_string(), base[at + 1..].to_string()))
+    // The separator is the first '@' after a scope: a source such as
+    // `git+ssh://git@github.com/o/r.git` can hold another one.
+    let (name, version) = split_name_version(base)?;
+    Some((name.to_string(), version.to_string()))
 }
 
 /// Parse a `yarn.lock` into a [`LockfileGraph`].
@@ -1690,6 +1689,31 @@ packages:
         assert_eq!(
             pnpm_edges(&graph, "a", "1.0.0"),
             ["bar", "@y/real", "peer", "other"]
+        );
+    }
+
+    #[test]
+    fn test_split_pnpm_key_keeps_the_name_of_a_source_holding_an_at_sign() {
+        let content = r#"
+lockfileVersion: '9.0'
+packages:
+  vendor@git+ssh://git@github.com/o/r.git#abc:
+    resolution: {commit: abc}
+  '@acme/lib@file:packages/lib':
+    resolution: {directory: packages/lib}
+"#;
+        let graph = parse_pnpm_lock_graph(content);
+        let packages: Vec<(&str, &str)> = graph
+            .packages
+            .iter()
+            .map(|p| (p.name.as_str(), p.version.as_str()))
+            .collect();
+        assert_eq!(
+            packages,
+            vec![
+                ("vendor", "git+ssh://git@github.com/o/r.git#abc"),
+                ("@acme/lib", "file:packages/lib"),
+            ]
         );
     }
 

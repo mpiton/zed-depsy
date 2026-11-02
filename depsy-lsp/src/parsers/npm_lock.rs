@@ -707,7 +707,12 @@ pub fn select_npm_version(dep: &Dependency, graph: &LockfileGraph) -> Option<Str
         .into_iter()
         .map(|p| p.version.as_str())
         .collect();
-    let declared = dep.version.trim();
+    // A `catalog:` marker holds no range: the catalog's range is in `resolved_version`.
+    let declared = match dep.resolved_version.as_deref() {
+        Some(catalog_range) if dep.version.starts_with("catalog:") => catalog_range,
+        _ => dep.version.as_str(),
+    }
+    .trim();
     if candidates.contains(&declared) {
         return Some(declared.to_string());
     }
@@ -1616,6 +1621,32 @@ __metadata:
         let manifest = format!(r#"{{"dependencies": {{"{name}": "{spec}"}}}}"#);
         let deps = NpmParser::new().parse(&manifest);
         resolver.resolve_version(&deps[0], &LockfileGraph { packages })
+    }
+
+    /// `catalog:` holds no range: the range comes from the pnpm catalog.
+    #[test]
+    fn test_select_npm_version_uses_the_catalog_range() {
+        let manifest = r#"{"dependencies": {"react": "catalog:"}}"#;
+        let deps = crate::parsers::pnpm_workspace::resolve_catalog_references(
+            NpmParser::new().parse(manifest),
+            Some("catalog:\n  react: ^18.2.0\n"),
+        );
+        let graph = LockfileGraph {
+            packages: ["17.0.2", "18.3.1"]
+                .iter()
+                .map(|version| LockfilePackage {
+                    name: "react".to_string(),
+                    version: (*version).to_string(),
+                    dependencies: Vec::new(),
+                    is_root: false,
+                })
+                .collect(),
+        };
+
+        assert_eq!(
+            select_npm_version(&deps[0], &graph).as_deref(),
+            Some("18.3.1")
+        );
     }
 
     /// The first entry for a name can be locked for another dependent's range.

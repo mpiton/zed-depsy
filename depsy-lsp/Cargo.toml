@@ -53,6 +53,11 @@ tower-service = "0.3.3"
 name = "benchmarks"
 harness = false
 
+# With the default 16 codegen units, unrelated source changes move inlining
+# across unit boundaries and shift parser benchmarks by over 10%.
+[profile.bench]
+codegen-units = 1
+
 [lints.clippy]
 uninlined_format_args = "warn"
 unnecessary_debug_formatting = "warn"

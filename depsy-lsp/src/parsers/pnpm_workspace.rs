@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use super::lockfile_graph::{LockfileGraph, read_lockfile_capped};
 use super::lockfile_resolver::LockfileResolver;
-use super::npm_lock::parse_pnpm_lock_graph;
+use super::npm_lock::{npm_alias_target, parse_pnpm_lock_graph, pnpm_locked_version};
 use super::{Dependency, Parser, Span};
 use crate::file_types::PNPM_WORKSPACE_FILENAME;
 
@@ -59,7 +59,7 @@ pub fn resolve_catalog_references(
                     .iter()
                     .find(|catalog_dependency| catalog_dependency.name == dependency.name)
             {
-                dependency.resolved_version = Some(catalog_dependency.version.clone());
+                apply_catalog_entry(&mut dependency, &catalog_dependency.version);
             } else if let Some(catalog_name) = dependency.version.strip_prefix("catalog:")
                 && let Some(named_catalog) = named_catalogs
                     .iter()
@@ -69,11 +69,21 @@ pub fn resolve_catalog_references(
                     .iter()
                     .find(|catalog_dependency| catalog_dependency.name == dependency.name)
             {
-                dependency.resolved_version = Some(catalog_dependency.version.clone());
+                apply_catalog_entry(&mut dependency, &catalog_dependency.version);
             }
             dependency
         })
         .collect()
+}
+
+/// Record what a catalog entry declares on the `catalog:` reference to it.
+///
+/// An entry holding an npm alias resolves to the alias's range: the name it
+/// targets stays readable through [`Dependency::declared_spec`].
+fn apply_catalog_entry(dependency: &mut Dependency, entry_spec: &str) {
+    let range = npm_alias_target(entry_spec).map_or(entry_spec, |(_, range)| range);
+    dependency.resolved_version = Some(range.to_string());
+    dependency.catalog_spec = Some(entry_spec.to_string());
 }
 
 /// Name pnpm gives the catalog declared under the top-level `catalog` key.
@@ -152,10 +162,18 @@ impl LockedCatalogs {
     /// Version locked for `dependency` as an entry of `catalog`.
     ///
     /// Returns `None` when no project references the entry, or when the
-    /// lockfile was written for another range than the one now declared.
+    /// lockfile was written for another range than the one now declared. An
+    /// alias entry can record its version as `bar@1.2.0`, so the package name
+    /// is dropped here.
     fn version_for(&self, catalog: &str, dependency: &Dependency) -> Option<String> {
         let entry = self.0.get(catalog)?.get(&dependency.name)?;
-        (entry.specifier == dependency.version).then(|| entry.version.clone())
+        if entry.specifier != dependency.version {
+            return None;
+        }
+        Some(
+            pnpm_locked_version(&entry.version)
+                .map_or_else(|| entry.version.clone(), str::to_string),
+        )
     }
 }
 
@@ -593,6 +611,7 @@ fn parse_catalog_entry(line_number: u32, line: &str) -> Option<Dependency> {
         registry: None,
         resolved_version: None,
         has_additional_version_constraints: false,
+        catalog_spec: None,
     })
 }
 
@@ -640,6 +659,7 @@ fn parse_flow_catalog_entry(
         registry: None,
         resolved_version: None,
         has_additional_version_constraints: false,
+        catalog_spec: None,
     })
 }
 

@@ -109,7 +109,9 @@ impl ProcessingContext {
         let mut targets: HashMap<String, RefreshTarget> = HashMap::new();
         for doc in self.documents.iter() {
             for dep in &doc.dependencies {
-                if is_local_dependency(&dep.version) || is_package_ignored(&dep.name, &ignored) {
+                if is_local_dependency(dep.declared_spec())
+                    || is_package_ignored(&dep.name, &ignored)
+                {
                     continue;
                 }
                 targets

@@ -187,6 +187,7 @@ fn test_inlay_hint_generation() {
         registry: None,
         resolved_version: None,
         has_additional_version_constraints: false,
+        catalog_spec: None,
     };
 
     let info_up_to_date = VersionInfo {
@@ -221,6 +222,7 @@ fn test_inlay_hint_generation() {
         registry: None,
         resolved_version: None,
         has_additional_version_constraints: false,
+        catalog_spec: None,
     };
 
     let info_outdated = VersionInfo {

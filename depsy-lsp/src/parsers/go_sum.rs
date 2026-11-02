@@ -106,7 +106,10 @@ impl LockfileResolver for GoResolver {
                 });
             }
         }
-        LockfileGraph { packages }
+        LockfileGraph {
+            packages,
+            ..Default::default()
+        }
     }
 
     fn resolve_version(&self, dep: &Dependency, graph: &LockfileGraph) -> Option<String> {
@@ -307,6 +310,7 @@ github.com/foo/bar v1.0.0
             registry: None,
             resolved_version: None,
             has_additional_version_constraints: false,
+            catalog_spec: None,
         };
         assert_eq!(
             resolver.resolve_version(&dep_with_match, &graph),
@@ -354,6 +358,7 @@ github.com/foo/bar v1.0.0
                     is_root: false,
                 },
             ],
+            ..Default::default()
         };
         let dep = crate::parsers::Dependency {
             name: "github.com/foo/bar".to_string(),
@@ -373,6 +378,7 @@ github.com/foo/bar v1.0.0
             registry: None,
             resolved_version: None,
             has_additional_version_constraints: false,
+            catalog_spec: None,
         };
         // Two identical entries collapse to one unique candidate → return it.
         assert_eq!(

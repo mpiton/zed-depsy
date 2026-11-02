@@ -360,6 +360,7 @@ fn extract_dependencies(content: &str, properties: &HashMap<String, String>) -> 
                                 registry: None,
                                 resolved_version,
                                 has_additional_version_constraints: false,
+                                catalog_spec: None,
                             });
                         }
                     }

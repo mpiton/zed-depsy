@@ -26,6 +26,7 @@ use tower_lsp::lsp_types::{InlayHint, InlayHintKind, InlayHintLabel, Position};
 use crate::file_types::FileType;
 use crate::registries::{VersionInfo, VulnerabilitySeverity};
 use crate::utils::fmt_truncate_string;
+use crate::vulnerabilities::npm_alias_package;
 use crate::{parsers::Dependency, registries::Vulnerability};
 
 /// Outcome of comparing a dependency's declared version against the latest available.
@@ -71,6 +72,7 @@ pub enum VersionStatus {
 ///     version_span: Span { line: 5, line_start: 9, line_end: 14 },
 ///     dev: false, optional: false, registry: None, resolved_version: None,
 ///     has_additional_version_constraints: false,
+///     catalog_spec: None,
 /// };
 /// let info = VersionInfo { latest: Some("1.0.0".to_string()), ..Default::default() };
 /// let hint = create_inlay_hint(&dep, Some(&info), FileType::Cargo);
@@ -126,8 +128,12 @@ fn create_hint_label_and_tooltip(
 ) -> (String, Option<String>) {
     let dep_name = &*dep.name;
 
+    // An npm alias keeps the local hint unless OSV has something to report on it.
+    let alias_has_finding = npm_alias_package(file_type.to_ecosystem(), dep).is_some()
+        && (vuln_count > 0 || version_info.is_some_and(|info| info.deprecated));
+
     // Handle local dependencies first (highest priority - no registry lookup needed)
-    if is_local_dependency(&dep.version) {
+    if is_local_dependency(dep.declared_spec()) && !alias_has_finding {
         let tooltip = format!(
             "**Local Dependency**\n\n\
             \"{dep_name}\" is a local/path dependency.\n\n\
@@ -168,7 +174,8 @@ fn create_hint_label_and_tooltip(
         && info.deprecated
     {
         let dep_label = "⚠ Deprecated";
-        let dep_tooltip = fmt_deprecation_tooltip(dep, info);
+        let package = npm_alias_package(file_type.to_ecosystem(), dep).unwrap_or(dep_name);
+        let dep_tooltip = fmt_deprecation_tooltip(package, info);
 
         // Combine with update info if available
         return match status {
@@ -290,14 +297,13 @@ fn fmt_vulnerability_tooltip(info: &VersionInfo) -> impl fmt::Display + fmt::Deb
 
 /// Format deprecation warning for tooltip
 #[must_use = "returns a type implementing Display and Debug, which does not have any effects unless they are used"]
-fn fmt_deprecation_tooltip(dep: &Dependency, info: &VersionInfo) -> impl fmt::Display + fmt::Debug {
-    let dep_name = &*dep.name;
+fn fmt_deprecation_tooltip(package: &str, info: &VersionInfo) -> impl fmt::Display + fmt::Debug {
     fmt::from_fn(move |f| {
         writeln!(
             f,
             "**⚠ PACKAGE DEPRECATED**\n\
              \n\
-             The package \"{dep_name}\" is deprecated.\n\
+             The package \"{package}\" is deprecated.\n\
              \n\
              **Why was it deprecated?**\n\
              • Superseded by a better alternative\n\
@@ -722,6 +728,7 @@ mod tests {
             registry: None,
             resolved_version: None,
             has_additional_version_constraints: false,
+            catalog_spec: None,
         }
     }
 
@@ -1353,6 +1360,62 @@ mod tests {
     }
 
     #[test]
+    fn test_npm_alias_hint_shows_osv_findings_and_stays_local_otherwise() {
+        let alias = make_test_dep("foo", "npm:bar@^1.0.0");
+        let label =
+            |info: &VersionInfo| match create_inlay_hint(&alias, Some(info), FileType::Npm).label {
+                InlayHintLabel::String(label) => label,
+                other => panic!("unexpected label: {other:?}"),
+            };
+
+        assert_eq!(label(&VersionInfo::default()).trim(), "→ Local");
+        let vulnerable = VersionInfo {
+            vulnerabilities: vec![Vulnerability {
+                id: "GHSA-bar".to_string(),
+                severity: VulnerabilitySeverity::High,
+                description: String::new(),
+                url: None,
+            }],
+            ..Default::default()
+        };
+        assert!(label(&vulnerable).contains("1 vuln"));
+        let deprecated = VersionInfo {
+            deprecated: true,
+            ..Default::default()
+        };
+        assert!(label(&deprecated).contains("Deprecated"));
+    }
+
+    #[test]
+    fn test_npm_alias_deprecation_tooltip_names_the_real_package() {
+        let alias = make_test_dep("foo", "npm:bar@^1.0.0");
+        let deprecated = VersionInfo {
+            deprecated: true,
+            ..Default::default()
+        };
+
+        let hint = create_inlay_hint(&alias, Some(&deprecated), FileType::Npm);
+        let Some(tower_lsp::lsp_types::InlayHintTooltip::String(tooltip)) = hint.tooltip else {
+            panic!("unexpected tooltip: {:?}", hint.tooltip);
+        };
+        assert!(tooltip.contains("\"bar\""), "{tooltip}");
+        assert!(!tooltip.contains("\"foo\""), "{tooltip}");
+    }
+
+    #[test]
+    fn test_catalog_alias_hint_stays_local_without_a_finding() {
+        let mut alias = make_test_dep("foo", "catalog:");
+        alias.resolved_version = Some("^1.0.0".to_string());
+        alias.catalog_spec = Some("npm:bar@^1.0.0".to_string());
+
+        let hint = create_inlay_hint(&alias, Some(&VersionInfo::default()), FileType::Npm);
+        let InlayHintLabel::String(label) = hint.label else {
+            panic!("unexpected label: {:?}", hint.label);
+        };
+        assert_eq!(label.trim(), "→ Local");
+    }
+
+    #[test]
     fn test_npm_local_deps_detection() {
         use crate::parsers::{Parser, npm::NpmParser};
 
@@ -1494,6 +1557,7 @@ mod tests {
             registry: None,
             resolved_version: Some(resolved.to_string()),
             has_additional_version_constraints: false,
+            catalog_spec: None,
         }
     }
 

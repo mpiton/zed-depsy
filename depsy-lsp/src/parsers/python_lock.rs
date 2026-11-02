@@ -478,6 +478,7 @@ impl LockfileResolver for PythonResolver {
                             is_root: false,
                         })
                         .collect(),
+                    ..Default::default()
                 }
             }
         }
@@ -1128,6 +1129,7 @@ version = "0.5.0"
             registry: None,
             resolved_version: None,
             has_additional_version_constraints: false,
+            catalog_spec: None,
         };
         // PEP 503: "some.package" → "some-package" should match "Some-Package" → "some-package"
         let v = resolver.resolve_version(&dep, &graph);

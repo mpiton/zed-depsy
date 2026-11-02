@@ -47,11 +47,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   1024 characters, written as `? key`, no longer overwrite the package before
   them.
 - When an npm lockfile holds several versions of a package, a dependency now
-  resolves to the version matching its declared range instead of the first entry
-  in the file, which could raise a false update hint. With several matches the
-  highest wins, and range syntax the `semver` crate rejects still falls back to
-  the first entry. A `catalog:` dependency uses the range from its pnpm catalog.
-  The `scan` command uses the same selection.
+  resolves to the version the lockfile records for its declared range, read from
+  the keys of `yarn.lock` and the specifiers of `pnpm-lock.yaml`, instead of the
+  first entry in the file, which could raise a false update hint. A newer version
+  locked for another dependent is no longer picked, and `1.2`, `>=1 <2` and `||`
+  ranges follow the lockfile like any other range. When several versions are
+  locked and none is recorded for the range, as in a stale lockfile, no version
+  is chosen. A `catalog:` dependency uses the range from its pnpm catalog. The
+  `scan` command uses the same selection.
+- A dependency declared as an npm alias, such as `"foo": "npm:bar@^1.0.0"`, is now
+  checked for vulnerabilities under the real package, `bar`. Before, OSV was asked
+  about the unrelated `foo` package, which could report its advisories and miss
+  those of `bar`. The finding is still listed under `foo`, the name in the
+  manifest, and diagnostics, inlay hints and hover now show it in the editor. The
+  registry data of the unrelated `foo` is no longer shown on an alias. With
+  `yarn.lock` and `pnpm-lock.yaml`, the transitive dependencies of `bar` are
+  scanned too. `npm:^1.0.0`, with a range only, and the `npm:latest` tag keep
+  meaning `foo`.
+- A pnpm `catalog:` entry holding an npm alias, such as `foo: npm:bar@^1.0.0` in
+  `pnpm-workspace.yaml`, is now checked under the real package, `bar`, in `scan`
+  and in the editor, with or without a lockfile. A catalog entry declaring a local
+  source such as `workspace:*` or `github:` now counts as local too, so the
+  `catalog:` reference to it gets the local hint and is no longer looked up in the
+  registry under its own name.
+- An npm range locked at several versions, such as by two pnpm importers or two
+  Yarn entries, now counts as unresolved instead of taking the first or last one;
+  an exact pin still uses its matching candidate when present.
+  A package locked several times at one version, as with pnpm peer variants or a
+  Yarn `patch:` entry, resolves to that version.
+- A `pnpm-lock.yaml` holding pnpm's own environment document is now read from its
+  main document, so the pnpm tool package is no longer counted as a dependency.
+- `scan` now finds transitive dependencies in a pnpm v9 `pnpm-lock.yaml`, which
+  records edges under `snapshots:`. Before, only `packages:` was read, so a v9
+  project reported advisories for its direct dependencies alone. Keys that differ
+  only by peer suffix merge into one package, in v6 lockfiles too, and an alias
+  edge such as `foo: bar@1.2.0` follows `bar`. `optionalDependencies` count as
+  edges, as they do for Yarn.
+- OSV queries no longer carry a version that is a local path, URL or protocol
+  source, such as `file:packages/x` or a tarball URL holding a token. A direct
+  dependency on such a source used to be sent as is. Those packages get no
+  advisory. With `pnpm-lock.yaml`, their own dependencies are still scanned.
+- `scan` and the editor now split OSV requests at OSV's limit of 1000 queries per
+  batch, so a project with more packages no longer loses all its results.
 - A manifest parse that finishes after a newer parse has started no longer
   overwrites the newer parse or its transitive vulnerability findings.
   Before, a slow registry fetch could keep the hints and diagnostics of

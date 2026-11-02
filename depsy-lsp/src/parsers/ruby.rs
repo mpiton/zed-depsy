@@ -133,6 +133,7 @@ fn parse_gem_declaration(line: &str, line_num: u32, dev: bool) -> Option<Depende
         registry: None,
         resolved_version: None,
         has_additional_version_constraints: parsed.has_additional_version_constraints,
+        catalog_spec: None,
     })
 }
 

@@ -224,7 +224,8 @@ async fn run_scan(
         fmt_html_report,
     };
     use depsy_lsp::vulnerabilities::{
-        Ecosystem, VulnerabilityQuery, normalize_version_for_osv, osv::OsvClient,
+        DirectRoots, Ecosystem, VulnerabilityQuery, cache::VulnCacheKey, normalize_version_for_osv,
+        osv::OsvClient,
     };
     use hashbrown::{HashMap, HashSet};
     use std::sync::Arc;
@@ -406,28 +407,22 @@ async fn run_scan(
         }
     }
 
+    // Name of each manifest dep in the graph, and the way back to its manifest name.
+    let direct_roots = DirectRoots::new(&dependencies, ecosystem, Some(&lockfile_graph), |name| {
+        canonical_name(ecosystem, name)
+    });
+
     // Flag graph's root packages (matching manifest deps)
-    let direct_names: HashSet<String> = dependencies
-        .iter()
-        .map(|d| canonical_name(ecosystem, &d.name))
-        .collect();
+    let direct_names: HashSet<&str> = direct_roots.names.iter().map(String::as_str).collect();
     for pkg in lockfile_graph.packages.iter_mut() {
-        if direct_names.contains(&pkg.name) {
+        if direct_names.contains(pkg.name.as_str()) {
             pkg.is_root = true;
         }
     }
 
     // Extract transitives (packages in the lockfile but not in the manifest)
-    let direct_names_vec: Vec<String> = dependencies
-        .iter()
-        .map(|d| canonical_name(ecosystem, &d.name))
-        .collect();
-    let normalized_to_raw: HashMap<String, String> = dependencies
-        .iter()
-        .map(|d| (canonical_name(ecosystem, &d.name), d.name.clone()))
-        .collect();
-    let transitives: Vec<LockfilePackage> = lockfile_graph
-        .transitives_only(&direct_names_vec)
+    let transitives: Vec<LockfilePackage> = direct_roots
+        .transitives(&lockfile_graph)
         .into_iter()
         .cloned()
         .collect();
@@ -435,10 +430,13 @@ async fn run_scan(
     // Build queries: direct first, then transitive. Remember the split index.
     let mut queries: Vec<VulnerabilityQuery> = dependencies
         .iter()
-        .map(|dep| VulnerabilityQuery {
-            ecosystem,
-            package_name: dep.name.clone(),
-            version: normalize_version_for_osv(dep.effective_version()),
+        .map(|dep| {
+            let key = VulnCacheKey::for_dependency(ecosystem, dep);
+            VulnerabilityQuery {
+                ecosystem,
+                package_name: key.package_name,
+                version: key.version,
+            }
         })
         .collect();
     let direct_count = queries.len();
@@ -512,7 +510,7 @@ async fn run_scan(
         }
     }
 
-    let inverse = lockfile_graph.reverse_index(&direct_names_vec);
+    let inverse = lockfile_graph.reverse_index(&direct_roots.names);
 
     for (pkg, result) in transitives.iter().zip(transitive_results.iter()) {
         for vuln in &result.vulnerabilities {
@@ -531,7 +529,8 @@ async fn run_scan(
             let via_direct = inverse
                 .get(&pkg.name)
                 .and_then(|parents| parents.first())
-                .and_then(|n| normalized_to_raw.get(n))
+                .and_then(|n| direct_roots.manifest_names.get(n))
+                .and_then(|raw_names| raw_names.first())
                 .cloned()
                 .unwrap_or_else(|| "(unknown)".to_string());
 

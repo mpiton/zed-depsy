@@ -82,7 +82,7 @@ dependencies = [
 
 [[package]]
 name = "depsy-zed"
-version = "2.1.1"
+version = "2.1.2"
 dependencies = [
  "sha2",
  "zed_extension_api",

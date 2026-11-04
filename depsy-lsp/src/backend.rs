@@ -52,7 +52,8 @@ use tower_lsp::{Client, LanguageServer};
 
 use crate::cache::{HybridCache, ReadCache};
 use crate::config::{
-    Config, DEFAULT_MAVEN_REGISTRY_URL, DEFAULT_NPM_REGISTRY_URL, RegistriesConfig,
+    Config, DEFAULT_MAVEN_REGISTRY_URL, DEFAULT_NPM_REGISTRY_URL, DeprecatedConfig,
+    RegistriesConfig,
 };
 use crate::document::DocumentState;
 use crate::file_types::{FileType, is_pnpm_workspace};
@@ -71,7 +72,7 @@ use crate::parsers::python::PythonParser;
 use crate::parsers::ruby::RubyParser;
 use crate::providers::code_actions::create_code_actions;
 use crate::providers::completion::{fmt_release_age, get_completions};
-use crate::providers::diagnostics::{VulnSources, create_diagnostics};
+use crate::providers::diagnostics::{PackageFilters, VulnSources, create_diagnostics};
 use crate::providers::document_links::create_document_links;
 use crate::providers::inlay_hints::create_inlay_hint;
 use crate::registries::cargo_sparse::CargoSparseRegistry;
@@ -562,7 +563,7 @@ impl ProcessingContext {
         }) else {
             return;
         };
-        let (diagnostics_enabled, severity_filter, ignored_packages) = self
+        let (diagnostics_enabled, severity_filter, ignored_packages, deprecated) = self
             .config
             .read()
             .map(|c| {
@@ -572,9 +573,10 @@ impl ProcessingContext {
                         .show_diagnostics
                         .then(|| c.security.min_severity_level()),
                     c.ignore.clone(),
+                    c.deprecated.clone(),
                 )
             })
-            .unwrap_or((true, None, Vec::new()));
+            .unwrap_or((true, None, Vec::new(), DeprecatedConfig::default()));
         if !diagnostics_enabled {
             return;
         }
@@ -600,7 +602,10 @@ impl ProcessingContext {
                 osv_results: &self.vuln_cache,
                 transitive: &transitive,
             },
-            &ignored_packages,
+            PackageFilters {
+                ignored: &ignored_packages,
+                deprecated: deprecated.diagnostics(),
+            },
         )
         .await;
 
@@ -1868,14 +1873,18 @@ impl LanguageServer for DepsyBackend {
 
     async fn inlay_hint(&self, params: InlayHintParams) -> Result<Option<Vec<InlayHint>>> {
         // Read config values and drop the guard immediately so it doesn't cross await points.
-        let (show_up_to_date, ignored_packages) = {
+        let (show_up_to_date, ignored_packages, deprecated) = {
             let Ok(config) = self.config.read() else {
                 return Ok(Some(vec![]));
             };
             if !config.inlay_hints.enabled {
                 return Ok(Some(vec![]));
             }
-            (config.inlay_hints.show_up_to_date, config.ignore.clone())
+            (
+                config.inlay_hints.show_up_to_date,
+                config.ignore.clone(),
+                config.deprecated.clone(),
+            )
         };
 
         let uri = &params.text_document.uri;
@@ -1937,7 +1946,8 @@ impl LanguageServer for DepsyBackend {
             .into_iter()
             .zip(version_infos)
             .filter_map(|(dep, version_info)| {
-                let hint = create_inlay_hint(&dep, version_info.as_ref(), file_type);
+                let hint =
+                    create_inlay_hint(&dep, version_info.as_ref(), file_type, deprecated.hints());
 
                 // Optionally filter out up-to-date hints
                 if !show_up_to_date {
@@ -2231,6 +2241,7 @@ mod tests {
             severity: VulnerabilitySeverity::Critical,
             description: "boom".to_string(),
             url: None,
+            unmaintained: false,
         }];
 
         let (summary, entries) = build_vulnerability_report([
@@ -2253,12 +2264,14 @@ mod tests {
             severity: VulnerabilitySeverity::Critical,
             description: "one".to_string(),
             url: None,
+            unmaintained: false,
         };
         let low = Vulnerability {
             id: "RUSTSEC-0000-0002".to_string(),
             severity: VulnerabilitySeverity::Low,
             description: "two".to_string(),
             url: None,
+            unmaintained: false,
         };
 
         let (summary, entries) = build_vulnerability_report([
@@ -2359,6 +2372,7 @@ mod tests {
                 severity: VulnerabilitySeverity::High,
                 description: "desc".to_string(),
                 url: None,
+                unmaintained: false,
             },
         }];
         let content = format_hover_content(&dep, FileType::Npm, &info, &transitive_vulns);
@@ -2521,7 +2535,7 @@ mod tests {
                 osv_results,
                 transitive: &hashbrown::HashMap::new(),
             },
-            &[],
+            PackageFilters::default(),
         )
         .await
         .iter()
@@ -2805,6 +2819,7 @@ mod tests {
                     severity: VulnerabilitySeverity::High,
                     description: String::new(),
                     url: None,
+                    unmaintained: false,
                 }],
                 deprecated: false,
             },

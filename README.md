@@ -254,6 +254,11 @@ Configure Depsy in your Zed `settings.json`:
           "show_diagnostics": true,
           "min_severity": "low"
         },
+        "deprecated": {
+          "show_in_hints": true,
+          "show_diagnostics": true,
+          "allow": ["fxhash", "@types/*"]
+        },
         "ignore": ["internal-*", "test-pkg"]
       }
     }
@@ -276,6 +281,11 @@ Configure Depsy in your Zed `settings.json`:
 | `security.show_diagnostics` | bool | `true` | Show vulnerability diagnostics |
 | `security.min_severity` | string | `"low"` | Minimum severity to report (low/medium/high/critical) |
 | `security.cache_ttl_secs` | number | `21600` | Vulnerability cache TTL in seconds (6 hours) |
+| `deprecated.show_in_hints` | bool | `true` | Show the deprecated marker in inlay hints |
+| `deprecated.show_diagnostics` | bool | `true` | Show the deprecated diagnostic |
+| `deprecated.allow` | string[] | `[]` | Package names/patterns whose deprecation is hidden on both surfaces; still checked for versions and other vulnerabilities |
+
+A hidden deprecation also drops the RustSec "unmaintained" advisory that reported it, so the hint and diagnostic fall back to the remaining vulnerabilities, then to the outdated or up-to-date status. Yanked versions are still flagged.
 
 ### Private Registries
 

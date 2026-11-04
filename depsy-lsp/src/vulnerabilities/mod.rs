@@ -307,6 +307,7 @@ mod tests {
             severity: VulnerabilitySeverity::High,
             description: String::new(),
             url: None,
+            unmaintained: false,
         }
     }
 

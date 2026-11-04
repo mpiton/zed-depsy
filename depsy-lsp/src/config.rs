@@ -34,6 +34,8 @@ pub struct Config {
     pub advisory_cache: AdvisoryCacheConfig,
     /// Security/vulnerability configuration
     pub security: SecurityConfig,
+    /// Deprecated package warnings configuration (issue #431)
+    pub deprecated: DeprecatedConfig,
     /// Packages to ignore (glob patterns)
     #[serde(default)]
     pub ignore: Vec<String>,
@@ -153,6 +155,76 @@ pub struct SecurityConfig {
     pub min_severity: String,
     /// Vulnerability cache TTL in seconds (default: 6 hours)
     pub cache_ttl_secs: u64,
+}
+
+/// Deprecated package warnings configuration
+///
+/// Deprecation comes from the registry, or for crates from a RustSec "unmaintained" advisory.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct DeprecatedConfig {
+    /// Show deprecated packages in inlay hints
+    pub show_in_hints: bool,
+    /// Show deprecated packages as diagnostics
+    pub show_diagnostics: bool,
+    /// Packages whose deprecation is accepted (same patterns as `ignore`)
+    pub allow: Vec<String>,
+}
+
+impl Default for DeprecatedConfig {
+    fn default() -> Self {
+        Self {
+            show_in_hints: true,
+            show_diagnostics: true,
+            allow: Vec::new(),
+        }
+    }
+}
+
+impl DeprecatedConfig {
+    /// Deprecation rule applied to inlay hints
+    pub fn hints(&self) -> DeprecatedFilter<'_> {
+        DeprecatedFilter {
+            show: self.show_in_hints,
+            allow: &self.allow,
+        }
+    }
+
+    /// Deprecation rule applied to diagnostics
+    pub fn diagnostics(&self) -> DeprecatedFilter<'_> {
+        DeprecatedFilter {
+            show: self.show_diagnostics,
+            allow: &self.allow,
+        }
+    }
+}
+
+/// Deprecation rule for one surface, inlay hints or diagnostics
+#[derive(Debug, Clone, Copy)]
+pub struct DeprecatedFilter<'a> {
+    show: bool,
+    allow: &'a [String],
+}
+
+impl Default for DeprecatedFilter<'_> {
+    fn default() -> Self {
+        Self {
+            show: true,
+            allow: &[],
+        }
+    }
+}
+
+impl DeprecatedFilter<'_> {
+    /// Returns true if the deprecation of a package must not be shown
+    ///
+    /// `declared` is the name written in the manifest, `package` the registry package it resolves
+    /// to. They differ for an npm alias, and either one can be allowed.
+    pub fn hides(&self, declared: &str, package: &str) -> bool {
+        !self.show
+            || is_package_ignored(declared, self.allow)
+            || is_package_ignored(package, self.allow)
+    }
 }
 
 /// Authentication configuration for a registry.
@@ -395,6 +467,30 @@ mod tests {
         assert!(!config.diagnostics.enabled);
         assert_eq!(config.cache.ttl_secs, 7200);
         assert_eq!(config.ignore.len(), 2);
+    }
+
+    #[test]
+    fn deprecated_warnings_are_shown_by_default() {
+        let config = Config::from_init_options(Some(json!({})));
+        assert!(config.deprecated.show_in_hints);
+        assert!(config.deprecated.show_diagnostics);
+        assert!(config.deprecated.allow.is_empty());
+    }
+
+    #[test]
+    fn deprecated_settings_are_read() {
+        let json = json!({
+            "deprecated": {
+                "show_in_hints": false,
+                "show_diagnostics": false,
+                "allow": ["fxhash", "@old/*"]
+            }
+        });
+
+        let config = Config::from_init_options(Some(json));
+        assert!(!config.deprecated.show_in_hints);
+        assert!(!config.deprecated.show_diagnostics);
+        assert_eq!(config.deprecated.allow, ["fxhash", "@old/*"]);
     }
 
     #[test]

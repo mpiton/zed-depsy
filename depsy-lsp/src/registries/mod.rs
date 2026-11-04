@@ -171,6 +171,18 @@ pub struct Vulnerability {
     pub description: String,
     /// URL for more information
     pub url: Option<String>,
+    /// True for a RustSec "unmaintained" advisory, which reports deprecation, not a flaw
+    #[serde(default)]
+    pub unmaintained: bool,
+}
+
+impl Vulnerability {
+    /// Returns true if this advisory goes away with its package's hidden deprecation
+    ///
+    /// An unmaintained advisory only reports the deprecation, so hiding one hides the other.
+    pub fn hidden_with_deprecation(&self, deprecation_hidden: bool) -> bool {
+        deprecation_hidden && self.unmaintained
+    }
 }
 
 /// Vulnerability severity levels
@@ -376,6 +388,7 @@ mod transitive_vuln_tests {
                 severity: VulnerabilitySeverity::High,
                 description: "desc".to_string(),
                 url: None,
+                unmaintained: false,
             },
         };
         let json = serde_json::to_string(&v).unwrap();

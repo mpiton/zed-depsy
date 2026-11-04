@@ -24,7 +24,7 @@ const MAX_ADVISORY_ID_LEN: usize = 64;
 
 /// Whitelist sanity check for advisory IDs returned by OSV.
 ///
-/// `check_rustsec_unmaintained` interpolates the ID directly into a URL and
+/// `unmaintained_rustsec_ids` interpolates the ID directly into a URL and
 /// uses it as a cache key, so we constrain the alphabet up-front.
 /// Accepts only ASCII alphanumerics and the `-` separator.
 fn is_valid_advisory_id(id: &str) -> bool {
@@ -214,6 +214,7 @@ impl OsvClient {
             severity,
             description,
             url,
+            unmaintained: false,
         }
     }
 }
@@ -319,37 +320,44 @@ impl OsvClient {
         let mut results = Vec::new();
 
         for r in &batch_response.results {
-            let vulnerabilities = r
-                .vulns
-                .as_ref()
-                .unwrap_or(&vec![])
-                .iter()
-                .map(Self::convert_vulnerability)
-                .collect();
+            let osv_vulns = r.vulns.as_deref().unwrap_or_default();
 
-            let rustsec_ids: Vec<String> = r
-                .vulns
-                .as_ref()
-                .unwrap_or(&vec![])
+            let rustsec_ids: Vec<String> = osv_vulns
                 .iter()
                 .filter(|v| v.id.starts_with("RUSTSEC-"))
                 .map(|v| v.id.clone())
                 .collect();
 
-            let has_unmaintained = self.check_rustsec_unmaintained(&rustsec_ids).await;
+            let unmaintained_ids = self.unmaintained_rustsec_ids(&rustsec_ids).await;
+
+            // Matched on the OSV id: the converted id may be a CVE alias.
+            let vulnerabilities = osv_vulns
+                .iter()
+                .map(|osv| Vulnerability {
+                    unmaintained: unmaintained_ids.contains(&osv.id),
+                    ..Self::convert_vulnerability(osv)
+                })
+                .collect();
 
             results.push(QueryResult {
                 vulnerabilities,
-                deprecated: has_unmaintained,
+                deprecated: !unmaintained_ids.is_empty(),
             });
         }
 
         Ok(results)
     }
 
-    pub(crate) async fn check_rustsec_unmaintained(&self, ids: &[String]) -> bool {
+    /// Test shorthand: true when any advisory in `ids` marks its package unmaintained.
+    #[cfg(test)]
+    async fn check_rustsec_unmaintained(&self, ids: &[String]) -> bool {
+        !self.unmaintained_rustsec_ids(ids).await.is_empty()
+    }
+
+    /// Returns the RUSTSEC advisories among `ids` that mark their package unmaintained.
+    async fn unmaintained_rustsec_ids(&self, ids: &[String]) -> Vec<String> {
         if ids.is_empty() {
-            return false;
+            return Vec::new();
         }
 
         tracing::debug!(
@@ -359,7 +367,7 @@ impl OsvClient {
 
         let positive_cache = Arc::clone(&self.advisory_cache);
         let negative_cache = Arc::clone(&self.negative_cache);
-        let results: Vec<bool> = stream::iter(ids.iter().cloned())
+        let results: Vec<Option<String>> = stream::iter(ids.iter().cloned())
             .map(|id| {
                 let url = format!("{}/vulns/{id}", self.base_url);
                 let client = Arc::clone(&self.client);
@@ -369,7 +377,7 @@ impl OsvClient {
                 async move {
                     if !is_valid_advisory_id(&id) {
                         tracing::warn!("Skipping advisory with unexpected ID format: {:?}", id);
-                        return false;
+                        return None;
                     }
 
                     // Positive cache wins over negative for `Found` entries.
@@ -386,19 +394,19 @@ impl OsvClient {
                         && let crate::cache::advisory::AdvisoryKind::Found { unmaintained, .. } =
                             cached.kind
                     {
-                        return unmaintained;
+                        return unmaintained.then_some(id);
                     }
                     if let Some(cached) = negative_cache.get(&id).await
                         && matches!(cached.kind, crate::cache::advisory::AdvisoryKind::NotFound)
                     {
-                        return false;
+                        return None;
                     }
 
                     let response = match client.get(&url).send().await {
                         Ok(r) => r,
                         Err(e) => {
                             tracing::warn!("Failed to fetch advisory {}: {}", id, e);
-                            return false;
+                            return None;
                         }
                     };
 
@@ -412,7 +420,7 @@ impl OsvClient {
                                 fetched_at: std::time::SystemTime::now(),
                             })
                             .await;
-                        return false;
+                        return None;
                     }
 
                     if !response.status().is_success() {
@@ -421,14 +429,14 @@ impl OsvClient {
                             id,
                             response.status()
                         );
-                        return false;
+                        return None;
                     }
 
                     let details: Option<OsvVulnerabilityDetails> = match response.json().await {
                         Ok(d) => d,
                         Err(e) => {
                             tracing::warn!("Failed to parse advisory {}: {}", id, e);
-                            return false;
+                            return None;
                         }
                     };
 
@@ -466,14 +474,14 @@ impl OsvClient {
                         tracing::info!("Advisory {} indicates unmaintained package", id,);
                     }
 
-                    is_unmaintained
+                    is_unmaintained.then_some(id)
                 }
             })
             .buffer_unordered(RUSTSEC_ADVISORY_LOOKUP_CONCURRENCY)
             .collect()
             .await;
 
-        results.into_iter().any(std::convert::identity)
+        results.into_iter().flatten().collect()
     }
 }
 
@@ -853,6 +861,52 @@ mod tests {
             .map(|query| format!("OSV-{}", query.package_name))
             .collect();
         assert_eq!(ids, expected);
+    }
+
+    #[tokio::test]
+    async fn query_batch_marks_only_unmaintained_advisories() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/querybatch"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [{ "vulns": [
+                    { "id": "RUSTSEC-2025-0057" },
+                    { "id": "RUSTSEC-2021-0001", "aliases": ["CVE-2021-0001"] }
+                ] }]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/vulns/RUSTSEC-2025-0057"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(sample_response_body()))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/vulns/RUSTSEC-2021-0001"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "summary": "Out-of-bounds write"
+            })))
+            .mount(&server)
+            .await;
+        let client = OsvClient::with_endpoint(server.uri()).expect("with_endpoint builds in test");
+        let query = VulnerabilityQuery {
+            ecosystem: Ecosystem::CratesIo,
+            package_name: "fxhash".to_string(),
+            version: "0.2.1".to_string(),
+        };
+
+        let results = client.query_batch(&[query]).await.expect("batch succeeds");
+
+        assert!(results[0].deprecated);
+        let marks: Vec<(&str, bool)> = results[0]
+            .vulnerabilities
+            .iter()
+            .map(|vulnerability| (vulnerability.id.as_str(), vulnerability.unmaintained))
+            .collect();
+        assert_eq!(
+            marks,
+            vec![("RUSTSEC-2025-0057", true), ("CVE-2021-0001", false)]
+        );
     }
 
     #[tokio::test]

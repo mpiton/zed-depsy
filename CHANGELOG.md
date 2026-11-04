@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- New `deprecated` settings section to quiet deprecation warnings
+  ([#431](https://github.com/mpiton/zed-depsy/issues/431)).
+  `show_in_hints` and `show_diagnostics` turn the marker off per surface, and
+  `allow` takes package names or globs whose deprecation is hidden everywhere
+  while version and vulnerability checks keep running. Hiding a deprecation
+  also drops the RustSec "unmaintained" advisory behind it.
+
 ## [2.1.2] - 2026-11-03
 
 ### Security

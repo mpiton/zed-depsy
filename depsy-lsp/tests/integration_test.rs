@@ -1,6 +1,7 @@
 //! Integration tests for depsy-lsp
 
 use depsy_lsp::cache::{MemoryCache, ReadCache, WriteCache};
+use depsy_lsp::config::DeprecatedFilter;
 use depsy_lsp::file_types::FileType;
 use depsy_lsp::parsers::Parser;
 use depsy_lsp::parsers::cargo::CargoParser;
@@ -195,7 +196,12 @@ fn test_inlay_hint_generation() {
         ..Default::default()
     };
 
-    let hint = create_inlay_hint(&dep_up_to_date, Some(&info_up_to_date), FileType::Cargo);
+    let hint = create_inlay_hint(
+        &dep_up_to_date,
+        Some(&info_up_to_date),
+        FileType::Cargo,
+        DeprecatedFilter::default(),
+    );
     match hint.label {
         tower_lsp::lsp_types::InlayHintLabel::String(s) => {
             assert!(s.contains("✓"), "Expected checkmark for up-to-date dep");
@@ -230,7 +236,12 @@ fn test_inlay_hint_generation() {
         ..Default::default()
     };
 
-    let hint = create_inlay_hint(&dep_outdated, Some(&info_outdated), FileType::Cargo);
+    let hint = create_inlay_hint(
+        &dep_outdated,
+        Some(&info_outdated),
+        FileType::Cargo,
+        DeprecatedFilter::default(),
+    );
     match hint.label {
         tower_lsp::lsp_types::InlayHintLabel::String(s) => {
             assert!(s.contains("->"), "Expected arrow for outdated dep");
@@ -240,7 +251,12 @@ fn test_inlay_hint_generation() {
     }
 
     // Unknown version (no info) - shows ? Unknown with troubleshooting tooltip
-    let hint = create_inlay_hint(&dep_outdated, None, FileType::Cargo);
+    let hint = create_inlay_hint(
+        &dep_outdated,
+        None,
+        FileType::Cargo,
+        DeprecatedFilter::default(),
+    );
     match hint.label {
         tower_lsp::lsp_types::InlayHintLabel::String(s) => {
             assert!(

@@ -11,7 +11,8 @@
 //!   higher-severity diagnostics below, picked in this priority order:
 //!
 //!   1. **Yanked version** — warning with a link to the registry page.
-//!   2. **Deprecated package** — warning with optional homepage / repository links.
+//!   2. **Deprecated package** — warning with optional homepage / repository links,
+//!      unless [`crate::config::DeprecatedConfig`] hides it for that package.
 //!   3. **Vulnerability summary** — error/warning/hint depending on max severity.
 //!
 //! Helper function
@@ -23,6 +24,7 @@ use core::fmt;
 use tower_lsp::lsp_types::*;
 
 use crate::cache::ReadCache;
+use crate::config::DeprecatedFilter;
 use crate::file_types::FileType;
 use crate::parsers::Dependency;
 use crate::providers::inlay_hints::{VersionStatus, compare_versions, is_local_dependency};
@@ -42,6 +44,15 @@ pub struct VulnSources<'a> {
     pub transitive: &'a hashbrown::HashMap<String, Vec<TransitiveVuln>>,
 }
 
+/// Per-package rules from the user configuration.
+#[derive(Clone, Copy, Default)]
+pub struct PackageFilters<'a> {
+    /// Package names (wildcards supported) that should be skipped.
+    pub ignored: &'a [String],
+    /// Packages whose deprecation is not reported.
+    pub deprecated: DeprecatedFilter<'a>,
+}
+
 /// Build LSP diagnostics for the given dependency list.
 ///
 /// For each non-ignored dependency the function performs a single cache lookup
@@ -59,7 +70,7 @@ pub struct VulnSources<'a> {
 /// - `file_type` — selects the OSV ecosystem used to look up `vulns.osv_results`,
 ///   and formats registry names in yanked-version messages.
 /// - `vulns` — direct and transitive vulnerability data, see [`VulnSources`].
-/// - `ignored` — package names (wildcards supported) that should be skipped.
+/// - `filters` — ignored packages and accepted deprecations, see [`PackageFilters`].
 ///
 /// # Returns
 ///
@@ -72,13 +83,13 @@ pub async fn create_diagnostics(
     min_severity: Option<VulnerabilitySeverity>,
     file_type: FileType,
     vulns: VulnSources<'_>,
-    ignored: &[String],
+    filters: PackageFilters<'_>,
 ) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
 
     for dep in dependencies {
         // Skip dependencies matching any `ignore` pattern (matches inlay_hints behavior).
-        if crate::config::is_package_ignored(&dep.name, ignored) {
+        if crate::config::is_package_ignored(&dep.name, filters.ignored) {
             continue;
         }
 
@@ -109,7 +120,14 @@ pub async fn create_diagnostics(
             diagnostics.push(diag);
         }
 
-        if let Some(version_info) = cached {
+        if let Some(mut version_info) = cached {
+            let package = npm_alias_package(file_type.to_ecosystem(), dep).unwrap_or(&dep.name);
+            if filters
+                .deprecated
+                .hides_dependency(dep, file_type.to_ecosystem())
+            {
+                version_info.hide_deprecation();
+            }
             // Add yanked version diagnostic (highest priority)
             if version_info.is_version_yanked(dep.effective_version()) {
                 tracing::debug!(
@@ -125,7 +143,6 @@ pub async fn create_diagnostics(
                     dep.name,
                     dep.version
                 );
-                let package = npm_alias_package(file_type.to_ecosystem(), dep).unwrap_or(&dep.name);
                 diagnostics.push(create_deprecation_diagnostic(dep, package, &version_info));
             } else {
                 // Add vulnerability diagnostic (summary) only if not deprecated or yanked.
@@ -147,6 +164,10 @@ pub async fn create_diagnostics(
                     .get(&dep.name)
                     .map(|v| {
                         v.iter()
+                            .filter(|t| {
+                                !(t.vulnerability.unmaintained
+                                    && filters.deprecated.hides(&t.package_name))
+                            })
                             .filter(|t| {
                                 min_severity
                                     .as_ref()
@@ -431,6 +452,7 @@ fn create_yanked_diagnostic(
 ///         severity: VulnerabilitySeverity::High,
 ///         description: "desc".to_string(),
 ///         url: None,
+///         unmaintained: false,
 ///     },
 /// }];
 /// let refs: Vec<&_> = tv.iter().collect();
@@ -568,6 +590,7 @@ fn create_vulnerability_summary_diagnostic(
 mod tests {
     use super::*;
     use crate::cache::{MemoryCache, WriteCache};
+    use crate::config::DeprecatedConfig;
     use crate::file_types::FileType;
     use crate::parsers::Span;
     use crate::registries::VersionInfo;
@@ -607,6 +630,7 @@ mod tests {
                     severity: VulnerabilitySeverity::High,
                     description: "bar advisory".to_string(),
                     url: None,
+                    unmaintained: false,
                 }],
                 deprecated: false,
             },
@@ -623,7 +647,7 @@ mod tests {
                 osv_results: &osv_results,
                 transitive: &transitive,
             },
-            &[],
+            PackageFilters::default(),
         )
         .await;
 
@@ -657,7 +681,7 @@ mod tests {
                 osv_results: &osv_results,
                 transitive: &transitive,
             },
-            &[],
+            PackageFilters::default(),
         )
         .await;
 
@@ -712,7 +736,7 @@ mod tests {
                 osv_results: &VulnerabilityCache::with_ttl(3600),
                 transitive: &hashbrown::HashMap::new(),
             },
-            &[],
+            PackageFilters::default(),
         )
         .await;
 
@@ -745,7 +769,7 @@ mod tests {
                 osv_results: &VulnerabilityCache::with_ttl(3600),
                 transitive: &hashbrown::HashMap::new(),
             },
-            &[],
+            PackageFilters::default(),
         )
         .await;
 
@@ -766,7 +790,7 @@ mod tests {
                 osv_results: &VulnerabilityCache::with_ttl(3600),
                 transitive: &hashbrown::HashMap::new(),
             },
-            &[],
+            PackageFilters::default(),
         )
         .await;
 
@@ -819,7 +843,7 @@ mod tests {
                 osv_results: &VulnerabilityCache::with_ttl(3600),
                 transitive: &hashbrown::HashMap::new(),
             },
-            &[],
+            PackageFilters::default(),
         )
         .await;
 
@@ -870,7 +894,7 @@ mod tests {
                 osv_results: &VulnerabilityCache::with_ttl(3600),
                 transitive: &hashbrown::HashMap::new(),
             },
-            &[],
+            PackageFilters::default(),
         )
         .await;
 
@@ -911,6 +935,7 @@ mod tests {
                 severity: VulnerabilitySeverity::High,
                 description: "Test vulnerability".to_string(),
                 url: None,
+                unmaintained: false,
             }],
         );
         let diagnostics = create_diagnostics(
@@ -923,7 +948,7 @@ mod tests {
                 osv_results: &osv_results,
                 transitive: &hashbrown::HashMap::new(),
             },
-            &[],
+            PackageFilters::default(),
         )
         .await;
 
@@ -986,7 +1011,7 @@ mod tests {
                 osv_results: &VulnerabilityCache::with_ttl(3600),
                 transitive: &hashbrown::HashMap::new(),
             },
-            &[],
+            PackageFilters::default(),
         )
         .await;
 
@@ -1033,7 +1058,7 @@ mod tests {
                 osv_results: &VulnerabilityCache::with_ttl(3600),
                 transitive: &hashbrown::HashMap::new(),
             },
-            &[],
+            PackageFilters::default(),
         )
         .await;
 
@@ -1079,7 +1104,7 @@ mod tests {
                 osv_results: &VulnerabilityCache::with_ttl(3600),
                 transitive: &hashbrown::HashMap::new(),
             },
-            &[],
+            PackageFilters::default(),
         )
         .await;
 
@@ -1139,6 +1164,7 @@ mod tests {
                 severity: VulnerabilitySeverity::High,
                 description: "Test vulnerability".to_string(),
                 url: None,
+                unmaintained: false,
             }],
         );
         let diagnostics = create_diagnostics(
@@ -1151,7 +1177,7 @@ mod tests {
                 osv_results: &osv_results,
                 transitive: &hashbrown::HashMap::new(),
             },
-            &[],
+            PackageFilters::default(),
         )
         .await;
 
@@ -1204,7 +1230,7 @@ mod tests {
                 osv_results: &VulnerabilityCache::with_ttl(3600),
                 transitive: &hashbrown::HashMap::new(),
             },
-            &[],
+            PackageFilters::default(),
         )
         .await;
 
@@ -1235,12 +1261,14 @@ mod tests {
                     severity: VulnerabilitySeverity::High,
                     description: "High severity vulnerability".to_string(),
                     url: Some("https://osv.dev/CVE-2024-1234".to_string()),
+                    unmaintained: false,
                 },
                 Vulnerability {
                     id: "CVE-2024-5678".to_string(),
                     severity: VulnerabilitySeverity::Medium,
                     description: "Medium severity vulnerability".to_string(),
                     url: None,
+                    unmaintained: false,
                 },
             ],
         );
@@ -1254,7 +1282,7 @@ mod tests {
                 osv_results: &osv_results,
                 transitive: &hashbrown::HashMap::new(),
             },
-            &[],
+            PackageFilters::default(),
         )
         .await;
 
@@ -1295,12 +1323,14 @@ mod tests {
                     severity: VulnerabilitySeverity::Low,
                     description: "Low severity".to_string(),
                     url: None,
+                    unmaintained: false,
                 },
                 Vulnerability {
                     id: "CVE-2024-HIGH".to_string(),
                     severity: VulnerabilitySeverity::High,
                     description: "High severity".to_string(),
                     url: None,
+                    unmaintained: false,
                 },
             ],
         );
@@ -1314,7 +1344,7 @@ mod tests {
                 osv_results: &osv_results,
                 transitive: &hashbrown::HashMap::new(),
             },
-            &[],
+            PackageFilters::default(),
         )
         .await;
 
@@ -1357,7 +1387,7 @@ mod tests {
                 osv_results: &VulnerabilityCache::with_ttl(3600),
                 transitive: &hashbrown::HashMap::new(),
             },
-            &[],
+            PackageFilters::default(),
         )
         .await;
 
@@ -1402,7 +1432,7 @@ mod tests {
                 osv_results: &VulnerabilityCache::with_ttl(3600),
                 transitive: &hashbrown::HashMap::new(),
             },
-            &[],
+            PackageFilters::default(),
         )
         .await;
 
@@ -1431,6 +1461,7 @@ mod tests {
                 severity: crate::registries::VulnerabilitySeverity::High,
                 description: "x".to_string(),
                 url: None,
+                unmaintained: false,
             },
         }];
         let refs: Vec<&_> = tvs.iter().collect();
@@ -1450,6 +1481,7 @@ mod tests {
                 severity: crate::registries::VulnerabilitySeverity::Low,
                 description: "x".to_string(),
                 url: None,
+                unmaintained: false,
             },
         };
         let tvs = [
@@ -1491,6 +1523,7 @@ mod tests {
                 severity: VulnerabilitySeverity::Low,
                 description: "Low severity".to_string(),
                 url: None,
+                unmaintained: false,
             }],
         );
         let diagnostics = create_diagnostics(
@@ -1503,7 +1536,7 @@ mod tests {
                 osv_results: &osv_results,
                 transitive: &hashbrown::HashMap::new(),
             },
-            &[],
+            PackageFilters::default(),
         )
         .await;
 
@@ -1541,6 +1574,7 @@ mod tests {
                 severity: VulnerabilitySeverity::Medium,
                 description: "Medium severity".to_string(),
                 url: None,
+                unmaintained: false,
             }],
         );
         let diagnostics = create_diagnostics(
@@ -1553,7 +1587,7 @@ mod tests {
                 osv_results: &osv_results,
                 transitive: &hashbrown::HashMap::new(),
             },
-            &[],
+            PackageFilters::default(),
         )
         .await;
 
@@ -1591,6 +1625,7 @@ mod tests {
                 severity: VulnerabilitySeverity::Critical,
                 description: "Critical severity".to_string(),
                 url: None,
+                unmaintained: false,
             }],
         );
         let diagnostics = create_diagnostics(
@@ -1603,7 +1638,7 @@ mod tests {
                 osv_results: &osv_results,
                 transitive: &hashbrown::HashMap::new(),
             },
-            &[],
+            PackageFilters::default(),
         )
         .await;
 
@@ -1645,7 +1680,7 @@ mod tests {
                 osv_results: &VulnerabilityCache::with_ttl(3600),
                 transitive: &hashbrown::HashMap::new(),
             },
-            &[],
+            PackageFilters::default(),
         )
         .await;
 
@@ -1702,6 +1737,7 @@ mod tests {
                     severity: VulnerabilitySeverity::High,
                     description: "desc".into(),
                     url: None,
+                    unmaintained: false,
                 },
             }],
         );
@@ -1716,7 +1752,7 @@ mod tests {
                 osv_results: &VulnerabilityCache::with_ttl(3600),
                 transitive: &doc_transitives,
             },
-            &[],
+            PackageFilters::default(),
         )
         .await;
 
@@ -1774,6 +1810,7 @@ mod tests {
                         severity: VulnerabilitySeverity::Low,
                         description: "low".into(),
                         url: None,
+                        unmaintained: false,
                     },
                 },
                 TransitiveVuln {
@@ -1784,6 +1821,7 @@ mod tests {
                         severity: VulnerabilitySeverity::High,
                         description: "high".into(),
                         url: None,
+                        unmaintained: false,
                     },
                 },
             ],
@@ -1799,7 +1837,7 @@ mod tests {
                 osv_results: &VulnerabilityCache::with_ttl(3600),
                 transitive: &doc_transitives,
             },
-            &[],
+            PackageFilters::default(),
         )
         .await;
 
@@ -1854,7 +1892,10 @@ mod tests {
                 osv_results: &VulnerabilityCache::with_ttl(3600),
                 transitive: &hashbrown::HashMap::new(),
             },
-            &ignored,
+            PackageFilters {
+                ignored: &ignored,
+                ..Default::default()
+            },
         )
         .await;
 
@@ -1889,7 +1930,10 @@ mod tests {
                 osv_results: &VulnerabilityCache::with_ttl(3600),
                 transitive: &hashbrown::HashMap::new(),
             },
-            &ignored,
+            PackageFilters {
+                ignored: &ignored,
+                ..Default::default()
+            },
         )
         .await;
 
@@ -1924,7 +1968,10 @@ mod tests {
                 osv_results: &VulnerabilityCache::with_ttl(3600),
                 transitive: &hashbrown::HashMap::new(),
             },
-            &ignored,
+            PackageFilters {
+                ignored: &ignored,
+                ..Default::default()
+            },
         )
         .await;
 
@@ -1932,6 +1979,272 @@ mod tests {
             diagnostics.len(),
             1,
             "non-ignored package should produce diagnostic"
+        );
+    }
+
+    /// Diagnostics for one deprecated crate `fxhash` with the given advisories
+    async fn deprecated_crate_diagnostics(
+        vulnerabilities: Vec<Vulnerability>,
+        deprecated: &DeprecatedConfig,
+    ) -> Vec<Diagnostic> {
+        let deps = vec![create_test_dependency("fxhash", "0.2.1", 5)];
+        let cache = MemoryCache::new();
+        cache
+            .insert(
+                "test:fxhash".to_string(),
+                VersionInfo {
+                    deprecated: true,
+                    ..Default::default()
+                },
+            )
+            .await;
+
+        create_diagnostics(
+            &deps,
+            &cache,
+            |name| format!("test:{name}"),
+            None,
+            FileType::Cargo,
+            VulnSources {
+                osv_results: &osv_results_for(&deps, vulnerabilities),
+                transitive: &hashbrown::HashMap::new(),
+            },
+            PackageFilters {
+                ignored: &[],
+                deprecated: deprecated.diagnostics(),
+            },
+        )
+        .await
+    }
+
+    fn high_vulnerability() -> Vulnerability {
+        Vulnerability {
+            id: "CVE-2026-0001".to_string(),
+            severity: VulnerabilitySeverity::High,
+            description: "remote code execution".to_string(),
+            url: None,
+            unmaintained: false,
+        }
+    }
+
+    fn has_code(diagnostics: &[Diagnostic], code: &str) -> bool {
+        diagnostics
+            .iter()
+            .any(|d| d.code == Some(NumberOrString::String(code.to_string())))
+    }
+
+    #[tokio::test]
+    async fn allowed_deprecated_package_shows_its_vulnerabilities_instead() {
+        let deprecated = DeprecatedConfig {
+            allow: vec!["fx*".to_string()],
+            ..Default::default()
+        };
+
+        let diagnostics =
+            deprecated_crate_diagnostics(vec![high_vulnerability()], &deprecated).await;
+
+        assert!(
+            !has_code(&diagnostics, "deprecated-package"),
+            "{diagnostics:?}"
+        );
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        assert_eq!(diagnostics[0].severity, Some(DiagnosticSeverity::ERROR));
+    }
+
+    #[tokio::test]
+    async fn deprecation_diagnostics_can_be_turned_off_for_every_package() {
+        let deprecated = DeprecatedConfig {
+            show_diagnostics: false,
+            ..Default::default()
+        };
+
+        let diagnostics = deprecated_crate_diagnostics(Vec::new(), &deprecated).await;
+
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    }
+
+    #[tokio::test]
+    async fn hiding_deprecation_in_hints_keeps_the_diagnostic() {
+        let deprecated = DeprecatedConfig {
+            show_in_hints: false,
+            ..Default::default()
+        };
+
+        let diagnostics = deprecated_crate_diagnostics(Vec::new(), &deprecated).await;
+
+        assert!(
+            has_code(&diagnostics, "deprecated-package"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn npm_alias_deprecation_is_allowed_by_declared_or_real_name() {
+        let alias = Dependency {
+            resolved_version: Some("1.2.0".to_string()),
+            ..create_test_dependency("foo", "npm:bar@^1.0.0", 0)
+        };
+        let osv_results = VulnerabilityCache::with_ttl(3600);
+        osv_results.insert(
+            VulnCacheKey::for_dependency(FileType::Npm.to_ecosystem(), &alias),
+            QueryResult {
+                vulnerabilities: Vec::new(),
+                deprecated: true,
+            },
+        );
+        let transitive = hashbrown::HashMap::new();
+
+        for name in ["foo", "bar"] {
+            let deprecated = DeprecatedConfig {
+                allow: vec![name.to_string()],
+                ..Default::default()
+            };
+            let diagnostics = create_diagnostics(
+                std::slice::from_ref(&alias),
+                &MemoryCache::new(),
+                |name| format!("npm:{name}"),
+                None,
+                FileType::Npm,
+                VulnSources {
+                    osv_results: &osv_results,
+                    transitive: &transitive,
+                },
+                PackageFilters {
+                    ignored: &[],
+                    deprecated: deprecated.diagnostics(),
+                },
+            )
+            .await;
+
+            assert!(diagnostics.is_empty(), "allow {name}: {diagnostics:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn yanked_version_is_reported_even_when_its_deprecation_is_allowed() {
+        let deprecated = DeprecatedConfig {
+            allow: vec!["fxhash".to_string()],
+            ..Default::default()
+        };
+        let deps = vec![create_test_dependency("fxhash", "0.2.1", 5)];
+        let cache = MemoryCache::new();
+        cache
+            .insert(
+                "test:fxhash".to_string(),
+                VersionInfo {
+                    deprecated: true,
+                    yanked_versions: vec!["0.2.1".to_string()],
+                    ..Default::default()
+                },
+            )
+            .await;
+
+        let diagnostics = create_diagnostics(
+            &deps,
+            &cache,
+            |name| format!("test:{name}"),
+            None,
+            FileType::Cargo,
+            VulnSources {
+                osv_results: &osv_results_for(&deps, Vec::new()),
+                transitive: &hashbrown::HashMap::new(),
+            },
+            PackageFilters {
+                ignored: &[],
+                deprecated: deprecated.diagnostics(),
+            },
+        )
+        .await;
+
+        assert!(has_code(&diagnostics, "yanked-version"));
+        assert!(!has_code(&diagnostics, "deprecated-package"));
+    }
+
+    #[tokio::test]
+    async fn allowed_deprecated_package_drops_its_unmaintained_advisory() {
+        let deprecated = DeprecatedConfig {
+            allow: vec!["fxhash".to_string()],
+            ..Default::default()
+        };
+        let unmaintained = Vulnerability {
+            id: "RUSTSEC-2025-0057".to_string(),
+            unmaintained: true,
+            ..high_vulnerability()
+        };
+
+        let diagnostics =
+            deprecated_crate_diagnostics(vec![unmaintained, high_vulnerability()], &deprecated)
+                .await;
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].message, "⚠ 1 vuln: CVE-2026-0001");
+    }
+
+    #[tokio::test]
+    async fn allowed_transitive_package_drops_its_unmaintained_advisory() {
+        let deps = vec![create_test_dependency("my-dep", "1.0.0", 5)];
+        let cache = MemoryCache::new();
+        cache
+            .insert(
+                "test:my-dep".to_string(),
+                VersionInfo {
+                    latest: Some("1.0.0".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await;
+        let transitive_vuln = |package: &str, vulnerability: Vulnerability| TransitiveVuln {
+            package_name: package.to_string(),
+            package_version: "0.2.1".to_string(),
+            vulnerability,
+        };
+        let mut transitive = hashbrown::HashMap::new();
+        transitive.insert(
+            "my-dep".to_string(),
+            vec![
+                transitive_vuln(
+                    "fxhash",
+                    Vulnerability {
+                        id: "RUSTSEC-2025-0057".to_string(),
+                        unmaintained: true,
+                        ..high_vulnerability()
+                    },
+                ),
+                transitive_vuln("fxhash", high_vulnerability()),
+            ],
+        );
+        let deprecated = DeprecatedConfig {
+            allow: vec!["fxhash".to_string()],
+            ..Default::default()
+        };
+
+        let diagnostics = create_diagnostics(
+            &deps,
+            &cache,
+            |name| format!("test:{name}"),
+            None,
+            FileType::Cargo,
+            VulnSources {
+                osv_results: &VulnerabilityCache::with_ttl(3600),
+                transitive: &transitive,
+            },
+            PackageFilters {
+                ignored: &[],
+                deprecated: deprecated.diagnostics(),
+            },
+        )
+        .await;
+
+        assert_eq!(diagnostics.len(), 1);
+        assert!(
+            diagnostics[0].message.contains("CVE-2026-0001"),
+            "{}",
+            diagnostics[0].message
+        );
+        assert!(
+            !diagnostics[0].message.contains("RUSTSEC-2025-0057"),
+            "{}",
+            diagnostics[0].message
         );
     }
 }

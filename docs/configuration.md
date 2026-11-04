@@ -161,6 +161,33 @@ The cache is stored in your system's cache directory. Increasing TTL reduces net
 }
 ```
 
+### Deprecated Packages
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `deprecated.show_in_hints` | boolean | `true` | Show the `⚠ Deprecated` marker in inlay hints |
+| `deprecated.show_diagnostics` | boolean | `true` | Show the deprecated diagnostic |
+| `deprecated.allow` | string[] | `[]` | Package names or glob patterns whose deprecation is hidden on both surfaces |
+
+Allowed packages are still checked for new versions and for vulnerabilities. Patterns match the declared name and, for an npm alias, the aliased package. Hiding a deprecation also drops the RustSec "unmaintained" advisory that reported it, for direct and transitive packages. Hover still lists that advisory, and the vulnerability report lists it for direct dependencies. Yanked versions are always flagged.
+
+**Example:**
+```json
+{
+  "lsp": {
+    "depsy": {
+      "initialization_options": {
+        "deprecated": {
+          "show_in_hints": true,
+          "show_diagnostics": false,
+          "allow": ["fxhash", "@types/*"]
+        }
+      }
+    }
+  }
+}
+```
+
 ### Ignore Patterns
 
 | Option | Type | Default | Description |

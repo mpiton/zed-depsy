@@ -58,6 +58,8 @@ old-package = "1.0.0"  ⚠ Deprecated
 
 The package maintainer has marked this package as deprecated. Consider finding an alternative.
 
+Set `deprecated.show_in_hints` to `false`, or list the package in `deprecated.allow`, to hide this marker. See [Configuration]({% link configuration.md %}).
+
 ### Yanked Version
 
 ```text

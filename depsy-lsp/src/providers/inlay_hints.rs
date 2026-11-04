@@ -21,6 +21,7 @@
 //! providers and tests can reuse them.
 
 use core::fmt::{self, Write};
+use std::borrow::Cow;
 
 use tower_lsp::lsp_types::{InlayHint, InlayHintKind, InlayHintLabel, Position};
 
@@ -94,19 +95,24 @@ pub fn create_inlay_hint(
         None => VersionStatus::Unknown,
     };
 
-    // A hidden deprecation also hides the unmaintained advisory that reported it.
-    let package = npm_alias_package(file_type.to_ecosystem(), dep).unwrap_or(&dep.name);
-    let hide_deprecation = deprecated.hides(&dep.name, package);
+    // Only a hidden deprecation pays for a copy of the cached info.
+    let shown: Option<Cow<'_, VersionInfo>> = version_info.map(|info| {
+        let has_deprecation =
+            info.deprecated || info.vulnerabilities.iter().any(|v| v.unmaintained);
+        if has_deprecation && deprecated.hides_dependency(dep, file_type.to_ecosystem()) {
+            let mut info = info.clone();
+            info.hide_deprecation();
+            Cow::Owned(info)
+        } else {
+            Cow::Borrowed(info)
+        }
+    });
+    let version_info = shown.as_deref();
     let vulnerabilities: Vec<&Vulnerability> = version_info
-        .map(|info| {
-            info.vulnerabilities
-                .iter()
-                .filter(|v| !v.hidden_with_deprecation(hide_deprecation))
-                .collect()
-        })
+        .map(|info| info.vulnerabilities.iter().collect())
         .unwrap_or_default();
 
-    let is_deprecated = version_info.is_some_and(|info| info.deprecated) && !hide_deprecation;
+    let is_deprecated = version_info.is_some_and(|info| info.deprecated);
 
     if is_deprecated {
         tracing::debug!("Package {} {} is deprecated", dep.name, dep.version);
@@ -1862,6 +1868,30 @@ mod tests {
             ));
             assert!(!label.contains("Deprecated"), "{allowed}: {label}");
         }
+    }
+
+    #[test]
+    fn yanked_hint_is_shown_even_when_the_deprecation_is_allowed() {
+        let deprecated = DeprecatedConfig {
+            allow: vec!["fxhash".to_string()],
+            ..Default::default()
+        };
+        let dep = make_test_dep("fxhash", "0.2.1");
+        let info = VersionInfo {
+            latest: Some("0.2.1".to_string()),
+            deprecated: true,
+            yanked_versions: vec!["0.2.1".to_string()],
+            ..Default::default()
+        };
+
+        let label = label_of(create_inlay_hint(
+            &dep,
+            Some(&info),
+            FileType::Cargo,
+            deprecated.hints(),
+        ));
+
+        assert!(label.contains("Yanked"), "got {label}");
     }
 
     #[test]

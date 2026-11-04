@@ -5,6 +5,9 @@ use std::time::Duration;
 use hashbrown::HashMap;
 use serde::{Deserialize, Deserializer};
 
+use crate::parsers::Dependency;
+use crate::vulnerabilities::{Ecosystem, npm_alias_package};
+
 /// Default cache TTL (1 hour)
 const DEFAULT_CACHE_TTL_SECS: u64 = 3600;
 
@@ -168,6 +171,8 @@ pub struct DeprecatedConfig {
     /// Show deprecated packages as diagnostics
     pub show_diagnostics: bool,
     /// Packages whose deprecation is accepted (same patterns as `ignore`)
+    ///
+    /// Each pattern is matched against the declared name or, for an npm alias, the target package.
     pub allow: Vec<String>,
 }
 
@@ -216,14 +221,16 @@ impl Default for DeprecatedFilter<'_> {
 }
 
 impl DeprecatedFilter<'_> {
-    /// Returns true if the deprecation of a package must not be shown
+    /// Returns true if the deprecation of the package named `package` must not be shown
+    pub fn hides(&self, package: &str) -> bool {
+        !self.show || is_package_ignored(package, self.allow)
+    }
+
+    /// Returns true if the deprecation of a manifest dependency must not be shown
     ///
-    /// `declared` is the name written in the manifest, `package` the registry package it resolves
-    /// to. They differ for an npm alias, and either one can be allowed.
-    pub fn hides(&self, declared: &str, package: &str) -> bool {
-        !self.show
-            || is_package_ignored(declared, self.allow)
-            || is_package_ignored(package, self.allow)
+    /// An npm alias is hidden when either its declared name or its target package is allowed.
+    pub fn hides_dependency(&self, dep: &Dependency, ecosystem: Ecosystem) -> bool {
+        self.hides(&dep.name) || npm_alias_package(ecosystem, dep).is_some_and(|p| self.hides(p))
     }
 }
 
@@ -491,6 +498,20 @@ mod tests {
         assert!(!config.deprecated.show_in_hints);
         assert!(!config.deprecated.show_diagnostics);
         assert_eq!(config.deprecated.allow, ["fxhash", "@old/*"]);
+    }
+
+    #[test]
+    fn partial_deprecated_settings_keep_the_other_defaults() {
+        let json = json!({
+            "deprecated": { "allow": ["fxhash"] },
+            "inlay_hints": { "enabled": false }
+        });
+
+        let config = Config::from_init_options(Some(json));
+        assert_eq!(config.deprecated.allow, ["fxhash"]);
+        assert!(config.deprecated.show_in_hints);
+        assert!(config.deprecated.show_diagnostics);
+        assert!(!config.inlay_hints.enabled);
     }
 
     #[test]

@@ -120,9 +120,14 @@ pub async fn create_diagnostics(
             diagnostics.push(diag);
         }
 
-        if let Some(version_info) = cached {
+        if let Some(mut version_info) = cached {
             let package = npm_alias_package(file_type.to_ecosystem(), dep).unwrap_or(&dep.name);
-            let hide_deprecation = filters.deprecated.hides(&dep.name, package);
+            if filters
+                .deprecated
+                .hides_dependency(dep, file_type.to_ecosystem())
+            {
+                version_info.hide_deprecation();
+            }
             // Add yanked version diagnostic (highest priority)
             if version_info.is_version_yanked(dep.effective_version()) {
                 tracing::debug!(
@@ -131,7 +136,7 @@ pub async fn create_diagnostics(
                     dep.version
                 );
                 diagnostics.push(create_yanked_diagnostic(dep, &version_info, file_type));
-            } else if version_info.deprecated && !hide_deprecation {
+            } else if version_info.deprecated {
                 // Add deprecation diagnostic
                 tracing::debug!(
                     "Package {} {} is deprecated, creating diagnostic",
@@ -146,7 +151,6 @@ pub async fn create_diagnostics(
                 let filtered_vulns: Vec<_> = version_info
                     .vulnerabilities
                     .iter()
-                    .filter(|vuln| !vuln.hidden_with_deprecation(hide_deprecation))
                     .filter(|vuln| {
                         min_severity
                             .as_ref()
@@ -161,9 +165,8 @@ pub async fn create_diagnostics(
                     .map(|v| {
                         v.iter()
                             .filter(|t| {
-                                !t.vulnerability.hidden_with_deprecation(
-                                    filters.deprecated.hides(&t.package_name, &t.package_name),
-                                )
+                                !(t.vulnerability.unmaintained
+                                    && filters.deprecated.hides(&t.package_name))
                             })
                             .filter(|t| {
                                 min_severity
@@ -2115,6 +2118,46 @@ mod tests {
 
             assert!(diagnostics.is_empty(), "allow {name}: {diagnostics:?}");
         }
+    }
+
+    #[tokio::test]
+    async fn yanked_version_is_reported_even_when_its_deprecation_is_allowed() {
+        let deprecated = DeprecatedConfig {
+            allow: vec!["fxhash".to_string()],
+            ..Default::default()
+        };
+        let deps = vec![create_test_dependency("fxhash", "0.2.1", 5)];
+        let cache = MemoryCache::new();
+        cache
+            .insert(
+                "test:fxhash".to_string(),
+                VersionInfo {
+                    deprecated: true,
+                    yanked_versions: vec!["0.2.1".to_string()],
+                    ..Default::default()
+                },
+            )
+            .await;
+
+        let diagnostics = create_diagnostics(
+            &deps,
+            &cache,
+            |name| format!("test:{name}"),
+            None,
+            FileType::Cargo,
+            VulnSources {
+                osv_results: &osv_results_for(&deps, Vec::new()),
+                transitive: &hashbrown::HashMap::new(),
+            },
+            PackageFilters {
+                ignored: &[],
+                deprecated: deprecated.diagnostics(),
+            },
+        )
+        .await;
+
+        assert!(has_code(&diagnostics, "yanked-version"));
+        assert!(!has_code(&diagnostics, "deprecated-package"));
     }
 
     #[tokio::test]

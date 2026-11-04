@@ -329,8 +329,13 @@ mod tests {
     use futures::SinkExt;
     use serde_json::{Value, json};
     use tokio::sync::mpsc::UnboundedReceiver;
+    use tower_lsp::LanguageServer;
     use tower_lsp::LspService;
     use tower_lsp::jsonrpc::{Request, Response};
+    use tower_lsp::lsp_types::{
+        InlayHintLabel, InlayHintParams, Position, Range, TextDocumentIdentifier,
+        WorkDoneProgressParams,
+    };
     use tower_service::Service;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -395,6 +400,13 @@ mod tests {
 
     /// An initialized service and what it sends the editor; the requests get an empty answer.
     async fn observed_service() -> (LspService<DepsyBackend>, UnboundedReceiver<Request>) {
+        observed_service_with(json!({ "advisory_cache": { "enabled": false } })).await
+    }
+
+    /// Same as [`observed_service`], initialized with `options` as its settings.
+    async fn observed_service_with(
+        options: Value,
+    ) -> (LspService<DepsyBackend>, UnboundedReceiver<Request>) {
         let (mut service, socket) = LspService::new(DepsyBackend::in_memory);
         let (mut requests, mut responses) = socket.split();
         let (seen, observed) = tokio::sync::mpsc::unbounded_channel();
@@ -412,7 +424,7 @@ mod tests {
         let initialize = Request::build("initialize")
             .params(json!({
                 "capabilities": {},
-                "initializationOptions": { "advisory_cache": { "enabled": false } },
+                "initializationOptions": options,
             }))
             .id(1)
             .finish();
@@ -702,6 +714,55 @@ mod tests {
         let published = next_message(&mut observed, "textDocument/publishDiagnostics").await;
         assert_eq!(published["uri"], uri.as_str());
         next_message(&mut observed, "workspace/inlayHint/refresh").await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn deprecation_hidden_from_diagnostics_still_shows_in_the_inlay_hint() {
+        // Given a deprecated package and settings that hide deprecation from diagnostics only
+        let (service, mut observed) = observed_service_with(json!({
+            "advisory_cache": { "enabled": false },
+            "deprecated": { "show_diagnostics": false },
+        }))
+        .await;
+        let backend = service.inner();
+        backend
+            .version_cache
+            .insert(
+                FileType::Npm.cache_key("left-pad"),
+                VersionInfo {
+                    latest: Some("1.0.0".to_string()),
+                    deprecated: true,
+                    ..VersionInfo::default()
+                },
+            )
+            .await;
+        let uri = manifest_uri("deprecated");
+        open_document(backend, &uri, vec![make_dep("left-pad", "1.0.0", None)]);
+
+        // When the document is rendered
+        let ctx = backend.create_processing_context().await;
+        ctx.publish_diagnostics(&uri).await;
+        let published = next_message(&mut observed, "textDocument/publishDiagnostics").await;
+        let hints = backend
+            .inlay_hint(InlayHintParams {
+                text_document: TextDocumentIdentifier { uri: uri.clone() },
+                range: Range::new(Position::new(0, 0), Position::new(1, 0)),
+                work_done_progress_params: WorkDoneProgressParams::default(),
+            })
+            .await
+            .unwrap()
+            .unwrap_or_default();
+
+        // Then the diagnostics drop the deprecation and the inlay hint keeps it
+        assert!(
+            !published.to_string().contains("deprecated-package"),
+            "got {published}"
+        );
+        assert_eq!(hints.len(), 1);
+        let InlayHintLabel::String(label) = &hints[0].label else {
+            panic!("expected a string label");
+        };
+        assert!(label.contains("Deprecated"), "got {label}");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

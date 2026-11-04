@@ -348,12 +348,6 @@ impl OsvClient {
         Ok(results)
     }
 
-    /// Test shorthand: true when any advisory in `ids` marks its package unmaintained.
-    #[cfg(test)]
-    async fn check_rustsec_unmaintained(&self, ids: &[String]) -> bool {
-        !self.unmaintained_rustsec_ids(ids).await.is_empty()
-    }
-
     /// Returns the RUSTSEC advisories among `ids` that mark their package unmaintained.
     async fn unmaintained_rustsec_ids(&self, ids: &[String]) -> Vec<String> {
         if ids.is_empty() {
@@ -1000,11 +994,12 @@ mod tests {
 
         let client = OsvClient::with_endpoint_and_cache(server.uri(), Arc::clone(&cache));
         let result = client
-            .check_rustsec_unmaintained(&["RUSTSEC-2020-0036".to_string()])
+            .unmaintained_rustsec_ids(&["RUSTSEC-2020-0036".to_string()])
             .await;
 
-        assert!(
+        assert_eq!(
             result,
+            ["RUSTSEC-2020-0036"],
             "cached advisory marked unmaintained must short-circuit"
         );
         assert_eq!(counter.load(Ordering::SeqCst), 0, "no HTTP call expected");
@@ -1030,14 +1025,14 @@ mod tests {
         let client = OsvClient::with_endpoint_and_cache(server.uri(), Arc::clone(&cache));
 
         let first = client
-            .check_rustsec_unmaintained(&["RUSTSEC-2020-0036".to_string()])
+            .unmaintained_rustsec_ids(&["RUSTSEC-2020-0036".to_string()])
             .await;
         let second = client
-            .check_rustsec_unmaintained(&["RUSTSEC-2020-0036".to_string()])
+            .unmaintained_rustsec_ids(&["RUSTSEC-2020-0036".to_string()])
             .await;
 
-        assert!(first);
-        assert!(second);
+        assert_eq!(first, ["RUSTSEC-2020-0036"]);
+        assert_eq!(second, ["RUSTSEC-2020-0036"]);
         assert_eq!(
             counter.load(Ordering::SeqCst),
             1,
@@ -1073,14 +1068,14 @@ mod tests {
         let client = OsvClient::with_endpoint_and_cache(server.uri(), Arc::clone(&cache));
 
         let first = client
-            .check_rustsec_unmaintained(&["RUSTSEC-9999-0001".to_string()])
+            .unmaintained_rustsec_ids(&["RUSTSEC-9999-0001".to_string()])
             .await;
         let second = client
-            .check_rustsec_unmaintained(&["RUSTSEC-9999-0001".to_string()])
+            .unmaintained_rustsec_ids(&["RUSTSEC-9999-0001".to_string()])
             .await;
 
-        assert!(!first);
-        assert!(!second);
+        assert!(first.is_empty());
+        assert!(second.is_empty());
         assert_eq!(counter.load(Ordering::SeqCst), 1);
         let cached = cache
             .get("RUSTSEC-9999-0001")
@@ -1107,7 +1102,7 @@ mod tests {
         );
 
         let _ = client
-            .check_rustsec_unmaintained(&["RUSTSEC-9999-0001".to_string()])
+            .unmaintained_rustsec_ids(&["RUSTSEC-9999-0001".to_string()])
             .await;
 
         assert!(
@@ -1139,7 +1134,7 @@ mod tests {
         );
 
         let _ = client
-            .check_rustsec_unmaintained(&["RUSTSEC-2020-0036".to_string()])
+            .unmaintained_rustsec_ids(&["RUSTSEC-2020-0036".to_string()])
             .await;
 
         let cached = positive
@@ -1220,7 +1215,7 @@ mod tests {
         );
 
         let _ = client
-            .check_rustsec_unmaintained(&["RUSTSEC-2020-0036".to_string()])
+            .unmaintained_rustsec_ids(&["RUSTSEC-2020-0036".to_string()])
             .await;
 
         assert_eq!(
@@ -1256,10 +1251,10 @@ mod tests {
         let client = OsvClient::with_endpoint_and_cache(server.uri(), Arc::clone(&cache));
 
         let _ = client
-            .check_rustsec_unmaintained(&["RUSTSEC-2020-0036".to_string()])
+            .unmaintained_rustsec_ids(&["RUSTSEC-2020-0036".to_string()])
             .await;
         let _ = client
-            .check_rustsec_unmaintained(&["RUSTSEC-2020-0036".to_string()])
+            .unmaintained_rustsec_ids(&["RUSTSEC-2020-0036".to_string()])
             .await;
 
         assert_eq!(counter.load(Ordering::SeqCst), 2, "no caching on 5xx");
@@ -1279,10 +1274,10 @@ mod tests {
             .map(|index| format!("RUSTSEC-2099-{index:04}"))
             .collect();
 
-        let deprecated = client.check_rustsec_unmaintained(&ids).await;
+        let unmaintained = client.unmaintained_rustsec_ids(&ids).await;
 
         assert!(
-            !deprecated,
+            unmaintained.is_empty(),
             "test advisories should not be marked as unmaintained"
         );
         assert!(

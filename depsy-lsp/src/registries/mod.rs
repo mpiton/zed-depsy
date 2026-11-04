@@ -126,6 +126,14 @@ pub struct VersionInfo {
 }
 
 impl VersionInfo {
+    /// Drops the deprecation and the unmaintained advisories that report it
+    ///
+    /// An unmaintained advisory only reports the deprecation, so hiding one hides the other.
+    pub fn hide_deprecation(&mut self) {
+        self.deprecated = false;
+        self.vulnerabilities.retain(|v| !v.unmaintained);
+    }
+
     /// Check if a specific version is yanked
     pub fn is_version_yanked(&self, version: &str) -> bool {
         let normalized = normalize_version_for_yanked_check(version);
@@ -174,15 +182,6 @@ pub struct Vulnerability {
     /// True for a RustSec "unmaintained" advisory, which reports deprecation, not a flaw
     #[serde(default)]
     pub unmaintained: bool,
-}
-
-impl Vulnerability {
-    /// Returns true if this advisory goes away with its package's hidden deprecation
-    ///
-    /// An unmaintained advisory only reports the deprecation, so hiding one hides the other.
-    pub fn hidden_with_deprecation(&self, deprecation_hidden: bool) -> bool {
-        deprecation_hidden && self.unmaintained
-    }
 }
 
 /// Vulnerability severity levels
@@ -259,6 +258,15 @@ pub mod version_utils;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vulnerability_cached_without_unmaintained_flag_is_a_plain_advisory() {
+        let json = r#"{"id":"CVE-2026-0001","severity":"High","description":"","url":null}"#;
+
+        let vulnerability: Vulnerability = serde_json::from_str(json).unwrap();
+
+        assert!(!vulnerability.unmaintained);
+    }
 
     #[test]
     fn test_severity_rank() {

@@ -432,7 +432,7 @@ The five LSP feature providers are **plain functions** living in `depsy-lsp/src/
 
 | Provider | Module | Signature (abridged) | When invoked |
 |---|---|---|---|
-| **Inlay hints** | `inlay_hints.rs` | `fn create_inlay_hint(dep, version_info, file_type) -> InlayHint` | `inlayHint` request, after `process_document` finishes. |
+| **Inlay hints** | `inlay_hints.rs` | `fn create_inlay_hint(dep, version_info, file_type, deprecated) -> InlayHint` | `inlayHint` request, after `process_document` finishes. |
 | **Diagnostics** | `diagnostics.rs` | `async fn create_diagnostics(deps, cache, …, file_type, vulns: VulnSources, ignored) -> Vec<Diagnostic>` | After `process_document` and again after vulnerability fetch. |
 | **Code actions** | `code_actions.rs` | `async fn create_code_actions(deps, cache, uri, range, file_type, …) -> Vec<CodeActionOrCommand>` | `codeAction` request. |
 | **Completions** | `completion.rs` | `async fn get_completions(deps, position, cache, …) -> Option<Vec<CompletionItem>>` | `completion` request when cursor is inside a version field. |

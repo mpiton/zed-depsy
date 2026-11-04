@@ -161,6 +161,11 @@ pub async fn create_diagnostics(
                     .map(|v| {
                         v.iter()
                             .filter(|t| {
+                                !t.vulnerability.hidden_with_deprecation(
+                                    filters.deprecated.hides(&t.package_name, &t.package_name),
+                                )
+                            })
+                            .filter(|t| {
                                 min_severity
                                     .as_ref()
                                     .map(|min| {
@@ -2130,5 +2135,73 @@ mod tests {
 
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].message, "⚠ 1 vuln: CVE-2026-0001");
+    }
+
+    #[tokio::test]
+    async fn allowed_transitive_package_drops_its_unmaintained_advisory() {
+        let deps = vec![create_test_dependency("my-dep", "1.0.0", 5)];
+        let cache = MemoryCache::new();
+        cache
+            .insert(
+                "test:my-dep".to_string(),
+                VersionInfo {
+                    latest: Some("1.0.0".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await;
+        let transitive_vuln = |package: &str, vulnerability: Vulnerability| TransitiveVuln {
+            package_name: package.to_string(),
+            package_version: "0.2.1".to_string(),
+            vulnerability,
+        };
+        let mut transitive = hashbrown::HashMap::new();
+        transitive.insert(
+            "my-dep".to_string(),
+            vec![
+                transitive_vuln(
+                    "fxhash",
+                    Vulnerability {
+                        id: "RUSTSEC-2025-0057".to_string(),
+                        unmaintained: true,
+                        ..high_vulnerability()
+                    },
+                ),
+                transitive_vuln("fxhash", high_vulnerability()),
+            ],
+        );
+        let deprecated = DeprecatedConfig {
+            allow: vec!["fxhash".to_string()],
+            ..Default::default()
+        };
+
+        let diagnostics = create_diagnostics(
+            &deps,
+            &cache,
+            |name| format!("test:{name}"),
+            None,
+            FileType::Cargo,
+            VulnSources {
+                osv_results: &VulnerabilityCache::with_ttl(3600),
+                transitive: &transitive,
+            },
+            PackageFilters {
+                ignored: &[],
+                deprecated: deprecated.diagnostics(),
+            },
+        )
+        .await;
+
+        assert_eq!(diagnostics.len(), 1);
+        assert!(
+            diagnostics[0].message.contains("CVE-2026-0001"),
+            "{}",
+            diagnostics[0].message
+        );
+        assert!(
+            !diagnostics[0].message.contains("RUSTSEC-2025-0057"),
+            "{}",
+            diagnostics[0].message
+        );
     }
 }

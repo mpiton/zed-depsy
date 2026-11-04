@@ -285,7 +285,7 @@ Configure Depsy in your Zed `settings.json`:
 | `deprecated.show_diagnostics` | bool | `true` | Show the deprecated diagnostic |
 | `deprecated.allow` | string[] | `[]` | Package names/patterns whose deprecation is hidden on both surfaces; still checked for versions and other vulnerabilities |
 
-A hidden deprecation also drops the RustSec "unmaintained" advisory that reported it, so the hint and diagnostic fall back to the remaining vulnerabilities, then to the outdated or up-to-date status. Yanked versions are still flagged.
+`allow` patterns match the declared name and, for an npm alias, the aliased package. A hidden deprecation also drops the RustSec "unmaintained" advisory that reported it, including when it comes from a transitive package. The inlay hint then falls back to the remaining vulnerabilities, then to the outdated or up-to-date status; the diagnostic shows the remaining vulnerabilities or the outdated warning, and nothing otherwise. Hover and the vulnerability report still list the advisory. Yanked versions are still flagged.
 
 ### Private Registries
 

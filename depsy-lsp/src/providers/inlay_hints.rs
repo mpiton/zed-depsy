@@ -97,32 +97,14 @@ pub fn create_inlay_hint(
     // A hidden deprecation also hides the unmaintained advisory that reported it.
     let package = npm_alias_package(file_type.to_ecosystem(), dep).unwrap_or(&dep.name);
     let hide_deprecation = deprecated.hides(&dep.name, package);
-    let without_unmaintained;
-    let version_info = match version_info {
-        Some(info)
-            if info
-                .vulnerabilities
+    let vulnerabilities: Vec<&Vulnerability> = version_info
+        .map(|info| {
+            info.vulnerabilities
                 .iter()
-                .any(|v| v.hidden_with_deprecation(hide_deprecation)) =>
-        {
-            without_unmaintained = VersionInfo {
-                vulnerabilities: info
-                    .vulnerabilities
-                    .iter()
-                    .filter(|v| !v.hidden_with_deprecation(hide_deprecation))
-                    .cloned()
-                    .collect(),
-                ..info.clone()
-            };
-            Some(&without_unmaintained)
-        }
-        _ => version_info,
-    };
-
-    // Check for vulnerabilities and deprecation
-    let vuln_count = version_info
-        .map(|info| info.vulnerabilities.len())
-        .unwrap_or(0);
+                .filter(|v| !v.hidden_with_deprecation(hide_deprecation))
+                .collect()
+        })
+        .unwrap_or_default();
 
     let is_deprecated = version_info.is_some_and(|info| info.deprecated) && !hide_deprecation;
 
@@ -132,7 +114,7 @@ pub fn create_inlay_hint(
 
     let (label, tooltip) = create_hint_label_and_tooltip(
         &status,
-        vuln_count,
+        &vulnerabilities,
         is_deprecated,
         dep,
         version_info,
@@ -157,7 +139,7 @@ pub fn create_inlay_hint(
 /// Create label and tooltip based on version status and vulnerabilities
 fn create_hint_label_and_tooltip(
     status: &VersionStatus,
-    vuln_count: usize,
+    vulnerabilities: &[&Vulnerability],
     is_deprecated: bool,
     dep: &Dependency,
     version_info: Option<&VersionInfo>,
@@ -167,7 +149,7 @@ fn create_hint_label_and_tooltip(
 
     // An npm alias keeps the local hint unless OSV has something to report on it.
     let alias_has_finding = npm_alias_package(file_type.to_ecosystem(), dep).is_some()
-        && (vuln_count > 0 || is_deprecated);
+        && (!vulnerabilities.is_empty() || is_deprecated);
 
     // Handle local dependencies first (highest priority - no registry lookup needed)
     if is_local_dependency(dep.declared_spec()) && !alias_has_finding {
@@ -227,8 +209,9 @@ fn create_hint_label_and_tooltip(
         };
     }
 
-    // Handle vulnerabilities (vuln_count > 0 implies version_info is Some)
-    if vuln_count > 0 {
+    // Handle vulnerabilities
+    if !vulnerabilities.is_empty() {
+        let vuln_count = vulnerabilities.len();
         let vuln_label = fmt::from_fn(move |f| {
             write!(f, "⚠ {vuln_count} vuln")?;
             if vuln_count != 1 {
@@ -236,10 +219,7 @@ fn create_hint_label_and_tooltip(
             }
             Ok(())
         });
-        let Some(info) = version_info else {
-            return (vuln_label.to_string(), None);
-        };
-        let vuln_tooltip = fmt_vulnerability_tooltip(info);
+        let vuln_tooltip = fmt_vulnerability_tooltip(vulnerabilities);
 
         // Combine with update info if available
         return match status {
@@ -283,8 +263,8 @@ fn create_hint_label_and_tooltip(
 
 /// Format vulnerability details for tooltip
 #[must_use = "returns a type implementing Display and Debug, which does not have any effects unless they are used"]
-fn fmt_vulnerability_tooltip(info: &VersionInfo) -> impl fmt::Display + fmt::Debug {
-    let count = info.vulnerabilities.len();
+fn fmt_vulnerability_tooltip(vulnerabilities: &[&Vulnerability]) -> impl fmt::Display + fmt::Debug {
+    let count = vulnerabilities.len();
 
     fmt::from_fn(move |f| {
         writeln!(
@@ -307,7 +287,7 @@ fn fmt_vulnerability_tooltip(info: &VersionInfo) -> impl fmt::Display + fmt::Deb
                 url,
                 ..
             },
-        ) in info.vulnerabilities.iter().take(5).enumerate()
+        ) in vulnerabilities.iter().copied().take(5).enumerate()
         {
             let severity_icon = match severity {
                 VulnerabilitySeverity::Critical => "⚠ CRITICAL",

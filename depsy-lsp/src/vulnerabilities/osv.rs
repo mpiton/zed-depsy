@@ -442,12 +442,11 @@ impl OsvClient {
 
                     let summary = details.as_ref().and_then(|v| v.summary.clone());
 
+                    // Only the RustSec `informational` tag counts: a summary
+                    // that mentions "deprecated" can belong to a real
+                    // vulnerability, which `deprecated.allow` must not hide.
                     let is_unmaintained = details.as_ref().is_some_and(|v| {
-                        let summary_match = v.summary.as_ref().is_some_and(|s| {
-                            let lower = s.to_lowercase();
-                            lower.contains("maintained") || lower.contains("deprecated")
-                        });
-                        let informational_match = v.affected.as_ref().is_some_and(|affected| {
+                        v.affected.as_ref().is_some_and(|affected| {
                             affected.iter().any(|a| {
                                 a.database_specific.as_ref().is_some_and(|db| {
                                     db.informational
@@ -455,8 +454,7 @@ impl OsvClient {
                                         .is_some_and(|i| i == "unmaintained")
                                 })
                             })
-                        });
-                        summary_match || informational_match
+                        })
                     });
 
                     positive_cache
@@ -884,7 +882,7 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/vulns/RUSTSEC-2021-0001"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "summary": "Out-of-bounds write"
+                "summary": "Out-of-bounds write through a deprecated API"
             })))
             .mount(&server)
             .await;

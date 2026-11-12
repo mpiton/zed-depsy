@@ -52,6 +52,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   "deprecated" or "maintained" no longer marks the package deprecated, and
   `deprecated.allow` cannot hide it.
 
+### Changed
+
+- Bumped `rusqlite` from 0.41 to 0.42 and `toml` from 1.1.8 to 1.2.1, and
+  refreshed the language server, extension and fuzz lockfiles.
+  `scheduled-thread-pool` stays at 0.2.7 in the language server lockfile:
+  0.2.8 pulls in `parking_lot` 0.13, which needs Rust 1.95 while the crate
+  declares 1.94.
+
+### Security
+
+- Bumped `rustix` from 1.1.5 to 1.1.6 in the language server lockfile to clear
+  RUSTSEC-2026-0486 (unsound `xattr` calls with a zero-length buffer). It is
+  only reached through the dev dependency `tempfile`.
+
 ## [2.1.2] - 2026-11-03
 
 ### Security

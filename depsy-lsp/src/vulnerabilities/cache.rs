@@ -49,6 +49,12 @@ impl VulnCacheKey {
             .flatten();
         let (name, version) = match alias {
             Some((target, range)) => (target, dep.resolved_version.as_deref().unwrap_or(range)),
+            // `npm:^1.0.0` is a range of the declared package: OSV takes the bare version.
+            None if ecosystem == Ecosystem::Npm => {
+                let version = dep.effective_version();
+                let version = version.strip_prefix("npm:").unwrap_or(version);
+                (dep.name.as_str(), version)
+            }
             None => (dep.name.as_str(), dep.effective_version()),
         };
         Self::new(ecosystem, name, &normalize_version_for_osv(version))
@@ -302,6 +308,18 @@ mod tests {
             assert_eq!(
                 key,
                 VulnCacheKey::new(Ecosystem::Npm, "foo", "1.2.0"),
+                "{spec}"
+            );
+        }
+    }
+
+    #[test]
+    fn unresolved_npm_protocol_range_is_keyed_without_the_prefix() {
+        for spec in ["npm:^4.17.20", "npm:4.17.20"] {
+            let key = VulnCacheKey::for_dependency(Ecosystem::Npm, &dep("lodash", spec, None));
+            assert_eq!(
+                key,
+                VulnCacheKey::new(Ecosystem::Npm, "lodash", "4.17.20"),
                 "{spec}"
             );
         }

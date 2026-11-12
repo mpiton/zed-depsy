@@ -349,7 +349,7 @@ Past its TTL an entry stays readable for `STALE_FOR` (7 days). `get` and `contai
 
 `spawn_refresh_task` (`depsy-lsp/src/backend/refresh.rs`) starts on `initialized`, stops on `shutdown` and ticks every 10 seconds. Each tick:
 
-- refetches the registry packages of open documents with no live entry, skipping local and ignored dependencies. Responses are cached and published as they arrive, so one slow registry does not hold back the others. A package another code path fetched meanwhile republishes the documents using it;
+- refetches the registry packages of open documents with no live entry, skipping local dependencies, npm aliases of another package and ignored dependencies. Responses are cached and published as they arrive, so one slow registry does not hold back the others. A package another code path fetched meanwhile republishes the documents using it;
 - queries OSV again for open documents with a dependency whose `VulnerabilityCache` result expired, unless `security.enabled` is off, because readers drop the advisories of a version with no live result.
 
 A failed lookup waits 10 seconds, doubling up to 30 minutes; registry failures back off per package and OSV failures per document. A panic inside a tick is logged and the next tick still runs.

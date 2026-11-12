@@ -845,6 +845,19 @@ pub fn npm_alias_target(spec: &str) -> Option<(&str, &str)> {
     (!target.is_empty() && target != "latest" && !is_version_range(target)).then_some((target, "*"))
 }
 
+/// Version range or tag an `npm:` spec carries, or `spec` itself without that prefix.
+///
+/// - `npm:^1.0.0` → `^1.0.0`
+/// - `npm:bar@^1.0.0` → `^1.0.0`
+/// - `npm:bar` → `*`
+/// - `^1.0.0` → `^1.0.0`
+pub fn npm_spec_range(spec: &str) -> &str {
+    match npm_alias_target(spec) {
+        Some((_, range)) => range,
+        None => spec.strip_prefix("npm:").unwrap_or(spec),
+    }
+}
+
 /// Whether the text after `npm:` is a version or range rather than a package name.
 ///
 /// A package name may start with a digit, as `7zip-bin` does. A version holds

@@ -27,7 +27,7 @@ use tower_lsp::lsp_types::{InlayHint, InlayHintKind, InlayHintLabel, Position};
 
 use crate::config::DeprecatedFilter;
 use crate::file_types::FileType;
-use crate::parsers::npm_lock::npm_alias_target;
+use crate::parsers::npm_lock::npm_spec_range;
 use crate::registries::{VersionInfo, VulnerabilitySeverity};
 use crate::utils::fmt_truncate_string;
 use crate::vulnerabilities::npm_alias_package;
@@ -154,8 +154,11 @@ fn create_hint_label_and_tooltip(
 ) -> (String, Option<String>) {
     let dep_name = &*dep.name;
 
-    // An npm alias keeps the local hint unless OSV has something to report on it.
-    if let Some(package) = npm_alias_package(file_type.to_ecosystem(), dep)
+    // An npm alias of another package keeps the local hint unless OSV has
+    // something to report on it. An alias of the declared package is compared
+    // against the registry like any other range.
+    let alias = npm_alias_package(file_type.to_ecosystem(), dep);
+    if let Some(package) = alias.filter(|package| *package != dep_name)
         && vulnerabilities.is_empty()
         && !is_deprecated
     {
@@ -534,6 +537,11 @@ fn strip_python_prerelease(version: &str) -> String {
 ///   rather than suggesting a downgrade.
 /// - **Calendar versions** — four-segment versions like `2024.1.1.5` are not
 ///   truncated when they do not contain pre-release markers.
+/// - **`npm:` specs** — `npm:^1.0.0` and `npm:name@^1.0.0` are compared by
+///   their range. The caller checks that the range belongs to the package
+///   `info` describes.
+/// - **`latest` and `*`** — the dist-tag and the any-version range already
+///   accept the newest release, so they are [`VersionStatus::UpToDate`].
 ///
 /// Returns [`VersionStatus::Unknown`] when `info.latest` is `None`.
 ///
@@ -561,12 +569,10 @@ pub fn compare_versions(current: &str, info: &VersionInfo) -> VersionStatus {
     };
     // `npm:^1.0.0` is the range `^1.0.0` of the declared package, and
     // `npm:lodash@^4.0.0` the range `^4.0.0` of the package it names.
-    let current = match npm_alias_target(current) {
-        Some((_, range)) => range,
-        None => current.strip_prefix("npm:").unwrap_or(current),
-    };
-    // The `latest` tag follows the newest release, so there is nothing to update to.
-    if current == "latest" {
+    let current = npm_spec_range(current);
+    // The `latest` tag follows the newest release and `*` accepts it, so there
+    // is nothing to update to.
+    if matches!(current, "latest" | "*") {
         return VersionStatus::UpToDate;
     }
 
@@ -1569,6 +1575,45 @@ mod tests {
         // The `latest` tag follows the newest release, so it has nothing to update to.
         assert_eq!(label("npm:latest").trim(), "✓");
         assert_eq!(label("latest").trim(), "✓");
+    }
+
+    #[test]
+    fn test_npm_alias_of_the_declared_package_gets_a_registry_hint() {
+        let info = VersionInfo {
+            latest: Some("1.2.0".to_string()),
+            ..Default::default()
+        };
+        let label = |spec: &str| match create_inlay_hint(
+            &make_test_dep("lodash", spec),
+            Some(&info),
+            FileType::Npm,
+            DeprecatedFilter::default(),
+        )
+        .label
+        {
+            InlayHintLabel::String(label) => label,
+            other => panic!("unexpected label: {other:?}"),
+        };
+
+        assert_eq!(label("npm:lodash@^1.2.0").trim(), "✓");
+        assert_eq!(label("npm:lodash@^1.0.0").trim(), "-> 1.2.0");
+        // Without a range the alias accepts any version.
+        assert_eq!(label("npm:lodash").trim(), "✓");
+    }
+
+    #[test]
+    fn test_compare_versions_any_version_range_is_up_to_date() {
+        let info = VersionInfo {
+            latest: Some("1.2.0".to_string()),
+            ..Default::default()
+        };
+
+        for spec in ["*", "npm:*", "npm:lodash"] {
+            assert!(
+                matches!(compare_versions(spec, &info), VersionStatus::UpToDate),
+                "{spec}"
+            );
+        }
     }
 
     #[test]

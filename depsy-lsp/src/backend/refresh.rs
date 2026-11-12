@@ -98,7 +98,10 @@ struct VulnScan {
 }
 
 impl ProcessingContext {
-    /// Lists the registry packages of open documents, without local and ignored dependencies.
+    /// Lists the registry packages of open documents.
+    ///
+    /// Local dependencies, npm aliases of another package and ignored
+    /// dependencies are left out.
     fn collect_refresh_targets(&self) -> HashMap<String, RefreshTarget> {
         let ignored = self
             .config

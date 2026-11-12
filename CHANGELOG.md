@@ -19,9 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Hovering a local dependency (`workspace:`, `file:`, `link:`, a path or a git
-  source) no longer asks the registry and no longer shows "Could not fetch
-  package information."
+- Hovering a local dependency in `package.json` (`workspace:`, `file:`,
+  `link:`, a relative path or a git URL) no longer asks the registry and no
+  longer shows "Could not fetch package information."
   ([#434](https://github.com/mpiton/zed-depsy/issues/434)). The hover now says
   the dependency is local, and still lists the transitive vulnerabilities the
   lockfile attributes to it. `npm:` specs (an alias, or a tag or range of the

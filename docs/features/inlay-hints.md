@@ -134,6 +134,8 @@ Hovering over any dependency reveals detailed information:
 - **All available versions** for reference
 - **Vulnerability details** if any exist
 
+Local dependencies in `package.json` (`workspace:`, `file:`, `link:`, a relative path or a git URL) are not looked up in the registry. Their hover says the dependency is local, then lists the transitive vulnerabilities the lockfile attributes to it.
+
 ## Refresh Behavior
 
 - Hints update automatically when you save the file

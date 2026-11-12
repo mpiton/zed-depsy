@@ -174,7 +174,7 @@ Git dependencies show `→ Git` hint.
 }
 ```
 
-Local dependencies show `→ Local` hint.
+Local dependencies show `→ Local` hint. Hovering one does not ask the registry: the hover says the dependency is local, then lists the transitive vulnerabilities the lockfile attributes to it. The same holds for `workspace:`, `link:` and git dependencies.
 
 ### npm Aliases
 
@@ -186,7 +186,7 @@ Local dependencies show `→ Local` hint.
 }
 ```
 
-Vulnerabilities are checked against the actual package (`lodash` here) and reported under the name in the manifest. The inlay hint stays `→ Local` unless the package is vulnerable or deprecated, and no update check runs for an alias to another package. `npm:^1.0.0`, with a range only, and the `npm:latest` tag are not aliases: they name the package itself, and the editor treats them as local dependencies.
+Vulnerabilities are checked against the actual package (`lodash` here) and reported under the name in the manifest. The inlay hint stays `→ Local` unless the package is vulnerable or deprecated, and no update check runs for an alias to another package. `npm:^1.0.0`, with a range only, and the `npm:latest` tag are not aliases: they name the package itself. Their inlay hint and diagnostic still treat them as local dependencies, but hovering any `npm:` spec looks the package up in the registry: the aliased package for an alias, the declared package for a tag or a range.
 
 ### Deprecated Packages
 

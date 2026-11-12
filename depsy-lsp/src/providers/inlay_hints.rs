@@ -1608,7 +1608,7 @@ mod tests {
             ..Default::default()
         };
 
-        for spec in ["*", "npm:*", "npm:lodash"] {
+        for spec in ["*", "npm:*", "npm:lodash", " *", " npm:latest ", " npm:* "] {
             assert!(
                 matches!(compare_versions(spec, &info), VersionStatus::UpToDate),
                 "{spec}"

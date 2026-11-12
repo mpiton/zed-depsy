@@ -847,11 +847,14 @@ pub fn npm_alias_target(spec: &str) -> Option<(&str, &str)> {
 
 /// Version range or tag an `npm:` spec carries, or `spec` itself without that prefix.
 ///
+/// Surrounding whitespace is dropped either way.
+///
 /// - `npm:^1.0.0` → `^1.0.0`
 /// - `npm:bar@^1.0.0` → `^1.0.0`
 /// - `npm:bar` → `*`
 /// - `^1.0.0` → `^1.0.0`
 pub fn npm_spec_range(spec: &str) -> &str {
+    let spec = spec.trim();
     match npm_alias_target(spec) {
         Some((_, range)) => range,
         None => spec.strip_prefix("npm:").unwrap_or(spec),

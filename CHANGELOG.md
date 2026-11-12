@@ -34,6 +34,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A dependency pinned to the `latest` tag (`"lodash": "latest"`,
   `"lodash": "npm:latest"`) no longer shows an update to the version it
   already follows when no lockfile resolves it.
+- An npm alias of the declared package (`"lodash": "npm:lodash@^4.0.0"`) is
+  compared by its range, so it no longer shows an update to the version it
+  already accepts when no lockfile resolves it.
 - A RustSec advisory now counts as "unmaintained" only when its
   `informational` field says so. A real vulnerability whose summary mentions
   "deprecated" or "maintained" no longer marks the package deprecated, and

@@ -704,6 +704,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn npm_alias_is_compared_by_its_range_and_only_against_its_own_package() {
+        let deps = [
+            create_test_dependency("lodash", "npm:lodash@^4.0.0", 0),
+            create_test_dependency("lodash", "npm:lodash@^3.0.0", 1),
+            // The cached entry belongs to `lodash`, not to `other`.
+            create_test_dependency("lodash", "npm:other@^1.0.0", 2),
+        ];
+        let cache = MemoryCache::new();
+        cache
+            .insert(
+                "npm:lodash".to_string(),
+                VersionInfo {
+                    latest: Some("4.0.0".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await;
+
+        let diagnostics = create_diagnostics(
+            &deps,
+            &cache,
+            |name| format!("npm:{name}"),
+            None,
+            FileType::Npm,
+            VulnSources {
+                osv_results: &VulnerabilityCache::with_ttl(3600),
+                transitive: &hashbrown::HashMap::new(),
+            },
+            PackageFilters::default(),
+        )
+        .await;
+
+        let on_line = |line: u32| -> Vec<&str> {
+            diagnostics
+                .iter()
+                .filter(|d| d.range.start.line == line)
+                .map(|d| d.message.as_str())
+                .collect()
+        };
+        assert!(on_line(0).is_empty(), "{diagnostics:?}");
+        assert_eq!(on_line(1), ["Update available: npm:lodash@^3.0.0 -> 4.0.0"]);
+        assert!(on_line(2).is_empty(), "{diagnostics:?}");
+    }
+
+    #[tokio::test]
     async fn npm_alias_deprecation_names_the_real_package() {
         let alias = Dependency {
             resolved_version: Some("1.2.0".to_string()),

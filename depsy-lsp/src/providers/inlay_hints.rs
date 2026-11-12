@@ -27,6 +27,7 @@ use tower_lsp::lsp_types::{InlayHint, InlayHintKind, InlayHintLabel, Position};
 
 use crate::config::DeprecatedFilter;
 use crate::file_types::FileType;
+use crate::parsers::npm_lock::npm_alias_target;
 use crate::registries::{VersionInfo, VulnerabilitySeverity};
 use crate::utils::fmt_truncate_string;
 use crate::vulnerabilities::npm_alias_package;
@@ -558,8 +559,12 @@ pub fn compare_versions(current: &str, info: &VersionInfo) -> VersionStatus {
     let Some(latest) = info.latest.as_deref() else {
         return VersionStatus::Unknown;
     };
-    // `npm:^1.0.0` is the range `^1.0.0` of the declared package.
-    let current = current.strip_prefix("npm:").unwrap_or(current);
+    // `npm:^1.0.0` is the range `^1.0.0` of the declared package, and
+    // `npm:lodash@^4.0.0` the range `^4.0.0` of the package it names.
+    let current = match npm_alias_target(current) {
+        Some((_, range)) => range,
+        None => current.strip_prefix("npm:").unwrap_or(current),
+    };
     // The `latest` tag follows the newest release, so there is nothing to update to.
     if current == "latest" {
         return VersionStatus::UpToDate;
@@ -785,6 +790,26 @@ mod tests {
             compare_versions("1.0.0", &info),
             VersionStatus::UpToDate
         ));
+    }
+
+    #[test]
+    fn test_compare_versions_reads_the_range_of_an_npm_alias() {
+        let info = make_version_info("4.0.0");
+        for current in ["npm:lodash@^4.0.0", "npm:@scope/pkg@4.0.0"] {
+            assert!(
+                matches!(compare_versions(current, &info), VersionStatus::UpToDate),
+                "{current}"
+            );
+        }
+        for current in ["npm:lodash@^3.0.0", "npm:@scope/pkg@~3.1.0"] {
+            assert!(
+                matches!(
+                    compare_versions(current, &info),
+                    VersionStatus::UpdateAvailable(ref v) if v == "4.0.0"
+                ),
+                "{current}"
+            );
+        }
     }
 
     #[test]

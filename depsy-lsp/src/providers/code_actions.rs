@@ -19,6 +19,7 @@ use tower_lsp::lsp_types::*;
 use crate::cache::ReadCache;
 use crate::file_types::FileType;
 use crate::parsers::Dependency;
+use crate::parsers::npm_lock::npm_spec_range;
 use crate::providers::inlay_hints::{VersionStatus, compare_versions};
 use crate::providers::version_edit::render_version_update;
 
@@ -248,7 +249,8 @@ async fn create_update_action(
 
     match compare_versions(dep.effective_version(), &version_info) {
         VersionStatus::UpdateAvailable(new_version) => {
-            let update_type = compare_update_type(dep.effective_version(), &new_version);
+            let current = npm_spec_range(dep.effective_version());
+            let update_type = compare_update_type(current, &new_version);
             let new_text = render_version_update(dep, &new_version, file_type)?;
 
             let edit = TextEdit {
@@ -502,6 +504,68 @@ mod tests {
             }
             _ => panic!("Expected CodeAction"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_update_action_keeps_the_npm_protocol_prefix() {
+        let cache = MemoryCache::new();
+        cache
+            .insert(
+                "test:lodash".to_string(),
+                VersionInfo {
+                    latest: Some("2.0.0".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await;
+
+        let deps = vec![create_test_dependency("lodash", "npm:^1.0.0", 5)];
+        let uri = Url::parse("file:///test/package.json").unwrap();
+        let range = Range {
+            start: Position {
+                line: 0,
+                character: 0,
+            },
+            end: Position {
+                line: 10,
+                character: 0,
+            },
+        };
+
+        let actions = create_code_actions(
+            &deps,
+            &cache,
+            &uri,
+            range,
+            FileType::Npm,
+            |name| format!("test:{name}"),
+            &[],
+            None,
+            None,
+        )
+        .await;
+
+        let update = actions.iter().find_map(|action| match action {
+            CodeActionOrCommand::CodeAction(action) if action.title.contains("Update lodash") => {
+                Some(action)
+            }
+            _ => None,
+        });
+        let Some(update) = update else {
+            panic!("no update action in {actions:?}");
+        };
+        assert!(update.title.contains("⚠ MAJOR"), "title: {}", update.title);
+        let edits = update
+            .edit
+            .as_ref()
+            .and_then(|edit| edit.changes.as_ref())
+            .and_then(|changes| changes.get(&uri));
+        let new_texts: Vec<&str> = edits
+            .into_iter()
+            .flatten()
+            .map(|edit| edit.new_text.as_str())
+            .collect();
+        assert_eq!(new_texts, ["npm:^2.0.0"]);
     }
 
     #[tokio::test]

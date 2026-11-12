@@ -2053,10 +2053,7 @@ impl LanguageServer for DepsyBackend {
         // Drop the lock before async call
         drop(doc);
 
-        // An `npm:` spec names a registry package: an alias, or a tag or range of the
-        // declared package itself.
-        let spec = dep.declared_spec();
-        let content = if !spec.starts_with("npm:") && is_local_dependency(spec) {
+        let content = if is_local_dependency(dep.declared_spec()) {
             format_local_hover_content(dep_name, &doc_transitive_vulns)
         } else {
             // Get version info

@@ -186,7 +186,7 @@ Local dependencies show `→ Local` hint. Hovering one does not ask the registry
 }
 ```
 
-Vulnerabilities are checked against the actual package (`lodash` here) and reported under the name in the manifest. The inlay hint stays `→ Local` unless the package is vulnerable or deprecated, and no update check runs for an alias to another package. `npm:^1.0.0`, with a range only, and the `npm:latest` tag are not aliases: they name the package itself. Their inlay hint and diagnostic still treat them as local dependencies, but hovering any `npm:` spec looks the package up in the registry: the aliased package for an alias, the declared package for a tag or a range.
+Vulnerabilities are checked against the actual package (`lodash` here) and reported under the name in the manifest. The inlay hint stays `→ Local` unless the package is vulnerable or deprecated, and no update check runs for an alias to another package. `npm:^1.0.0`, with a range only, and the `npm:latest` tag are not aliases: they name the package itself. So does an alias that repeats the declared name, such as `"lodash": "npm:lodash@^4.0.0"`. The editor checks all of them against the registry like any other dependency, and the update quick-fix keeps the `npm:` prefix. Hovering an alias to another package shows the registry information of the aliased package.
 
 ### Deprecated Packages
 

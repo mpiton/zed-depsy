@@ -27,6 +27,7 @@ use tower_lsp::lsp_types::{InlayHint, InlayHintKind, InlayHintLabel, Position};
 
 use crate::config::DeprecatedFilter;
 use crate::file_types::FileType;
+use crate::parsers::npm_lock::npm_spec_range;
 use crate::registries::{VersionInfo, VulnerabilitySeverity};
 use crate::utils::fmt_truncate_string;
 use crate::vulnerabilities::npm_alias_package;
@@ -153,12 +154,25 @@ fn create_hint_label_and_tooltip(
 ) -> (String, Option<String>) {
     let dep_name = &*dep.name;
 
-    // An npm alias keeps the local hint unless OSV has something to report on it.
-    let alias_has_finding = npm_alias_package(file_type.to_ecosystem(), dep).is_some()
-        && (!vulnerabilities.is_empty() || is_deprecated);
+    // An npm alias of another package keeps the local hint unless OSV has
+    // something to report on it. An alias of the declared package is compared
+    // against the registry like any other range.
+    let alias = npm_alias_package(file_type.to_ecosystem(), dep);
+    if let Some(package) = alias.filter(|package| *package != dep_name)
+        && vulnerabilities.is_empty()
+        && !is_deprecated
+    {
+        let tooltip = format!(
+            "**npm Alias**\n\n\
+            \"{dep_name}\" is an alias of the registry package \"{package}\".\n\n\
+            Version info is not shown for aliases. Vulnerabilities and \
+            deprecations reported for \"{package}\" still are.",
+        );
+        return ("→ Local".to_string(), Some(tooltip));
+    }
 
     // Handle local dependencies first (highest priority - no registry lookup needed)
-    if is_local_dependency(dep.declared_spec()) && !alias_has_finding {
+    if is_local_dependency(dep.declared_spec()) {
         let tooltip = format!(
             "**Local Dependency**\n\n\
             \"{dep_name}\" is a local/path dependency.\n\n\
@@ -428,12 +442,18 @@ fn fmt_yanked_tooltip(
     })
 }
 
-/// Returns `true` when `version` refers to a local path, git repository, or
-/// URL source rather than a plain registry version string.
+/// Returns `true` when `version` names no registry package.
+///
+/// That is a local path, git repository, or URL source rather than a registry
+/// version string. Hover, inlay hints, diagnostics and the background refresh
+/// all use this to decide whether a dependency has a registry package.
 ///
 /// The following prefixes are recognised as local/non-registry sources:
 /// `./`, `../`, `/`, `file:`, `git+`, `git@`, `git:`, `https://`, `http://`,
-/// `github:`, `gitlab:`, `bitbucket:`, `workspace:`, `link:`, `portal:`, `npm:`.
+/// `github:`, `gitlab:`, `bitbucket:`, `workspace:`, `link:`, `portal:`.
+///
+/// An `npm:` spec is not local: it names a registry package, either another one
+/// (`npm:other@1`, an alias) or a tag or range of the declared one (`npm:latest`).
 ///
 /// # Examples
 ///
@@ -447,6 +467,7 @@ fn fmt_yanked_tooltip(
 /// assert!(!is_local_dependency("1.2.3"));
 /// assert!(!is_local_dependency("^1.0.0"));
 /// assert!(!is_local_dependency("latest"));
+/// assert!(!is_local_dependency("npm:latest"));
 /// ```
 pub fn is_local_dependency(version: &str) -> bool {
     // Path-based dependencies
@@ -470,8 +491,6 @@ pub fn is_local_dependency(version: &str) -> bool {
         || version.starts_with("workspace:")
         || version.starts_with("link:")
         || version.starts_with("portal:")
-        // npm aliases
-        || version.starts_with("npm:")
 }
 
 /// Strip PEP 440 pre-release suffixes from a version string
@@ -518,6 +537,11 @@ fn strip_python_prerelease(version: &str) -> String {
 ///   rather than suggesting a downgrade.
 /// - **Calendar versions** — four-segment versions like `2024.1.1.5` are not
 ///   truncated when they do not contain pre-release markers.
+/// - **`npm:` specs** — `npm:^1.0.0` and `npm:name@^1.0.0` are compared by
+///   their range. The caller checks that the range belongs to the package
+///   `info` describes.
+/// - **`latest` and `*`** — the dist-tag and the any-version range already
+///   accept the newest release, so they are [`VersionStatus::UpToDate`].
 ///
 /// Returns [`VersionStatus::Unknown`] when `info.latest` is `None`.
 ///
@@ -543,6 +567,14 @@ pub fn compare_versions(current: &str, info: &VersionInfo) -> VersionStatus {
     let Some(latest) = info.latest.as_deref() else {
         return VersionStatus::Unknown;
     };
+    // `npm:^1.0.0` is the range `^1.0.0` of the declared package, and
+    // `npm:lodash@^4.0.0` the range `^4.0.0` of the package it names.
+    let current = npm_spec_range(current);
+    // The `latest` tag follows the newest release and `*` accepts it, so there
+    // is nothing to update to.
+    if matches!(current, "latest" | "*") {
+        return VersionStatus::UpToDate;
+    }
 
     // Handle Python compatible release operator (~=)
     // ~=X.Y means >=X.Y, ==X.* — compare at the same granularity
@@ -764,6 +796,26 @@ mod tests {
             compare_versions("1.0.0", &info),
             VersionStatus::UpToDate
         ));
+    }
+
+    #[test]
+    fn test_compare_versions_reads_the_range_of_an_npm_alias() {
+        let info = make_version_info("4.0.0");
+        for current in ["npm:lodash@^4.0.0", "npm:@scope/pkg@4.0.0"] {
+            assert!(
+                matches!(compare_versions(current, &info), VersionStatus::UpToDate),
+                "{current}"
+            );
+        }
+        for current in ["npm:lodash@^3.0.0", "npm:@scope/pkg@~3.1.0"] {
+            assert!(
+                matches!(
+                    compare_versions(current, &info),
+                    VersionStatus::UpdateAvailable(ref v) if v == "4.0.0"
+                ),
+                "{current}"
+            );
+        }
     }
 
     #[test]
@@ -1450,7 +1502,11 @@ mod tests {
         assert!(is_local_dependency("workspace:*"));
         assert!(is_local_dependency("link:./my-lib"));
         assert!(is_local_dependency("portal:./my-lib"));
-        assert!(is_local_dependency("npm:lodash@^4.0.0"));
+
+        // Not local - an `npm:` spec names a registry package
+        assert!(!is_local_dependency("npm:lodash@^4.0.0"));
+        assert!(!is_local_dependency("npm:latest"));
+        assert!(!is_local_dependency("npm:^1.0.0"));
 
         // Not local - regular versions
         assert!(!is_local_dependency("1.0.0"));
@@ -1493,6 +1549,87 @@ mod tests {
             ..Default::default()
         };
         assert!(label(&deprecated).contains("Deprecated"));
+    }
+
+    #[test]
+    fn test_npm_tag_or_range_of_the_package_itself_gets_a_registry_hint() {
+        let info = VersionInfo {
+            latest: Some("1.2.0".to_string()),
+            ..Default::default()
+        };
+        let label = |spec: &str| match create_inlay_hint(
+            &make_test_dep("lodash", spec),
+            Some(&info),
+            FileType::Npm,
+            DeprecatedFilter::default(),
+        )
+        .label
+        {
+            InlayHintLabel::String(label) => label,
+            other => panic!("unexpected label: {other:?}"),
+        };
+
+        assert_eq!(label("npm:1.2.0").trim(), "✓");
+        assert_eq!(label("npm:^1.2.0").trim(), "✓");
+        assert_eq!(label("npm:^1.0.0").trim(), "-> 1.2.0");
+        // The `latest` tag follows the newest release, so it has nothing to update to.
+        assert_eq!(label("npm:latest").trim(), "✓");
+        assert_eq!(label("latest").trim(), "✓");
+    }
+
+    #[test]
+    fn test_npm_alias_of_the_declared_package_gets_a_registry_hint() {
+        let info = VersionInfo {
+            latest: Some("1.2.0".to_string()),
+            ..Default::default()
+        };
+        let label = |spec: &str| match create_inlay_hint(
+            &make_test_dep("lodash", spec),
+            Some(&info),
+            FileType::Npm,
+            DeprecatedFilter::default(),
+        )
+        .label
+        {
+            InlayHintLabel::String(label) => label,
+            other => panic!("unexpected label: {other:?}"),
+        };
+
+        assert_eq!(label("npm:lodash@^1.2.0").trim(), "✓");
+        assert_eq!(label("npm:lodash@^1.0.0").trim(), "-> 1.2.0");
+        // Without a range the alias accepts any version.
+        assert_eq!(label("npm:lodash").trim(), "✓");
+    }
+
+    #[test]
+    fn test_compare_versions_any_version_range_is_up_to_date() {
+        let info = VersionInfo {
+            latest: Some("1.2.0".to_string()),
+            ..Default::default()
+        };
+
+        for spec in ["*", "npm:*", "npm:lodash", " *", " npm:latest ", " npm:* "] {
+            assert!(
+                matches!(compare_versions(spec, &info), VersionStatus::UpToDate),
+                "{spec}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_quiet_npm_alias_tooltip_names_the_real_package() {
+        let hint = create_inlay_hint(
+            &make_test_dep("foo", "npm:bar@^1.0.0"),
+            Some(&VersionInfo::default()),
+            FileType::Npm,
+            DeprecatedFilter::default(),
+        );
+        let Some(tower_lsp::lsp_types::InlayHintTooltip::String(tooltip)) = hint.tooltip else {
+            panic!("unexpected tooltip: {:?}", hint.tooltip);
+        };
+
+        assert!(tooltip.contains("\"bar\""), "tooltip: {tooltip}");
+        assert!(!tooltip.contains("local/path"), "tooltip: {tooltip}");
     }
 
     #[test]

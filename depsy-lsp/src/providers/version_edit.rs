@@ -1,5 +1,6 @@
 use crate::file_types::FileType;
 use crate::parsers::Dependency;
+use crate::parsers::npm_lock::{npm_alias_target, npm_spec_range};
 
 #[derive(Clone, Copy)]
 struct Operator {
@@ -43,19 +44,30 @@ pub(crate) fn render_version_update(
             ],
             true,
         ),
-        FileType::Npm => render_with_operators(
-            core,
-            latest,
-            file_type,
-            &[
-                operator(">=", false),
-                operator("<=", false),
-                operator("^", true),
-                operator("~", true),
-                operator("=", false),
-            ],
-            true,
-        ),
+        FileType::Npm => {
+            // `npm:^1.0.0` and `npm:name@^1.0.0` keep their prefix around the new
+            // range. An alias of another package is not this package's update, and
+            // `npm:name` has no range to rewrite.
+            let range = npm_spec_range(core);
+            let prefix = core.strip_suffix(range)?;
+            if npm_alias_target(core).is_some_and(|(target, _)| target != dependency.name) {
+                return None;
+            }
+            render_with_operators(
+                range,
+                latest,
+                file_type,
+                &[
+                    operator(">=", false),
+                    operator("<=", false),
+                    operator("^", true),
+                    operator("~", true),
+                    operator("=", false),
+                ],
+                true,
+            )
+            .map(|rendered| format!("{prefix}{rendered}"))
+        }
         FileType::Python => render_with_operators(
             core,
             latest,
@@ -475,6 +487,34 @@ mod tests {
                 render_version_update(&dependency(original), latest, file_type),
                 Some(expected.to_string()),
                 "failed for {file_type:?} {original:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn keeps_the_npm_protocol_prefix_of_the_declared_package() {
+        let cases = [
+            ("npm:^1.2", "npm:^2.3"),
+            ("npm:1.2.3", "npm:2.3.4"),
+            ("npm:package@~1.2.3", "npm:package@~2.3.4"),
+        ];
+
+        for (version, expected) in cases {
+            assert_eq!(
+                render_version_update(&dependency(version), "2.3.4", FileType::Npm).as_deref(),
+                Some(expected),
+                "{version}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_npm_specs_without_a_version_to_rewrite() {
+        for version in ["npm:other@^1.2.3", "npm:package", "npm:*", "npm:latest"] {
+            assert_eq!(
+                render_version_update(&dependency(version), "2.3.4", FileType::Npm),
+                None,
+                "{version}"
             );
         }
     }

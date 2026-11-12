@@ -26,6 +26,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the dependency is local, and still lists the transitive vulnerabilities the
   lockfile attributes to it. `npm:` specs (an alias, or a tag or range of the
   package itself such as `npm:latest`) are still looked up.
+- An `npm:` tag or range of the declared package (`"lodash": "npm:latest"`,
+  `"lodash": "npm:^1.0.0"`) is no longer treated as a local dependency. The
+  inlay hint and the diagnostics now compare it against the registry like the
+  hover does, and the background refresh keeps its data current. A real alias
+  (`npm:other@1`) keeps its `→ Local` hint unless OSV reports a finding on it.
+- A dependency pinned to the `latest` tag (`"lodash": "latest"`,
+  `"lodash": "npm:latest"`) no longer shows an update to the version it
+  already follows when no lockfile resolves it.
+- An npm alias of the declared package (`"lodash": "npm:lodash@^4.0.0"`) is
+  compared by its range, so it no longer shows an update to the version it
+  already accepts when no lockfile resolves it. Its inlay hint now shows the
+  registry status instead of `→ Local`, in line with its diagnostic.
+- Vulnerabilities are looked up for an `npm:` version or range of the declared
+  package (`"lodash": "npm:4.17.20"`) when no lockfile resolves it. OSV was
+  sent the spec with its `npm:` prefix and matched nothing.
+- The "Update to" quick-fix is offered for `npm:` ranges of the declared
+  package and keeps the prefix (`npm:^1.0.0` becomes `npm:^2.0.0`,
+  `npm:lodash@^3.0.0` becomes `npm:lodash@^4.0.0`).
+- A dependency that accepts any version (`"lodash": "*"`, `"lodash": "npm:*"`,
+  `"lodash": "npm:lodash"`) no longer shows an update when no lockfile
+  resolves it.
 - A RustSec advisory now counts as "unmaintained" only when its
   `informational` field says so. A real vulnerability whose summary mentions
   "deprecated" or "maintained" no longer marks the package deprecated, and

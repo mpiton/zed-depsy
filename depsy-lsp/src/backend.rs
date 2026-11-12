@@ -2033,7 +2033,10 @@ impl LanguageServer for DepsyBackend {
         drop(doc);
 
         let alias = npm_alias_package(file_type.to_ecosystem(), &dep);
-        let content = if alias.is_none() && is_local_dependency(dep.declared_spec()) {
+        // An `npm:` spec names a registry package: an alias, or a tag or range of the
+        // declared package itself.
+        let spec = dep.declared_spec();
+        let content = if !spec.starts_with("npm:") && is_local_dependency(spec) {
             // No registry publishes a path, git or workspace dependency, but the lockfile
             // can still attribute vulnerable transitive packages to it.
             fmt::from_fn(|f| {
@@ -3488,6 +3491,35 @@ mod tests {
         assert_eq!(
             markdown,
             "## my-lodash\n\nCould not fetch package information."
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn hover_on_an_npm_tag_of_the_package_itself_still_asks_the_registry() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        // Given `npm:latest`, a tag of the declared package and not an alias, and a registry
+        // that is down
+        let registry = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/lodash"))
+            .respond_with(ResponseTemplate::new(503))
+            .expect(1..)
+            .mount(&registry)
+            .await;
+        let (service, _socket) = tower_lsp::LspService::new(DepsyBackend::in_memory);
+        let backend = service.inner();
+        use_npm_registry(backend, &registry).await;
+
+        // When its version is hovered
+        let markdown =
+            hover_markdown(backend, make_dep("lodash", "npm:latest", None), Vec::new()).await;
+
+        // Then the declared package was looked up, and the failure is reported
+        assert_eq!(
+            markdown,
+            "## lodash\n\nCould not fetch package information."
         );
     }
 

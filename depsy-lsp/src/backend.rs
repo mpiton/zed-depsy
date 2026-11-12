@@ -74,7 +74,7 @@ use crate::providers::code_actions::create_code_actions;
 use crate::providers::completion::{fmt_release_age, get_completions};
 use crate::providers::diagnostics::{PackageFilters, VulnSources, create_diagnostics};
 use crate::providers::document_links::create_document_links;
-use crate::providers::inlay_hints::create_inlay_hint;
+use crate::providers::inlay_hints::{create_inlay_hint, is_local_dependency};
 use crate::registries::cargo_sparse::CargoSparseRegistry;
 use crate::registries::crates_io::CratesIoRegistry;
 use crate::registries::go_proxy::GoProxyRegistry;
@@ -2024,18 +2024,26 @@ impl LanguageServer for DepsyBackend {
         // Drop the lock before async call
         drop(doc);
 
-        // Get version info
-        let registry_name = npm_alias_package(file_type.to_ecosystem(), &dep).unwrap_or(dep_name);
-        let mut version_info = self
-            .get_version_info(file_type, registry_name, dep.registry.as_deref())
-            .await;
-        if let Some(info) = version_info.as_mut() {
-            apply_osv_result(info, &self.vuln_cache, file_type.to_ecosystem(), &dep);
-        }
+        let alias = npm_alias_package(file_type.to_ecosystem(), &dep);
+        let content = if alias.is_none() && is_local_dependency(dep.declared_spec()) {
+            // No registry publishes a path, git or workspace dependency.
+            format!(
+                "## {dep_name}\n\nLocal dependency. Version info is not available for local packages."
+            )
+        } else {
+            // Get version info
+            let registry_name = alias.unwrap_or(dep_name);
+            let mut version_info = self
+                .get_version_info(file_type, registry_name, dep.registry.as_deref())
+                .await;
+            if let Some(info) = version_info.as_mut() {
+                apply_osv_result(info, &self.vuln_cache, file_type.to_ecosystem(), &dep);
+            }
 
-        let content = match version_info {
-            Some(info) => format_hover_content(&dep, file_type, &info, &doc_transitive_vulns),
-            None => format!("## {dep_name}\n\nCould not fetch package information."),
+            match version_info {
+                Some(info) => format_hover_content(&dep, file_type, &info, &doc_transitive_vulns),
+                None => format!("## {dep_name}\n\nCould not fetch package information."),
+            }
         };
 
         Ok(Some(Hover {
@@ -3327,6 +3335,91 @@ mod tests {
 
         // Then it shows the expired data rather than nothing
         assert_eq!(hovered.unwrap().latest.as_deref(), Some("1.0.0"));
+    }
+
+    /// Hovers the version of the only dependency of an npm manifest and returns the markdown.
+    async fn hover_markdown(backend: &DepsyBackend, dep: Dependency) -> String {
+        let uri = Url::parse("file:///hover/package.json").unwrap();
+        let position = Position {
+            line: dep.version_span.line,
+            character: dep.version_span.line_start,
+        };
+        backend.documents.insert(
+            uri.clone(),
+            DocumentState {
+                dependencies: vec![dep],
+                file_type: FileType::Npm,
+                lockfile_graph: None,
+                transitive_vulns_by_direct: hashbrown::HashMap::new(),
+            },
+        );
+        let hover = backend
+            .hover(HoverParams {
+                text_document_position_params: TextDocumentPositionParams {
+                    text_document: TextDocumentIdentifier { uri },
+                    position,
+                },
+                work_done_progress_params: WorkDoneProgressParams::default(),
+            })
+            .await
+            .unwrap()
+            .expect("the version span must produce a hover");
+        match hover.contents {
+            HoverContents::Markup(markup) => markup.value,
+            other => panic!("expected markdown, got {other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn hover_on_a_workspace_dependency_skips_the_registry() {
+        // Given a workspace package that no registry publishes
+        let registry = wiremock::MockServer::start().await;
+        let (service, _socket) = tower_lsp::LspService::new(DepsyBackend::in_memory);
+        let backend = service.inner();
+        use_npm_registry(backend, &registry).await;
+
+        // When its version is hovered
+        let markdown = hover_markdown(
+            backend,
+            make_dep("@scope/other-package", "workspace:*", None),
+        )
+        .await;
+
+        // Then the hover says it is local, and the registry was never asked
+        assert_eq!(
+            markdown,
+            "## @scope/other-package\n\nLocal dependency. Version info is not available for local packages."
+        );
+        let requests = registry.received_requests().await.unwrap_or_default();
+        assert!(requests.is_empty(), "unexpected lookups: {requests:?}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn hover_on_an_npm_alias_still_asks_the_registry_for_the_real_package() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        // Given an alias, whose `npm:` spec reads like a local one, and a registry that is down
+        let registry = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/lodash"))
+            .respond_with(ResponseTemplate::new(503))
+            .expect(1..)
+            .mount(&registry)
+            .await;
+        let (service, _socket) = tower_lsp::LspService::new(DepsyBackend::in_memory);
+        let backend = service.inner();
+        use_npm_registry(backend, &registry).await;
+
+        // When its version is hovered
+        let markdown =
+            hover_markdown(backend, make_dep("my-lodash", "npm:lodash@4.17.21", None)).await;
+
+        // Then the real package was looked up, and the failure is reported
+        assert_eq!(
+            markdown,
+            "## my-lodash\n\nCould not fetch package information."
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

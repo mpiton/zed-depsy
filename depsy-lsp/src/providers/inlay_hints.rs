@@ -154,12 +154,21 @@ fn create_hint_label_and_tooltip(
     let dep_name = &*dep.name;
 
     // An npm alias keeps the local hint unless OSV has something to report on it.
-    let is_quiet_alias = npm_alias_package(file_type.to_ecosystem(), dep).is_some()
+    if let Some(package) = npm_alias_package(file_type.to_ecosystem(), dep)
         && vulnerabilities.is_empty()
-        && !is_deprecated;
+        && !is_deprecated
+    {
+        let tooltip = format!(
+            "**npm Alias**\n\n\
+            \"{dep_name}\" is an alias of the registry package \"{package}\".\n\n\
+            Version info is not shown for aliases. Vulnerabilities and \
+            deprecations reported for \"{package}\" still are.",
+        );
+        return ("→ Local".to_string(), Some(tooltip));
+    }
 
     // Handle local dependencies first (highest priority - no registry lookup needed)
-    if is_local_dependency(dep.declared_spec()) || is_quiet_alias {
+    if is_local_dependency(dep.declared_spec()) {
         let tooltip = format!(
             "**Local Dependency**\n\n\
             \"{dep_name}\" is a local/path dependency.\n\n\
@@ -1530,6 +1539,22 @@ mod tests {
         assert_eq!(label("npm:^1.0.0").trim(), "-> 1.2.0");
         // A tag reads like the bare `latest` does.
         assert_eq!(label("npm:latest"), label("latest"));
+    }
+
+    #[test]
+    fn test_quiet_npm_alias_tooltip_names_the_real_package() {
+        let hint = create_inlay_hint(
+            &make_test_dep("foo", "npm:bar@^1.0.0"),
+            Some(&VersionInfo::default()),
+            FileType::Npm,
+            DeprecatedFilter::default(),
+        );
+        let Some(tower_lsp::lsp_types::InlayHintTooltip::String(tooltip)) = hint.tooltip else {
+            panic!("unexpected tooltip: {:?}", hint.tooltip);
+        };
+
+        assert!(tooltip.contains("\"bar\""), "tooltip: {tooltip}");
+        assert!(!tooltip.contains("local/path"), "tooltip: {tooltip}");
     }
 
     #[test]

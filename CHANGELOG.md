@@ -31,6 +31,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   inlay hint and the diagnostics now compare it against the registry like the
   hover does, and the background refresh keeps its data current. A real alias
   (`npm:other@1`) keeps its `→ Local` hint unless OSV reports a finding on it.
+- A dependency pinned to the `latest` tag (`"lodash": "latest"`,
+  `"lodash": "npm:latest"`) no longer shows an update to the version it
+  already follows when no lockfile resolves it.
 - A RustSec advisory now counts as "unmaintained" only when its
   `informational` field says so. A real vulnerability whose summary mentions
   "deprecated" or "maintained" no longer marks the package deprecated, and

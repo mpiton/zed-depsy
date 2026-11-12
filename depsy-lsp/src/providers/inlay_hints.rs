@@ -560,6 +560,10 @@ pub fn compare_versions(current: &str, info: &VersionInfo) -> VersionStatus {
     };
     // `npm:^1.0.0` is the range `^1.0.0` of the declared package.
     let current = current.strip_prefix("npm:").unwrap_or(current);
+    // The `latest` tag follows the newest release, so there is nothing to update to.
+    if current == "latest" {
+        return VersionStatus::UpToDate;
+    }
 
     // Handle Python compatible release operator (~=)
     // ~=X.Y means >=X.Y, ==X.* — compare at the same granularity
@@ -1537,8 +1541,9 @@ mod tests {
         assert_eq!(label("npm:1.2.0").trim(), "✓");
         assert_eq!(label("npm:^1.2.0").trim(), "✓");
         assert_eq!(label("npm:^1.0.0").trim(), "-> 1.2.0");
-        // A tag reads like the bare `latest` does.
-        assert_eq!(label("npm:latest"), label("latest"));
+        // The `latest` tag follows the newest release, so it has nothing to update to.
+        assert_eq!(label("npm:latest").trim(), "✓");
+        assert_eq!(label("latest").trim(), "✓");
     }
 
     #[test]

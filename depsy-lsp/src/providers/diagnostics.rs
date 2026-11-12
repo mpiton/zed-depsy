@@ -699,6 +699,8 @@ mod tests {
         };
         assert_eq!(on_line(0), ["Update available: npm:^1.0.0 -> 2.0.0"]);
         assert!(on_line(1).is_empty(), "{diagnostics:?}");
+        // `latest` follows the newest release: nothing to update to.
+        assert!(on_line(2).is_empty(), "{diagnostics:?}");
     }
 
     #[tokio::test]

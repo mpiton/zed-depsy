@@ -1493,6 +1493,27 @@ fn format_hover_content(
     .to_string()
 }
 
+/// Formats the hover of a path, git or workspace dependency, which no registry publishes.
+///
+/// The lockfile can still attribute vulnerable transitive packages to it, so they follow
+/// the local notice.
+fn format_local_hover_content(
+    dep_name: &str,
+    doc_transitive_vulns: &[crate::registries::TransitiveVuln],
+) -> String {
+    fmt::from_fn(|f| {
+        write!(
+            f,
+            "## {dep_name}\n\nLocal dependency. Version info is not available for local packages."
+        )?;
+        if !doc_transitive_vulns.is_empty() {
+            writeln!(f)?;
+        }
+        write_transitive_vulns(f, doc_transitive_vulns)
+    })
+    .to_string()
+}
+
 /// Writes the transitive vulnerability section of a hover, or nothing without findings.
 fn write_transitive_vulns(
     f: &mut fmt::Formatter<'_>,
@@ -2032,24 +2053,12 @@ impl LanguageServer for DepsyBackend {
         // Drop the lock before async call
         drop(doc);
 
-        let alias = npm_alias_package(file_type.to_ecosystem(), &dep);
         let content = if is_local_dependency(dep.declared_spec()) {
-            // No registry publishes a path, git or workspace dependency, but the lockfile
-            // can still attribute vulnerable transitive packages to it.
-            fmt::from_fn(|f| {
-                write!(
-                    f,
-                    "## {dep_name}\n\nLocal dependency. Version info is not available for local packages."
-                )?;
-                if !doc_transitive_vulns.is_empty() {
-                    writeln!(f)?;
-                }
-                write_transitive_vulns(f, &doc_transitive_vulns)
-            })
-            .to_string()
+            format_local_hover_content(dep_name, &doc_transitive_vulns)
         } else {
             // Get version info
-            let registry_name = alias.unwrap_or(dep_name);
+            let registry_name =
+                npm_alias_package(file_type.to_ecosystem(), &dep).unwrap_or(dep_name);
             let mut version_info = self
                 .get_version_info(file_type, registry_name, dep.registry.as_deref())
                 .await;
@@ -3422,6 +3431,29 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn hover_on_a_catalog_dependency_linked_locally_skips_the_registry() {
+        // Given a pnpm catalog entry that points at a local package
+        let registry = wiremock::MockServer::start().await;
+        let (service, _socket) = tower_lsp::LspService::new(DepsyBackend::in_memory);
+        let backend = service.inner();
+        use_npm_registry(backend, &registry).await;
+        let mut dep = make_dep("pkg", "catalog:", None);
+        dep.catalog_spec = Some("link:../pkg".to_string());
+
+        // When its version is hovered
+        let markdown = hover_markdown(backend, dep, Vec::new()).await;
+
+        // Then the catalog spec decides: the hover says it is local, and the registry
+        // was never asked
+        assert_eq!(
+            markdown,
+            "## pkg\n\nLocal dependency. Version info is not available for local packages."
+        );
+        let requests = registry.received_requests().await.unwrap_or_default();
+        assert!(requests.is_empty(), "unexpected lookups: {requests:?}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn hover_on_a_workspace_dependency_keeps_its_transitive_vulnerabilities() {
         use crate::registries::{TransitiveVuln, Vulnerability, VulnerabilitySeverity};
 
@@ -3459,15 +3491,16 @@ mod tests {
         assert!(requests.is_empty(), "unexpected lookups: {requests:?}");
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn hover_on_an_npm_alias_still_asks_the_registry_for_the_real_package() {
+    /// Hovers the version of `dep` while the npm registry is down, and returns the markdown.
+    ///
+    /// Fails the test unless the registry was asked for `package`.
+    async fn hover_markdown_with_the_registry_down(package: &str, dep: Dependency) -> String {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        // Given an alias, whose `npm:` spec reads like a local one, and a registry that is down
         let registry = MockServer::start().await;
         Mock::given(method("GET"))
-            .and(path("/lodash"))
+            .and(path(format!("/{package}")))
             .respond_with(ResponseTemplate::new(503))
             .expect(1..)
             .mount(&registry)
@@ -3476,11 +3509,18 @@ mod tests {
         let backend = service.inner();
         use_npm_registry(backend, &registry).await;
 
+        let markdown = hover_markdown(backend, dep, Vec::new()).await;
+        registry.verify().await;
+        markdown
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn hover_on_an_npm_alias_still_asks_the_registry_for_the_real_package() {
+        // Given an alias, whose `npm:` spec reads like a local one, and a registry that is down
         // When its version is hovered
-        let markdown = hover_markdown(
-            backend,
+        let markdown = hover_markdown_with_the_registry_down(
+            "lodash",
             make_dep("my-lodash", "npm:lodash@4.17.21", None),
-            Vec::new(),
         )
         .await;
 
@@ -3493,25 +3533,12 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn hover_on_an_npm_tag_of_the_package_itself_still_asks_the_registry() {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
         // Given `npm:latest`, a tag of the declared package and not an alias, and a registry
         // that is down
-        let registry = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/lodash"))
-            .respond_with(ResponseTemplate::new(503))
-            .expect(1..)
-            .mount(&registry)
-            .await;
-        let (service, _socket) = tower_lsp::LspService::new(DepsyBackend::in_memory);
-        let backend = service.inner();
-        use_npm_registry(backend, &registry).await;
-
         // When its version is hovered
         let markdown =
-            hover_markdown(backend, make_dep("lodash", "npm:latest", None), Vec::new()).await;
+            hover_markdown_with_the_registry_down("lodash", make_dep("lodash", "npm:latest", None))
+                .await;
 
         // Then the declared package was looked up, and the failure is reported
         assert_eq!(

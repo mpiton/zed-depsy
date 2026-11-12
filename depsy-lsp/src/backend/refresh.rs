@@ -31,6 +31,7 @@ use crate::parsers::Dependency;
 use crate::parsers::lockfile_graph::LockfileGraph;
 use crate::providers::inlay_hints::is_local_dependency;
 use crate::vulnerabilities::cache::VulnCacheKey;
+use crate::vulnerabilities::npm_alias_package;
 
 /// How often open documents are checked for missing or expired data.
 pub(super) const REFRESH_INTERVAL: Duration = Duration::from_secs(10);
@@ -109,7 +110,10 @@ impl ProcessingContext {
         let mut targets: HashMap<String, RefreshTarget> = HashMap::new();
         for doc in self.documents.iter() {
             for dep in &doc.dependencies {
+                // An npm alias is published under another name than the one this
+                // pass would fetch.
                 if is_local_dependency(dep.declared_spec())
+                    || npm_alias_package(doc.file_type.to_ecosystem(), dep).is_some()
                     || is_package_ignored(&dep.name, &ignored)
                 {
                     continue;
@@ -645,6 +649,35 @@ mod tests {
         // Then the registry sees no request at all
         assert_eq!(refreshed, 0);
         assert!(registry.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn npm_tag_of_the_package_itself_is_refreshed_and_an_alias_is_not() {
+        // Given `npm:latest`, a tag of the declared package, next to an alias of another one
+        let registry = MockServer::start().await;
+        mock_package(&registry, "lodash", ok_package("4.17.21")).await;
+        let (service, _socket) = LspService::new(DepsyBackend::in_memory);
+        let backend = service.inner();
+        use_npm_registry(backend, &registry).await;
+        let ctx = backend.create_processing_context().await;
+        open_document(
+            backend,
+            &manifest_uri("tagged"),
+            vec![
+                make_dep("lodash", "npm:latest", None),
+                make_dep("my-utils", "npm:other@^1.0.0", None),
+            ],
+        );
+
+        // When the open documents are refreshed
+        let refreshed = ctx
+            .refresh_open_documents(&mut RefreshState::default())
+            .await;
+
+        // Then only the declared package is fetched: the alias's local name is no package
+        assert_eq!(refreshed, 1);
+        assert_eq!(requests_for(&registry, "lodash").await, 1);
+        assert_eq!(registry.received_requests().await.unwrap().len(), 1);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

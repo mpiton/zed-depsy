@@ -93,11 +93,9 @@ pub async fn create_diagnostics(
             continue;
         }
 
-        // Show informational diagnostic for local/path dependencies. An npm alias is
-        // a registry package whose advisories come from OSV, so it continues below.
-        if is_local_dependency(dep.declared_spec())
-            && npm_alias_package(file_type.to_ecosystem(), dep).is_none()
-        {
+        // Show informational diagnostic for local/path dependencies. An `npm:` spec
+        // names a registry package, so it continues below.
+        if is_local_dependency(dep.declared_spec()) {
             diagnostics.push(create_local_dependency_diagnostic(dep));
             continue;
         }
@@ -653,6 +651,54 @@ mod tests {
 
         assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
         assert_eq!(diagnostics[0].severity, Some(DiagnosticSeverity::ERROR));
+    }
+
+    #[tokio::test]
+    async fn npm_tag_or_range_of_the_package_itself_is_checked_against_the_registry() {
+        let deps = [
+            create_test_dependency("lodash", "npm:^1.0.0", 0),
+            create_test_dependency("lodash", "npm:2.0.0", 1),
+            create_test_dependency("lodash", "npm:latest", 2),
+        ];
+        let cache = MemoryCache::new();
+        cache
+            .insert(
+                "npm:lodash".to_string(),
+                VersionInfo {
+                    latest: Some("2.0.0".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await;
+
+        let diagnostics = create_diagnostics(
+            &deps,
+            &cache,
+            |name| format!("npm:{name}"),
+            None,
+            FileType::Npm,
+            VulnSources {
+                osv_results: &VulnerabilityCache::with_ttl(3600),
+                transitive: &hashbrown::HashMap::new(),
+            },
+            PackageFilters::default(),
+        )
+        .await;
+
+        let local = NumberOrString::String("local".to_string());
+        assert!(
+            diagnostics.iter().all(|d| d.code.as_ref() != Some(&local)),
+            "{diagnostics:?}"
+        );
+        let on_line = |line: u32| -> Vec<&str> {
+            diagnostics
+                .iter()
+                .filter(|d| d.range.start.line == line)
+                .map(|d| d.message.as_str())
+                .collect()
+        };
+        assert_eq!(on_line(0), ["Update available: npm:^1.0.0 -> 2.0.0"]);
+        assert!(on_line(1).is_empty(), "{diagnostics:?}");
     }
 
     #[tokio::test]

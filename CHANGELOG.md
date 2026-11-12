@@ -26,6 +26,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the dependency is local, and still lists the transitive vulnerabilities the
   lockfile attributes to it. `npm:` specs (an alias, or a tag or range of the
   package itself such as `npm:latest`) are still looked up.
+- An `npm:` tag or range of the declared package (`"lodash": "npm:latest"`,
+  `"lodash": "npm:^1.0.0"`) is no longer treated as a local dependency. The
+  inlay hint and the diagnostics now compare it against the registry like the
+  hover does, and the background refresh keeps its data current. A real alias
+  (`npm:other@1`) keeps its `→ Local` hint unless OSV reports a finding on it.
 - A RustSec advisory now counts as "unmaintained" only when its
   `informational` field says so. A real vulnerability whose summary mentions
   "deprecated" or "maintained" no longer marks the package deprecated, and

@@ -2033,10 +2033,7 @@ impl LanguageServer for DepsyBackend {
         drop(doc);
 
         let alias = npm_alias_package(file_type.to_ecosystem(), &dep);
-        // An `npm:` spec names a registry package: an alias, or a tag or range of the
-        // declared package itself.
-        let spec = dep.declared_spec();
-        let content = if !spec.starts_with("npm:") && is_local_dependency(spec) {
+        let content = if is_local_dependency(dep.declared_spec()) {
             // No registry publishes a path, git or workspace dependency, but the lockfile
             // can still attribute vulnerable transitive packages to it.
             fmt::from_fn(|f| {

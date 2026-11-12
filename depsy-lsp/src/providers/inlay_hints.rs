@@ -154,11 +154,12 @@ fn create_hint_label_and_tooltip(
     let dep_name = &*dep.name;
 
     // An npm alias keeps the local hint unless OSV has something to report on it.
-    let alias_has_finding = npm_alias_package(file_type.to_ecosystem(), dep).is_some()
-        && (!vulnerabilities.is_empty() || is_deprecated);
+    let is_quiet_alias = npm_alias_package(file_type.to_ecosystem(), dep).is_some()
+        && vulnerabilities.is_empty()
+        && !is_deprecated;
 
     // Handle local dependencies first (highest priority - no registry lookup needed)
-    if is_local_dependency(dep.declared_spec()) && !alias_has_finding {
+    if is_local_dependency(dep.declared_spec()) || is_quiet_alias {
         let tooltip = format!(
             "**Local Dependency**\n\n\
             \"{dep_name}\" is a local/path dependency.\n\n\
@@ -428,12 +429,18 @@ fn fmt_yanked_tooltip(
     })
 }
 
-/// Returns `true` when `version` refers to a local path, git repository, or
-/// URL source rather than a plain registry version string.
+/// Returns `true` when `version` names no registry package.
+///
+/// That is a local path, git repository, or URL source rather than a registry
+/// version string. Hover, inlay hints, diagnostics and the background refresh
+/// all use this to decide whether a dependency has a registry package.
 ///
 /// The following prefixes are recognised as local/non-registry sources:
 /// `./`, `../`, `/`, `file:`, `git+`, `git@`, `git:`, `https://`, `http://`,
-/// `github:`, `gitlab:`, `bitbucket:`, `workspace:`, `link:`, `portal:`, `npm:`.
+/// `github:`, `gitlab:`, `bitbucket:`, `workspace:`, `link:`, `portal:`.
+///
+/// An `npm:` spec is not local: it names a registry package, either another one
+/// (`npm:other@1`, an alias) or a tag or range of the declared one (`npm:latest`).
 ///
 /// # Examples
 ///
@@ -447,6 +454,7 @@ fn fmt_yanked_tooltip(
 /// assert!(!is_local_dependency("1.2.3"));
 /// assert!(!is_local_dependency("^1.0.0"));
 /// assert!(!is_local_dependency("latest"));
+/// assert!(!is_local_dependency("npm:latest"));
 /// ```
 pub fn is_local_dependency(version: &str) -> bool {
     // Path-based dependencies
@@ -470,8 +478,6 @@ pub fn is_local_dependency(version: &str) -> bool {
         || version.starts_with("workspace:")
         || version.starts_with("link:")
         || version.starts_with("portal:")
-        // npm aliases
-        || version.starts_with("npm:")
 }
 
 /// Strip PEP 440 pre-release suffixes from a version string
@@ -543,6 +549,8 @@ pub fn compare_versions(current: &str, info: &VersionInfo) -> VersionStatus {
     let Some(latest) = info.latest.as_deref() else {
         return VersionStatus::Unknown;
     };
+    // `npm:^1.0.0` is the range `^1.0.0` of the declared package.
+    let current = current.strip_prefix("npm:").unwrap_or(current);
 
     // Handle Python compatible release operator (~=)
     // ~=X.Y means >=X.Y, ==X.* — compare at the same granularity
@@ -1450,7 +1458,11 @@ mod tests {
         assert!(is_local_dependency("workspace:*"));
         assert!(is_local_dependency("link:./my-lib"));
         assert!(is_local_dependency("portal:./my-lib"));
-        assert!(is_local_dependency("npm:lodash@^4.0.0"));
+
+        // Not local - an `npm:` spec names a registry package
+        assert!(!is_local_dependency("npm:lodash@^4.0.0"));
+        assert!(!is_local_dependency("npm:latest"));
+        assert!(!is_local_dependency("npm:^1.0.0"));
 
         // Not local - regular versions
         assert!(!is_local_dependency("1.0.0"));
@@ -1493,6 +1505,31 @@ mod tests {
             ..Default::default()
         };
         assert!(label(&deprecated).contains("Deprecated"));
+    }
+
+    #[test]
+    fn test_npm_tag_or_range_of_the_package_itself_gets_a_registry_hint() {
+        let info = VersionInfo {
+            latest: Some("1.2.0".to_string()),
+            ..Default::default()
+        };
+        let label = |spec: &str| match create_inlay_hint(
+            &make_test_dep("lodash", spec),
+            Some(&info),
+            FileType::Npm,
+            DeprecatedFilter::default(),
+        )
+        .label
+        {
+            InlayHintLabel::String(label) => label,
+            other => panic!("unexpected label: {other:?}"),
+        };
+
+        assert_eq!(label("npm:1.2.0").trim(), "✓");
+        assert_eq!(label("npm:^1.2.0").trim(), "✓");
+        assert_eq!(label("npm:^1.0.0").trim(), "-> 1.2.0");
+        // A tag reads like the bare `latest` does.
+        assert_eq!(label("npm:latest"), label("latest"));
     }
 
     #[test]

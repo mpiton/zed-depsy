@@ -1953,10 +1953,10 @@ impl LanguageServer for DepsyBackend {
 
     async fn inlay_hint(&self, params: InlayHintParams) -> Result<Option<Vec<InlayHint>>> {
         // Read config values and drop the guard immediately so it doesn't cross await points.
+        // A poisoned lock still holds the configuration, so the hints and the ignore list
+        // stay as configured.
         let (show_up_to_date, deprecated) = {
-            let Ok(config) = self.config.read() else {
-                return Ok(Some(vec![]));
-            };
+            let config = self.config.read().unwrap_or_else(PoisonError::into_inner);
             if !config.inlay_hints.enabled {
                 return Ok(Some(vec![]));
             }

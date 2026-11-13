@@ -805,6 +805,54 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn inlay_hints_keep_the_ignore_list_when_the_config_lock_is_poisoned() {
+        // Given two outdated packages, one of them ignored, and a poisoned configuration lock
+        let (service, _observed) = observed_service().await;
+        let backend = service.inner();
+        backend.config.write().unwrap().ignore = vec!["lodash".to_string()];
+        for (name, latest) in [("lodash", "2.0.0"), ("react", "19.0.0")] {
+            backend
+                .version_cache
+                .insert(
+                    FileType::Npm.cache_key(name),
+                    VersionInfo {
+                        latest: Some(latest.to_string()),
+                        ..VersionInfo::default()
+                    },
+                )
+                .await;
+        }
+        let mut react = make_dep("react", "18.0.0", None);
+        react.name_span.line = 1;
+        react.version_span.line = 1;
+        let uri = manifest_uri("poisoned-hints");
+        open_document(
+            backend,
+            &uri,
+            vec![make_dep("lodash", "1.0.0", None), react],
+        );
+        poison_config(backend);
+
+        // When the inlay hints are requested
+        let hints = backend
+            .inlay_hint(InlayHintParams {
+                text_document: TextDocumentIdentifier { uri },
+                range: Range::new(Position::new(0, 0), Position::new(2, 0)),
+                work_done_progress_params: WorkDoneProgressParams::default(),
+            })
+            .await
+            .unwrap()
+            .unwrap_or_default();
+
+        // Then the package that is not ignored still gets its hint, and the ignored one none
+        assert_eq!(hints.len(), 1, "{hints:?}");
+        let InlayHintLabel::String(label) = &hints[0].label else {
+            panic!("expected a string label");
+        };
+        assert!(label.contains("19.0.0"), "got {label}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn deprecation_hidden_from_diagnostics_still_shows_in_the_inlay_hint() {
         // Given a deprecated package and settings that hide deprecation from diagnostics only
         let (service, mut observed) = observed_service_with(json!({

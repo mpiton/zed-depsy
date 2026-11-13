@@ -15,7 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   such as `my-private-crate = { version = "*", path = "../my-private-crate" }`
   no longer logs `Failed to fetch version info ... 404 Not Found` once it is
   ignored. The hover of an ignored package says it is ignored, without the
-  registry data cached before, and keeps the advisories OSV reports for it.
+  registry data that was cached before it was ignored, and keeps the OSV
+  advisories reported for it.
 - The vulnerability report reads the OSV results of every dependency instead
   of requiring registry data, so it keeps listing the advisories of ignored
   packages, and of packages whose registry lookup failed.

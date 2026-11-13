@@ -590,7 +590,7 @@ impl ProcessingContext {
         }) else {
             return;
         };
-        let (diagnostics_enabled, severity_filter, ignored_packages, deprecated) = self
+        let (diagnostics_enabled, severity_filter, deprecated) = self
             .config
             .read()
             .map(|c| {
@@ -599,11 +599,11 @@ impl ProcessingContext {
                     c.security
                         .show_diagnostics
                         .then(|| c.security.min_severity_level()),
-                    c.ignore.clone(),
                     c.deprecated.clone(),
                 )
             })
-            .unwrap_or((true, None, Vec::new(), DeprecatedConfig::default()));
+            .unwrap_or((true, None, DeprecatedConfig::default()));
+        let ignored_packages = ignored_packages(&self.config);
         if !diagnostics_enabled {
             return;
         }
@@ -1520,10 +1520,11 @@ fn write_direct_vulns(
     Ok(())
 }
 
-/// Formats the hover of an ignored package with no cached registry data.
+/// Formats the hover of an ignored package.
 ///
-/// Ignored packages are never looked up on their registry, but OSV still checks them, so their
-/// advisories and those of their transitive packages follow the notice.
+/// Ignored packages are never looked up on their registry, so the hover shows no registry data,
+/// even data cached before the package was ignored. OSV still checks them, so their advisories
+/// and those of their transitive packages follow the notice.
 fn format_ignored_hover_content(
     dep_name: &str,
     vulnerabilities: &[Vulnerability],
@@ -1952,7 +1953,7 @@ impl LanguageServer for DepsyBackend {
 
     async fn inlay_hint(&self, params: InlayHintParams) -> Result<Option<Vec<InlayHint>>> {
         // Read config values and drop the guard immediately so it doesn't cross await points.
-        let (show_up_to_date, ignored_packages, deprecated) = {
+        let (show_up_to_date, deprecated) = {
             let Ok(config) = self.config.read() else {
                 return Ok(Some(vec![]));
             };
@@ -1961,10 +1962,10 @@ impl LanguageServer for DepsyBackend {
             }
             (
                 config.inlay_hints.show_up_to_date,
-                config.ignore.clone(),
                 config.deprecated.clone(),
             )
         };
+        let ignored_packages = ignored_packages(&self.config);
 
         let uri = &params.text_document.uri;
 
@@ -2106,25 +2107,13 @@ impl LanguageServer for DepsyBackend {
         let content = if is_local_dependency(dep.declared_spec()) {
             format_local_hover_content(dep_name, &doc_transitive_vulns)
         } else if is_package_ignored(dep_name, &ignored_packages(&self.config)) {
-            // Never looked up: the hover shows what the caches already hold
-            let ecosystem = file_type.to_ecosystem();
-            let cache_key = dep_cache_key(&dep, file_type, &configured_registries(&self.config));
-            let cached = cached_version_info(
-                &self.version_cache,
-                &cache_key,
-                &self.vuln_cache,
-                ecosystem,
-                &dep,
+            // Never looked up, so registry data cached before the package was ignored can
+            // no longer be refreshed, and may describe a public package of the same name
+            format_ignored_hover_content(
+                dep_name,
+                &osv_vulnerabilities(&self.vuln_cache, file_type.to_ecosystem(), &dep),
+                &doc_transitive_vulns,
             )
-            .await;
-            match cached {
-                Some(info) => format_hover_content(&dep, file_type, &info, &doc_transitive_vulns),
-                None => format_ignored_hover_content(
-                    dep_name,
-                    &osv_vulnerabilities(&self.vuln_cache, ecosystem, &dep),
-                    &doc_transitive_vulns,
-                ),
-            }
         } else {
             // Get version info
             let registry_name =
@@ -2181,11 +2170,7 @@ impl LanguageServer for DepsyBackend {
             (file_type, dependencies, cache_key_map)
         };
 
-        let ignored_packages = self
-            .config
-            .read()
-            .map(|c| c.ignore.clone())
-            .unwrap_or_default();
+        let ignored_packages = ignored_packages(&self.config);
 
         // Detect workspace root + read .zed/settings.json (best-effort).
         // If anything fails, the Ignore action will be omitted but Update actions still work.
@@ -3667,32 +3652,59 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn hover_on_an_ignored_package_shows_the_cached_data() {
-        // Given an ignored package whose registry data is already cached, past its TTL
+    async fn hover_on_an_ignored_package_hides_its_cached_registry_data() {
+        // Given an ignored package whose registry data was cached before it was ignored
         let registry = registry_publishing_everything().await;
         let (service, _socket) = tower_lsp::LspService::new(DepsyBackend::in_memory);
         let backend = service.inner();
         use_npm_registry(backend, &registry).await;
         backend.config.write().unwrap().ignore = vec!["lodash".to_string()];
         let cached = VersionInfo {
+            description: Some("public package of the same name".to_string()),
             latest: Some("4.17.21".to_string()),
             ..Default::default()
         };
         backend
             .version_cache
-            .insert_many(vec![(
-                FileType::Npm.cache_key("lodash"),
-                cached,
-                std::time::Instant::now() - backend.version_cache.ttl() - Duration::from_secs(1),
-            )])
+            .insert(FileType::Npm.cache_key("lodash"), cached)
             .await;
 
         // When its version is hovered
         let markdown =
             hover_markdown(backend, make_dep("lodash", "4.17.20", None), Vec::new()).await;
 
-        // Then the hover shows the cached data, and the registry was never asked
-        assert!(markdown.contains("**Latest:** 4.17.21"), "{markdown}");
+        // Then the hover says it is ignored instead of showing data that can no longer be
+        // refreshed, and the registry was never asked
+        assert_eq!(
+            markdown,
+            "## lodash\n\nIgnored by the `ignore` setting: not looked up on the registry."
+        );
+        let requests = registry.received_requests().await.unwrap_or_default();
+        assert!(requests.is_empty(), "unexpected lookups: {requests:?}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn hover_on_an_ignored_npm_alias_shows_the_ignored_notice() {
+        // Given an ignored npm alias, with nothing cached
+        let registry = registry_publishing_everything().await;
+        let (service, _socket) = tower_lsp::LspService::new(DepsyBackend::in_memory);
+        let backend = service.inner();
+        use_npm_registry(backend, &registry).await;
+        backend.config.write().unwrap().ignore = vec!["my-lodash".to_string()];
+
+        // When its version is hovered
+        let markdown = hover_markdown(
+            backend,
+            make_dep("my-lodash", "npm:lodash@4.17.21", None),
+            Vec::new(),
+        )
+        .await;
+
+        // Then the hover says it is ignored, and the registry was never asked
+        assert_eq!(
+            markdown,
+            "## my-lodash\n\nIgnored by the `ignore` setting: not looked up on the registry."
+        );
         let requests = registry.received_requests().await.unwrap_or_default();
         assert!(requests.is_empty(), "unexpected lookups: {requests:?}");
     }
@@ -3732,6 +3744,98 @@ mod tests {
         // Then the advisory is reported: ignoring a package does not hide what OSV found
         assert_eq!(report["summary"]["total"], 1, "{report}");
         assert_eq!(report["vulnerabilities"][0]["id"], "CVE-1", "{report}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn vulnerability_report_lists_a_package_without_registry_data() {
+        use crate::vulnerabilities::osv::QueryResult;
+
+        // Given an open manifest whose package OSV flagged, and whose registry lookup failed
+        let (service, _socket) = tower_lsp::LspService::new(DepsyBackend::in_memory);
+        let backend = service.inner();
+        let dep = make_dep("lodash", "4.17.20", None);
+        backend.vuln_cache.insert(
+            VulnCacheKey::for_dependency(FileType::Npm.to_ecosystem(), &dep),
+            QueryResult {
+                vulnerabilities: vec![advisory("CVE-1")],
+                deprecated: false,
+            },
+        );
+        let uri = Url::parse("file:///report/package.json").unwrap();
+        backend.documents.insert(
+            uri.clone(),
+            DocumentState {
+                dependencies: vec![dep],
+                file_type: FileType::Npm,
+                lockfile_graph: None,
+                transitive_vulns_by_direct: hashbrown::HashMap::new(),
+            },
+        );
+
+        // When the vulnerability report is generated
+        let report = backend
+            .generate_vulnerability_report(&[serde_json::json!({ "uri": uri.as_str() })])
+            .await;
+
+        // Then the advisory is reported: the report does not depend on the registry
+        assert_eq!(report["summary"]["total"], 1, "{report}");
+        assert_eq!(report["vulnerabilities"][0]["id"], "CVE-1", "{report}");
+    }
+
+    /// Poisons the configuration lock, as a panic while it is held for writing would.
+    pub(super) fn poison_config(backend: &DepsyBackend) {
+        let config = Arc::clone(&backend.config);
+        let poisoner = std::thread::spawn(move || {
+            let _guard = config.write().unwrap();
+            panic!("poisoning the configuration lock");
+        });
+        assert!(poisoner.join().is_err());
+        assert!(backend.config.is_poisoned());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn code_actions_keep_the_ignore_list_when_the_config_lock_is_poisoned() {
+        // Given an outdated ignored package, and a poisoned configuration lock
+        let (service, _socket) = tower_lsp::LspService::new(DepsyBackend::in_memory);
+        let backend = service.inner();
+        backend.config.write().unwrap().ignore = vec!["lodash".to_string()];
+        backend
+            .version_cache
+            .insert(
+                FileType::Npm.cache_key("lodash"),
+                VersionInfo {
+                    latest: Some("4.17.21".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await;
+        let uri = Url::parse("file:///actions/package.json").unwrap();
+        backend.documents.insert(
+            uri.clone(),
+            DocumentState {
+                dependencies: vec![make_dep("lodash", "4.17.20", None)],
+                file_type: FileType::Npm,
+                lockfile_graph: None,
+                transitive_vulns_by_direct: hashbrown::HashMap::new(),
+            },
+        );
+        poison_config(backend);
+
+        // When the code actions of its line are requested
+        let actions = backend
+            .code_action(CodeActionParams {
+                text_document: TextDocumentIdentifier { uri },
+                range: Range::new(Position::new(0, 0), Position::new(1, 0)),
+                context: CodeActionContext::default(),
+                work_done_progress_params: WorkDoneProgressParams::default(),
+                partial_result_params: PartialResultParams::default(),
+            })
+            .await
+            .unwrap()
+            .unwrap_or_default();
+
+        // Then it still gets no update action, as with a healthy lock
+        assert!(actions.is_empty(), "{actions:?}");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

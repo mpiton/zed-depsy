@@ -344,7 +344,7 @@ mod tests {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    use super::super::tests::{make_dep, use_npm_registry};
+    use super::super::tests::{make_dep, poison_config, use_npm_registry};
     use super::*;
     use crate::cache::WriteCache;
     use crate::document::DocumentState;
@@ -772,6 +772,36 @@ mod tests {
         let published = next_message(&mut observed, "textDocument/publishDiagnostics").await;
         assert_eq!(published["uri"], uri.as_str());
         next_message(&mut observed, "workspace/inlayHint/refresh").await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn diagnostics_keep_the_ignore_list_when_the_config_lock_is_poisoned() {
+        // Given an outdated ignored package, and a poisoned configuration lock
+        let (service, mut observed) = observed_service().await;
+        let backend = service.inner();
+        backend.config.write().unwrap().ignore = vec!["lodash".to_string()];
+        backend
+            .version_cache
+            .insert(
+                FileType::Npm.cache_key("lodash"),
+                VersionInfo {
+                    latest: Some("2.0.0".to_string()),
+                    ..VersionInfo::default()
+                },
+            )
+            .await;
+        let uri = manifest_uri("poisoned");
+        open_document(backend, &uri, vec![make_dep("lodash", "1.0.0", None)]);
+        let ctx = backend.create_processing_context().await;
+        poison_config(backend);
+
+        // When the diagnostics are published
+        ctx.publish_diagnostics(&uri).await;
+
+        // Then the ignored package still gets none, as with a healthy lock
+        let published = next_message(&mut observed, "textDocument/publishDiagnostics").await;
+        assert_eq!(published["uri"], uri.as_str());
+        assert_eq!(published["diagnostics"], json!([]), "{published}");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

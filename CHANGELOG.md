@@ -14,8 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ([#439](https://github.com/mpiton/zed-depsy/issues/439)). A private crate
   such as `my-private-crate = { version = "*", path = "../my-private-crate" }`
   no longer logs `Failed to fetch version info ... 404 Not Found` once it is
-  ignored. The hover of an ignored package shows the registry data already
-  cached, or says it is ignored, and keeps the advisories OSV reports for it.
+  ignored. The hover of an ignored package says it is ignored, without the
+  registry data cached before, and keeps the advisories OSV reports for it.
 - The vulnerability report reads the OSV results of every dependency instead
   of requiring registry data, so it keeps listing the advisories of ignored
   packages, and of packages whose registry lookup failed.

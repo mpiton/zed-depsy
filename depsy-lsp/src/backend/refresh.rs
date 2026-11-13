@@ -22,7 +22,7 @@ use tower_lsp::lsp_types::{Url, request};
 
 use super::{
     DepsyBackend, FETCH_CONCURRENCY, FetchTarget, ProcessingContext, VulnBgContext,
-    configured_registries, dep_cache_key,
+    configured_registries, dep_cache_key, ignored_packages,
 };
 use crate::cache::ReadCache;
 use crate::config::is_package_ignored;
@@ -103,12 +103,7 @@ impl ProcessingContext {
     /// Local dependencies, npm aliases of another package and ignored
     /// dependencies are left out.
     fn collect_refresh_targets(&self) -> HashMap<String, RefreshTarget> {
-        let ignored = self
-            .config
-            .read()
-            .map(|c| c.ignore.clone())
-            .unwrap_or_default();
-
+        let ignored = ignored_packages(&self.config);
         let registries = configured_registries(&self.config);
         let mut targets: HashMap<String, RefreshTarget> = HashMap::new();
         for doc in self.documents.iter() {

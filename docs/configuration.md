@@ -194,6 +194,8 @@ Allowed packages are still checked for new versions and for vulnerabilities. Pat
 |--------|------|---------|-------------|
 | `ignore` | string[] | `[]` | Package names or glob patterns to ignore |
 
+Ignored packages are never looked up on their registry and get no inlay hint or diagnostic; their names are still sent to OSV.dev for the vulnerability check, and their hover lists what OSV found.
+
 **Example:**
 ```json
 {

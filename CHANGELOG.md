@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Packages listed in `ignore` are no longer looked up on their registry when a
+  manifest is opened or edited, or when one is hovered
+  ([#439](https://github.com/mpiton/zed-depsy/issues/439)). A private crate
+  such as `my-private-crate = { version = "*", path = "../my-private-crate" }`
+  no longer logs `Failed to fetch version info ... 404 Not Found` once it is
+  ignored. The hover of an ignored package shows the registry data already
+  cached, or says it is ignored, and keeps the advisories OSV reports for it.
+- The vulnerability report reads the OSV results of every dependency instead
+  of requiring registry data, so it keeps listing the advisories of ignored
+  packages, and of packages whose registry lookup failed.
+
 ## [2.2.0] - 2026-11-12
 
 ### Added

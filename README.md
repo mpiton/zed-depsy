@@ -812,6 +812,8 @@ Use the `ignore` setting with glob patterns:
 }
 ```
 
+Ignored packages are never looked up on their registry and get no inlay hint or diagnostic; their names are still sent to OSV.dev for the vulnerability check, and their hover lists what OSV found.
+
 ### Why do some packages show "? Unknown"?
 
 This can happen when:

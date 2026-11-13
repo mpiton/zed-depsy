@@ -125,7 +125,7 @@ sequenceDiagram
     Pa-->>P: Vec<Dependency>
     P->>L: resolve_versions_from_lockfile(deps)
     L-->>P: Arc<LockfileGraph>
-    loop for each dep
+    loop for each dep not matching ignore
         P->>C: get(key)
         alt cache miss
             P->>R: get_version_info(name)

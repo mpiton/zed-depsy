@@ -2026,22 +2026,13 @@ impl LanguageServer for DepsyBackend {
             .into_iter()
             .zip(version_infos)
             .filter_map(|(dep, version_info)| {
-                let hint =
-                    create_inlay_hint(&dep, version_info.as_ref(), file_type, deprecated.hints());
-
-                // Optionally filter out up-to-date hints
-                if !show_up_to_date {
-                    let label_text = match &hint.label {
-                        InlayHintLabel::String(s) => s.clone(),
-                        InlayHintLabel::LabelParts(parts) => {
-                            parts.iter().map(|p| p.value.as_str()).collect()
-                        }
-                    };
-                    if label_text.contains("[OK]") {
-                        return None;
-                    }
-                }
-                Some(hint)
+                create_inlay_hint(
+                    &dep,
+                    version_info.as_ref(),
+                    file_type,
+                    deprecated.hints(),
+                    show_up_to_date,
+                )
             })
             .collect();
 
@@ -4441,5 +4432,124 @@ mod tests {
                 .await
                 .is_none()
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn inlay_hints_hide_up_to_date_packages_when_show_up_to_date_is_false() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let registry = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/lodash"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "dist-tags": { "latest": "4.17.21" },
+                "versions": { "4.17.21": {} }
+            })))
+            .mount(&registry)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/axios"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "dist-tags": { "latest": "1.7.0" },
+                "versions": { "1.6.0": {}, "1.7.0": {} }
+            })))
+            .mount(&registry)
+            .await;
+
+        let (service, _socket) = tower_lsp::LspService::new(DepsyBackend::in_memory);
+        let backend = service.inner();
+
+        backend
+            .initialize(InitializeParams {
+                initialization_options: Some(serde_json::json!({
+                    "inlay_hints": { "show_up_to_date": false },
+                    "advisory_cache": { "enabled": false },
+                    "security": { "enabled": false }
+                })),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        use_npm_registry(backend, &registry).await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let uri = Url::from_file_path(dir.path().join("package.json")).unwrap();
+        let manifest = r#"{
+  "dependencies": {
+    "lodash": "4.17.21",
+    "axios": "1.6.0"
+  }
+}"#;
+        backend
+            .create_processing_context()
+            .await
+            .process_document(&uri, manifest)
+            .await;
+
+        let hints = backend
+            .inlay_hint(InlayHintParams {
+                text_document: TextDocumentIdentifier { uri },
+                range: Range::new(Position::new(0, 0), Position::new(10, 0)),
+                work_done_progress_params: Default::default(),
+            })
+            .await
+            .unwrap()
+            .unwrap_or_default();
+
+        fn hint_label(hint: &InlayHint) -> &str {
+            match &hint.label {
+                InlayHintLabel::String(s) => s.as_str(),
+                other => panic!("expected string label, got: {other:?}"),
+            }
+        }
+
+        assert_eq!(
+            hints.len(),
+            1,
+            "expected only the outdated dependency hint, got: {hints:?}"
+        );
+        assert_eq!(hints[0].position.line, 3);
+        assert_eq!(hint_label(&hints[0]), " -> 1.7.0");
+
+        // Default configuration (show_up_to_date omitted -> true) keeps both hints
+        let (default_service, _default_socket) =
+            tower_lsp::LspService::new(DepsyBackend::in_memory);
+        let default_backend = default_service.inner();
+        default_backend
+            .initialize(InitializeParams {
+                initialization_options: Some(serde_json::json!({
+                    "advisory_cache": { "enabled": false },
+                    "security": { "enabled": false }
+                })),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        use_npm_registry(default_backend, &registry).await;
+
+        let default_uri = Url::from_file_path(dir.path().join("package.json")).unwrap();
+        default_backend
+            .create_processing_context()
+            .await
+            .process_document(&default_uri, manifest)
+            .await;
+
+        let mut default_hints = default_backend
+            .inlay_hint(InlayHintParams {
+                text_document: TextDocumentIdentifier { uri: default_uri },
+                range: Range::new(Position::new(0, 0), Position::new(10, 0)),
+                work_done_progress_params: Default::default(),
+            })
+            .await
+            .unwrap()
+            .unwrap_or_default();
+        default_hints.sort_by_key(|h| h.position.line);
+
+        assert_eq!(default_hints.len(), 2, "{default_hints:?}");
+        assert_eq!(default_hints[0].position.line, 2);
+        assert_eq!(hint_label(&default_hints[0]), " ✓");
+        assert_eq!(default_hints[1].position.line, 3);
+        assert_eq!(hint_label(&default_hints[1]), " -> 1.7.0");
     }
 }

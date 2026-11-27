@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Setting `inlay_hints.show_up_to_date` to `false` now hides the `✓` inlay hint
+  for up-to-date dependencies
+  ([#444](https://github.com/mpiton/zed-depsy/issues/444)). Up-to-date packages
+  that still require attention (yanked, deprecated, or vulnerable) keep their
+  inlay hints.
 - Packages listed in `ignore` are no longer looked up on their registry when a
   manifest is opened or edited, or when one is hovered
   ([#439](https://github.com/mpiton/zed-depsy/issues/439)). A private crate
@@ -20,6 +25,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The vulnerability report reads the OSV results of every dependency instead
   of requiring registry data, so it keeps listing the advisories of ignored
   packages, and of packages whose registry lookup failed.
+
+### Security
+
+- Updated `url` from 2.5.8 to 2.5.9 (and `form_urlencoded` from 1.2.2 to 1.2.3)
+  in the `depsy-lsp`, `depsy-zed`, and `depsy-lsp/fuzz` lockfiles to fix
+  RUSTSEC-2026-0592 (stack overflow in `Url::origin()` on nested `blob:` URLs).
 
 ## [2.2.0] - 2026-11-12
 

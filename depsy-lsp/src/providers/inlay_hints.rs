@@ -54,12 +54,17 @@ pub enum VersionStatus {
 /// docs](self).  A tooltip string is attached when additional context is
 /// available (vulnerability details, deprecation reasons, etc.).
 ///
+/// Returns `None` when `show_up_to_date` is `false` and the dependency is
+/// cleanly up to date. Dependencies on the latest version that still require
+/// attention (yanked, deprecated, or vulnerable) are always returned.
+///
 /// # Parameters
 ///
 /// - `dep` — parsed dependency; its `version_span` determines hint placement.
 /// - `version_info` — cached registry metadata, or `None` when unavailable.
 /// - `file_type` — used to format registry URLs inside tooltips.
 /// - `deprecated` — packages whose deprecation is not shown.
+/// - `show_up_to_date` — whether to emit hints for cleanly up-to-date packages.
 ///
 /// # Examples
 ///
@@ -81,7 +86,7 @@ pub enum VersionStatus {
 ///     catalog_spec: None,
 /// };
 /// let info = VersionInfo { latest: Some("1.0.0".to_string()), ..Default::default() };
-/// let hint = create_inlay_hint(&dep, Some(&info), FileType::Cargo, DeprecatedFilter::default());
+/// let hint = create_inlay_hint(&dep, Some(&info), FileType::Cargo, DeprecatedFilter::default(), true).unwrap();
 /// assert_eq!(hint.position.line, 5);
 /// assert!(matches!(hint.label, InlayHintLabel::String(ref s) if s.contains("✓")));
 /// ```
@@ -90,7 +95,8 @@ pub fn create_inlay_hint(
     version_info: Option<&VersionInfo>,
     file_type: FileType,
     deprecated: DeprecatedFilter<'_>,
-) -> InlayHint {
+    show_up_to_date: bool,
+) -> Option<InlayHint> {
     let status = match version_info {
         Some(info) => compare_versions(dep.effective_version(), info),
         None => VersionStatus::Unknown,
@@ -126,9 +132,10 @@ pub fn create_inlay_hint(
         dep,
         version_info,
         file_type,
-    );
+        show_up_to_date,
+    )?;
 
-    InlayHint {
+    Some(InlayHint {
         position: Position {
             line: dep.version_span.line,
             character: dep.version_span.line_end + 1,
@@ -140,7 +147,7 @@ pub fn create_inlay_hint(
         padding_left: Some(true),
         padding_right: None,
         data: None,
-    }
+    })
 }
 
 /// Create label and tooltip based on version status and vulnerabilities
@@ -151,7 +158,8 @@ fn create_hint_label_and_tooltip(
     dep: &Dependency,
     version_info: Option<&VersionInfo>,
     file_type: FileType,
-) -> (String, Option<String>) {
+    show_up_to_date: bool,
+) -> Option<(String, Option<String>)> {
     let dep_name = &*dep.name;
 
     // An npm alias of another package keeps the local hint unless OSV has
@@ -168,7 +176,7 @@ fn create_hint_label_and_tooltip(
             Version info is not shown for aliases. Vulnerabilities and \
             deprecations reported for \"{package}\" still are.",
         );
-        return ("→ Local".to_string(), Some(tooltip));
+        return Some(("→ Local".to_string(), Some(tooltip)));
     }
 
     // Handle local dependencies first (highest priority - no registry lookup needed)
@@ -183,7 +191,7 @@ fn create_hint_label_and_tooltip(
             • git = \"git@...\"\n\
             • github:owner/repo",
         );
-        return ("→ Local".to_string(), Some(tooltip));
+        return Some(("→ Local".to_string(), Some(tooltip)));
     }
 
     let dep_version = dep.effective_version();
@@ -196,7 +204,7 @@ fn create_hint_label_and_tooltip(
         let yanked_label = "⊘ Yanked";
         let yanked_tooltip = fmt_yanked_tooltip(dep, info, file_type);
 
-        return match status {
+        return Some(match status {
             VersionStatus::UpdateAvailable(latest) => {
                 let label = format!("{yanked_label} -> {latest}");
                 let tooltip = format!(
@@ -205,7 +213,7 @@ fn create_hint_label_and_tooltip(
                 (label, Some(tooltip))
             }
             _ => (yanked_label.to_string(), Some(yanked_tooltip.to_string())),
-        };
+        });
     }
 
     // Handle deprecation (second highest priority)
@@ -217,7 +225,7 @@ fn create_hint_label_and_tooltip(
         let dep_tooltip = fmt_deprecation_tooltip(package, info);
 
         // Combine with update info if available
-        return match status {
+        return Some(match status {
             VersionStatus::UpdateAvailable(latest) => {
                 let label = format!("{dep_label} -> {latest}");
                 let tooltip = format!(
@@ -226,7 +234,7 @@ fn create_hint_label_and_tooltip(
                 (label, Some(tooltip))
             }
             _ => (dep_label.to_string(), Some(dep_tooltip.to_string())),
-        };
+        });
     }
 
     // Handle vulnerabilities
@@ -242,7 +250,7 @@ fn create_hint_label_and_tooltip(
         let vuln_tooltip = fmt_vulnerability_tooltip(vulnerabilities);
 
         // Combine with update info if available
-        return match status {
+        return Some(match status {
             VersionStatus::UpdateAvailable(latest) => {
                 let label = format!("{vuln_label} -> {latest}");
                 let tooltip = format!(
@@ -251,16 +259,17 @@ fn create_hint_label_and_tooltip(
                 (label, Some(tooltip))
             }
             _ => (vuln_label.to_string(), Some(vuln_tooltip.to_string())),
-        };
+        });
     }
 
     // No vulnerabilities - show version status
     match status {
-        VersionStatus::UpToDate => ("✓".to_string(), Some("Up to date".to_string())),
+        VersionStatus::UpToDate if !show_up_to_date => None,
+        VersionStatus::UpToDate => Some(("✓".to_string(), Some("Up to date".to_string()))),
         VersionStatus::UpdateAvailable(latest) => {
             let label = format!("-> {latest}");
             let tooltip = format!("Update available: {dep_version} -> {latest}");
-            (label, Some(tooltip))
+            Some((label, Some(tooltip)))
         }
         VersionStatus::Unknown => {
             let tooltip = format!(
@@ -276,7 +285,7 @@ fn create_hint_label_and_tooltip(
                 3. Search for the package on the registry\n\
                 4. If recently published, wait a few minutes for indexing",
             );
-            ("? Unknown".to_string(), Some(tooltip))
+            Some(("? Unknown".to_string(), Some(tooltip)))
         }
     }
 }
@@ -764,6 +773,16 @@ mod tests {
             latest: Some(latest.to_string()),
             ..Default::default()
         }
+    }
+
+    fn create_inlay_hint(
+        dep: &Dependency,
+        version_info: Option<&VersionInfo>,
+        file_type: FileType,
+        deprecated: DeprecatedFilter<'_>,
+    ) -> InlayHint {
+        super::create_inlay_hint(dep, version_info, file_type, deprecated, true)
+            .expect("show_up_to_date = true always produces a hint")
     }
 
     fn make_test_dep(name: &str, version: &str) -> Dependency {
@@ -2046,5 +2065,160 @@ mod tests {
         };
 
         assert_eq!(deprecated_crate_hint(vec![unmaintained], &deprecated), "✓");
+    }
+
+    #[test]
+    fn show_up_to_date_false_hides_only_clean_up_to_date_hints() {
+        let up_to_date = make_test_dep("serde", "1.0.200");
+        let up_to_date_info = VersionInfo {
+            latest: Some("1.0.200".to_string()),
+            ..Default::default()
+        };
+
+        assert!(
+            super::create_inlay_hint(
+                &up_to_date,
+                Some(&up_to_date_info),
+                FileType::Cargo,
+                DeprecatedFilter::default(),
+                false,
+            )
+            .is_none()
+        );
+        assert_eq!(
+            label_of(
+                super::create_inlay_hint(
+                    &up_to_date,
+                    Some(&up_to_date_info),
+                    FileType::Cargo,
+                    DeprecatedFilter::default(),
+                    true,
+                )
+                .unwrap()
+            ),
+            "✓"
+        );
+
+        // Outdated hint is kept
+        let outdated = make_test_dep("serde", "1.0.100");
+        assert_eq!(
+            label_of(
+                super::create_inlay_hint(
+                    &outdated,
+                    Some(&up_to_date_info),
+                    FileType::Cargo,
+                    DeprecatedFilter::default(),
+                    false,
+                )
+                .unwrap()
+            ),
+            "-> 1.0.200"
+        );
+
+        // Unknown hint is kept
+        assert_eq!(
+            label_of(
+                super::create_inlay_hint(
+                    &up_to_date,
+                    None,
+                    FileType::Cargo,
+                    DeprecatedFilter::default(),
+                    false,
+                )
+                .unwrap()
+            ),
+            "? Unknown"
+        );
+
+        // Local dependency hint is kept
+        let local = make_test_dep("my-crate", "../my-crate");
+        assert_eq!(
+            label_of(
+                super::create_inlay_hint(
+                    &local,
+                    None,
+                    FileType::Cargo,
+                    DeprecatedFilter::default(),
+                    false,
+                )
+                .unwrap()
+            ),
+            "→ Local"
+        );
+    }
+
+    #[test]
+    fn show_up_to_date_false_keeps_attention_hints_on_latest_version() {
+        let dep = make_test_dep("fxhash", "0.2.1");
+
+        // Latest version with a vulnerability
+        let vulnerable_info = VersionInfo {
+            latest: Some("0.2.1".to_string()),
+            vulnerabilities: vec![Vulnerability {
+                id: "CVE-2026-0001".to_string(),
+                severity: VulnerabilitySeverity::High,
+                description: "Memory corruption".to_string(),
+                url: None,
+                unmaintained: false,
+            }],
+            ..Default::default()
+        };
+        let vuln_hint = super::create_inlay_hint(
+            &dep,
+            Some(&vulnerable_info),
+            FileType::Cargo,
+            DeprecatedFilter::default(),
+            false,
+        )
+        .expect("vulnerable package on latest version must stay visible");
+        assert_eq!(label_of(vuln_hint), "⚠ 1 vuln");
+
+        // Latest version that is yanked
+        let yanked_info = VersionInfo {
+            latest: Some("0.2.1".to_string()),
+            yanked_versions: vec!["0.2.1".to_string()],
+            ..Default::default()
+        };
+        let yanked_hint = super::create_inlay_hint(
+            &dep,
+            Some(&yanked_info),
+            FileType::Cargo,
+            DeprecatedFilter::default(),
+            false,
+        )
+        .expect("yanked package on latest version must stay visible");
+        assert_eq!(label_of(yanked_hint), "⊘ Yanked");
+
+        // Latest version that is deprecated
+        let deprecated_info = VersionInfo {
+            latest: Some("0.2.1".to_string()),
+            deprecated: true,
+            ..Default::default()
+        };
+        let deprecated_hint = super::create_inlay_hint(
+            &dep,
+            Some(&deprecated_info),
+            FileType::Cargo,
+            DeprecatedFilter::default(),
+            false,
+        )
+        .expect("deprecated package on latest version must stay visible");
+        assert_eq!(label_of(deprecated_hint), "⚠ Deprecated");
+
+        // Once the deprecation is hidden, the fallback up-to-date hint is hidden too
+        let hidden_deprecated = DeprecatedConfig {
+            show_in_hints: false,
+            ..Default::default()
+        };
+        assert!(
+            super::create_inlay_hint(
+                &dep,
+                Some(&deprecated_info),
+                FileType::Cargo,
+                hidden_deprecated.hints(),
+                false,
+            )
+            .is_none()
+        );
     }
 }

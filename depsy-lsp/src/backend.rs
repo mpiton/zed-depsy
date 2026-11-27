@@ -74,7 +74,7 @@ use crate::providers::code_actions::create_code_actions;
 use crate::providers::completion::{fmt_release_age, get_completions};
 use crate::providers::diagnostics::{PackageFilters, VulnSources, create_diagnostics};
 use crate::providers::document_links::create_document_links;
-use crate::providers::inlay_hints::{create_inlay_hint, is_local_dependency};
+use crate::providers::inlay_hints::{create_visible_inlay_hint, is_local_dependency};
 use crate::registries::cargo_sparse::CargoSparseRegistry;
 use crate::registries::crates_io::CratesIoRegistry;
 use crate::registries::go_proxy::GoProxyRegistry;
@@ -2026,22 +2026,13 @@ impl LanguageServer for DepsyBackend {
             .into_iter()
             .zip(version_infos)
             .filter_map(|(dep, version_info)| {
-                let hint =
-                    create_inlay_hint(&dep, version_info.as_ref(), file_type, deprecated.hints());
-
-                // Optionally filter out up-to-date hints
-                if !show_up_to_date {
-                    let label_text = match &hint.label {
-                        InlayHintLabel::String(s) => s.clone(),
-                        InlayHintLabel::LabelParts(parts) => {
-                            parts.iter().map(|p| p.value.as_str()).collect()
-                        }
-                    };
-                    if label_text.contains("[OK]") {
-                        return None;
-                    }
-                }
-                Some(hint)
+                create_visible_inlay_hint(
+                    &dep,
+                    version_info.as_ref(),
+                    file_type,
+                    deprecated.hints(),
+                    show_up_to_date,
+                )
             })
             .collect();
 
@@ -4441,5 +4432,76 @@ mod tests {
                 .await
                 .is_none()
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn inlay_hints_hide_up_to_date_packages_when_show_up_to_date_is_false() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let registry = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/lodash"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "dist-tags": { "latest": "4.17.21" },
+                "versions": { "4.17.21": {} }
+            })))
+            .mount(&registry)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/axios"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "dist-tags": { "latest": "1.7.0" },
+                "versions": { "1.6.0": {}, "1.7.0": {} }
+            })))
+            .mount(&registry)
+            .await;
+
+        let (service, _socket) = tower_lsp::LspService::new(DepsyBackend::in_memory);
+        let backend = service.inner();
+
+        backend
+            .initialize(InitializeParams {
+                initialization_options: Some(serde_json::json!({
+                    "inlay_hints": { "show_up_to_date": false },
+                    "advisory_cache": { "enabled": false },
+                    "security": { "enabled": false }
+                })),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        use_npm_registry(backend, &registry).await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let uri = Url::from_file_path(dir.path().join("package.json")).unwrap();
+        let manifest = r#"{
+  "dependencies": {
+    "lodash": "4.17.21",
+    "axios": "1.6.0"
+  }
+}"#;
+        backend
+            .create_processing_context()
+            .await
+            .process_document(&uri, manifest)
+            .await;
+
+        let hints = backend
+            .inlay_hint(InlayHintParams {
+                text_document: TextDocumentIdentifier { uri },
+                range: Range::new(Position::new(0, 0), Position::new(10, 0)),
+                work_done_progress_params: Default::default(),
+            })
+            .await
+            .unwrap()
+            .unwrap_or_default();
+
+        assert_eq!(
+            hints.len(),
+            1,
+            "expected only the outdated dependency hint, got: {hints:?}"
+        );
+        assert_eq!(hints[0].position.line, 3);
     }
 }

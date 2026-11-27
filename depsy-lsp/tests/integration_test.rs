@@ -201,7 +201,9 @@ fn test_inlay_hint_generation() {
         Some(&info_up_to_date),
         FileType::Cargo,
         DeprecatedFilter::default(),
-    );
+        true,
+    )
+    .unwrap();
     match hint.label {
         tower_lsp::lsp_types::InlayHintLabel::String(s) => {
             assert!(s.contains("✓"), "Expected checkmark for up-to-date dep");
@@ -241,7 +243,9 @@ fn test_inlay_hint_generation() {
         Some(&info_outdated),
         FileType::Cargo,
         DeprecatedFilter::default(),
-    );
+        true,
+    )
+    .unwrap();
     match hint.label {
         tower_lsp::lsp_types::InlayHintLabel::String(s) => {
             assert!(s.contains("->"), "Expected arrow for outdated dep");
@@ -256,7 +260,9 @@ fn test_inlay_hint_generation() {
         None,
         FileType::Cargo,
         DeprecatedFilter::default(),
-    );
+        true,
+    )
+    .unwrap();
     match hint.label {
         tower_lsp::lsp_types::InlayHintLabel::String(s) => {
             assert!(

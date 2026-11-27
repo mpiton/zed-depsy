@@ -26,6 +26,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of requiring registry data, so it keeps listing the advisories of ignored
   packages, and of packages whose registry lookup failed.
 
+### Security
+
+- Updated `url` from 2.5.8 to 2.5.9 (and `form_urlencoded` from 1.2.2 to 1.2.3)
+  in the `depsy-lsp`, `depsy-zed`, and `depsy-lsp/fuzz` lockfiles to fix
+  RUSTSEC-2026-0592 (stack overflow in `Url::origin()` on nested `blob:` URLs).
+
 ## [2.2.0] - 2026-11-12
 
 ### Added
